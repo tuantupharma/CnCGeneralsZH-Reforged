@@ -1,0 +1,55 @@
+name: Build Zero Hour Reforged (Linux)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake ninja-build g++ git curl unzip xz-utils \
+            make pkg-config python3 \
+            libx11-dev libxext-dev libxcursor-dev libxi-dev \
+            libxfixes-dev libxrandr-dev libxss-dev libxtst-dev \
+            libwayland-dev libxkbcommon-dev wayland-protocols \
+            libegl-dev libdrm-dev libgbm-dev libvulkan-dev
+
+      - name: Build Release
+        run: |
+          chmod +x build-linux.sh
+          ./build-linux.sh Release
+
+      - name: Show build output
+        if: success()
+        run: |
+          find build-linux -type f -executable
+          du -sh build-linux
+
+      - name: Package build
+        if: success()
+        run: |
+          tar -czf zero-hour-reforged-linux.tar.gz build-linux
+
+      - name: Upload artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zero-hour-reforged-linux
+          path: zero-hour-reforged-linux.tar.gz
+          retention-days: 7
