@@ -56,6 +56,7 @@
 
 #include <algorithm>
 #include <map>
+#include <set>
 #include <vector>
 
 // ------------------------------------------------------------------------------------------------
@@ -65,6 +66,16 @@
 static const Int SCENARIO_MAX_TOKENS = 10;
 static const char SCENARIO_COMMENT_CHAR = '#';
 static const char *SCENARIO_SELECTOR_ALL = "*";
+
+/// a target seat written "civilian": the map's own buildings, which no -side seat owns. The match
+/// nearest the ordered group is taken, since a map has many of each (Fallen Empire's wall towers).
+static const char *SCENARIO_CIVILIAN_TOKEN = "civilian";
+static const Int SCENARIO_CIVILIAN_SLOT = -1;
+
+/// every object a civilian-seat lookup has seen owned by the map (the neutral or the civilian
+/// player): a garrisoned building changes hands to its occupants, so "owned by the map now" would
+/// lose a wall tower the moment it fills
+static std::set<ObjectID> theCivilianObjects;
 
 /// how far apart spawned units stand, when the line does not say
 static const Real SCENARIO_DEFAULT_SPACING = 30.0f;
@@ -216,6 +227,8 @@ static Bool parseActionType( const AsciiString &token, ScenarioActionType *actio
 		*action = SCENARIO_ACTION_STANCE;
 	else if (token == "forceattack")
 		*action = SCENARIO_ACTION_FORCEATTACK;
+	else if (token == "clickenter")
+		*action = SCENARIO_ACTION_CLICKENTER;
 	else if (token == "weaponat")
 		*action = SCENARIO_ACTION_WEAPONAT;
 	else if (token == "forceground")
@@ -226,6 +239,8 @@ static Bool parseActionType( const AsciiString &token, ScenarioActionType *actio
 		*action = SCENARIO_ACTION_RESPOND;
 	else if (token == "guard")
 		*action = SCENARIO_ACTION_GUARD;
+	else if (token == "repeat")
+		*action = SCENARIO_ACTION_REPEAT;
 	else
 		return FALSE;
 
@@ -315,6 +330,7 @@ static Int tokensNeededFor( ScenarioActionType action )
 		case SCENARIO_ACTION_STANCE:			return SCENARIO_TOKENS_STANCE;
 		case SCENARIO_ACTION_SHIFTATTACK:	return SCENARIO_TOKENS_ATTACK;
 		case SCENARIO_ACTION_FORCEATTACK:	return SCENARIO_TOKENS_ATTACK;
+		case SCENARIO_ACTION_CLICKENTER:	return SCENARIO_TOKENS_ATTACK;
 		case SCENARIO_ACTION_SHIFTPOWER:	return SCENARIO_TOKENS_SHIFTPOWER;
 		case SCENARIO_ACTION_SHIFTUPGRADE:	return SCENARIO_TOKENS_SHIFTUPGRADE;
 		case SCENARIO_ACTION_ATTACK:			return SCENARIO_TOKENS_ATTACK;
@@ -322,6 +338,7 @@ static Int tokensNeededFor( ScenarioActionType action )
 		case SCENARIO_ACTION_DOCK:				return SCENARIO_TOKENS_ATTACK;
 		case SCENARIO_ACTION_GUARD:				return SCENARIO_TOKENS_ATTACK;
 		case SCENARIO_ACTION_PRODUCE:			return SCENARIO_TOKENS_ATTACK;
+		case SCENARIO_ACTION_REPEAT:			return SCENARIO_TOKENS_ATTACK;
 		case SCENARIO_ACTION_STOP:				return SCENARIO_TOKENS_STOP;
 		case SCENARIO_ACTION_TALLY:				return SCENARIO_TOKENS_STOP;
 		case SCENARIO_ACTION_ARRIVE:			return SCENARIO_TOKENS_ARRIVE;
@@ -425,9 +442,12 @@ ScenarioParseResult ScenarioDrill_parseLine( const char *line, ScenarioAction *a
 		case SCENARIO_ACTION_GUARD:
 		case SCENARIO_ACTION_SHIFTATTACK:
 		case SCENARIO_ACTION_FORCEATTACK:
+		case SCENARIO_ACTION_CLICKENTER:
 		case SCENARIO_ACTION_SHIFTPOWER:
 		{
-			if (!parseWholeNumber( tokens[ 4 ], &action->targetSlot ))
+			if (tokens[ 4 ] == SCENARIO_CIVILIAN_TOKEN)
+				action->targetSlot = SCENARIO_CIVILIAN_SLOT;
+			else if (!parseWholeNumber( tokens[ 4 ], &action->targetSlot ))
 				return SCENARIO_PARSE_BAD_SLOT;
 			action->targetSelector = tokens[ 5 ];
 			if (actionType == SCENARIO_ACTION_SHIFTPOWER)
@@ -452,6 +472,13 @@ ScenarioParseResult ScenarioDrill_parseLine( const char *line, ScenarioAction *a
 				return SCENARIO_PARSE_BAD_COUNT;
 			break;
 		}
+
+		case SCENARIO_ACTION_REPEAT:
+			action->targetSelector = tokens[ 4 ];	// the unit
+			action->name = tokens[ 5 ];
+			if (action->name != "on" && action->name != "off")
+				return SCENARIO_PARSE_BAD_ACTION;
+			break;
 
 		case SCENARIO_ACTION_STOP:
 		case SCENARIO_ACTION_TALLY:
@@ -522,7 +549,7 @@ struct ScenarioArrival
 /// how long a unit on its way has to stand still before it counts as having stopped
 static const Int SCENARIO_STALL_FRAMES = LOGICFRAMES_PER_SECOND;
 /// less than this from one frame to the next is standing still
-static const Real SCENARIO_STILL_DISTANCE = 0.05f;
+static const Real SCENARIO_STILL_DISTANCE = ConvertRetailPerFrameRate( 0.05f );
 
 /// how far a unit has to have gone from where it stood before it counts as having obeyed the order
 static const Real SCENARIO_DEPARTED_DISTANCE = 20.0f;
@@ -558,6 +585,7 @@ static void resetScenario( void )
 	theScenarioActionsRun = 0;
 	theScenarioActionsFailed = 0;
 	theScenarioUnitsSpawned = 0;
+	theCivilianObjects.clear();
 }
 
 /** Sorted by frame, and stable so two actions on the same frame keep the order the file wrote
@@ -645,6 +673,9 @@ static void loadScenario( void )
 	  when the game started, so ask it rather than carrying an offset around. */
 static Player *findPlayerForSlot( Int slot )
 {
+	if (slot == SCENARIO_CIVILIAN_SLOT)
+		return ThePlayerList->findPlayerWithNameKey( NAMEKEY( "PlyrCivilian" ) );
+
 	for( Int i = 0; i < ThePlayerList->getPlayerCount(); ++i )
 	{
 		if (ThePlayerList->getSlotIndex( i ) == slot)
@@ -727,6 +758,37 @@ static Object *findFirstMatching( Player *player, const AsciiString &selector )
 			return obj;
 	}
 	return NULL;
+}
+
+/** Of the objects the map owns now or owned at an earlier lookup, the living match nearest the
+	  point, whoever holds it now.  A skirmish has no PlyrCivilian seat everywhere, and the map's
+	  buildings can sit with the neutral player instead, so both count. */
+static Object *findNearestCivilian( const AsciiString &selector, const Coord3D *point )
+{
+	const Player *neutral = ThePlayerList->getNeutralPlayer();
+	const Player *civilian = findPlayerForSlot( SCENARIO_CIVILIAN_SLOT );
+	for( Object *obj = TheGameLogic->getFirstObject(); obj; obj = obj->getNextObject() )
+	{
+		const Player *owner = obj->getControllingPlayer();
+		if (owner != NULL && (owner == neutral || owner == civilian))
+			theCivilianObjects.insert( obj->getID() );
+	}
+
+	Object *nearest = NULL;
+	Real best = 0.0f;
+	for( std::set<ObjectID>::const_iterator it = theCivilianObjects.begin(); it != theCivilianObjects.end(); ++it )
+	{
+		Object *obj = TheGameLogic->findObjectByID( *it );
+		if (obj == NULL || obj->isEffectivelyDead() || !selectorMatches( selector, obj ))
+			continue;
+		const Real distance = ThePartitionManager->getDistanceSquared( obj, point, FROM_CENTER_2D );
+		if (nearest == NULL || distance < best)
+		{
+			nearest = obj;
+			best = distance;
+		}
+	}
+	return nearest;
 }
 
 /** The recipe the debug spawn path uses (GameLogic.cpp's unitTimings): a template's onCreate ran in
@@ -1281,8 +1343,10 @@ static Bool executePower( const ScenarioAction &action, Player *player, const Co
 
 	if (obj->isDisabled())
 	{
-		DEBUG_LOG(("SCENARIO: frame %d power: '%s' is disabled (no power?)\n",
-							 action.frame, action.selector.str()));
+		// the seat's whole grid, since one building that draws more than its plants make is the usual cause
+		DEBUG_LOG(("SCENARIO: frame %d power: '%s' is disabled (underpowered %d: seat makes %d, draws %d)\n",
+							 action.frame, action.selector.str(), (Int)obj->isDisabledByType( DISABLED_UNDERPOWERED ),
+							 player->getEnergy()->getProduction(), player->getEnergy()->getConsumption()));
 		return FALSE;
 	}
 
@@ -1536,6 +1600,44 @@ static Bool executeForceAttack( const ScenarioAction &action, Player *player, AI
 	return TRUE;
 }
 
+/** A player's click on a building or transport with the matching units selected: MSG_ENTER handed to
+	  the dispatcher, so the order carries CMD_FROM_PLAYER and meets the checks a human's does, where
+	  enter is a script's order. */
+static Bool executeClickEnter( const ScenarioAction &action, Player *player, AIGroup *group, Int taken )
+{
+	Object *target = NULL;
+	if (action.targetSlot == SCENARIO_CIVILIAN_SLOT)
+	{
+		Coord3D center;
+		group->getCenter( &center );
+		target = findNearestCivilian( action.targetSelector, &center );
+	}
+	else
+	{
+		Player *targetPlayer = findPlayerForSlot( action.targetSlot );
+		target = (targetPlayer != NULL) ? findFirstMatching( targetPlayer, action.targetSelector ) : NULL;
+	}
+	if (target == NULL)
+	{
+		DEBUG_LOG(("SCENARIO: frame %d clickenter: slot %d owns nothing matching '%s'\n",
+							 action.frame, action.targetSlot, action.targetSelector.str()));
+		TheAI->destroyGroup( group );
+		return FALSE;
+	}
+
+	GameMessage *msg = newInstance( GameMessage )( GameMessage::MSG_ENTER );
+	msg->friend_setPlayerIndex( player->getPlayerIndex() );
+	msg->appendObjectIDArgument( INVALID_ID );		// the selection, as the click sends it
+	msg->appendObjectIDArgument( target->getID() );
+	TheGameLogic->logicMessageDispatcher( msg, group );
+	msg->deleteInstance();
+
+	DEBUG_LOG(("SCENARIO: frame %d clickenter slot %d '%s' x%d -> slot %d '%s' %d\n",
+						 action.frame, action.slot, action.selector.str(), taken, action.targetSlot,
+						 action.targetSelector.str(), target->getID()));
+	return TRUE;
+}
+
 /** A FIRE_WEAPON button with NEED_TARGET_POS, clicked on the ground (the Comanche's rocket pods): the
 	  arguments GUICommandTranslator gives MSG_DO_WEAPON_AT_LOCATION, the button's default shot count and
 	  nothing under the cursor, handed to the dispatcher with the matching units as the selection.  The
@@ -1609,10 +1711,18 @@ static Bool executeOrder( const ScenarioAction &action, Player *player, const Co
 			const char *verb = (action.action == SCENARIO_ACTION_ATTACK) ? "attack"
 											 : (action.action == SCENARIO_ACTION_DOCK) ? "dock"
 											 : (action.action == SCENARIO_ACTION_GUARD) ? "guard" : "enter";
-			Player *targetPlayer = findPlayerForSlot( action.targetSlot );
-			Object *target = (targetPlayer != NULL)
-											 ? findFirstMatching( targetPlayer, action.targetSelector )
-											 : NULL;
+			Object *target = NULL;
+			if (action.targetSlot == SCENARIO_CIVILIAN_SLOT)
+			{
+				Coord3D center;
+				group->getCenter( &center );
+				target = findNearestCivilian( action.targetSelector, &center );
+			}
+			else
+			{
+				Player *targetPlayer = findPlayerForSlot( action.targetSlot );
+				target = (targetPlayer != NULL) ? findFirstMatching( targetPlayer, action.targetSelector ) : NULL;
+			}
 			if (target == NULL)
 			{
 				DEBUG_LOG(("SCENARIO: frame %d %s: slot %d owns nothing matching '%s'\n",
@@ -1648,6 +1758,9 @@ static Bool executeOrder( const ScenarioAction &action, Player *player, const Co
 
 		case SCENARIO_ACTION_FORCEATTACK:
 			return executeForceAttack( action, player, group, taken );		// so does this, or it does itself
+
+		case SCENARIO_ACTION_CLICKENTER:
+			return executeClickEnter( action, player, group, taken );		// the dispatcher again
 
 		case SCENARIO_ACTION_WEAPONAT:
 			return executeWeaponAt( action, player, dest, group, taken );		// the dispatcher again
@@ -1693,6 +1806,7 @@ static Bool executeOrder( const ScenarioAction &action, Player *player, const Co
 		case SCENARIO_ACTION_PARTICLES:
 		case SCENARIO_ACTION_POWER:
 		case SCENARIO_ACTION_PRODUCE:
+		case SCENARIO_ACTION_REPEAT:
 		case SCENARIO_ACTION_TALLY:
 		case SCENARIO_ACTION_RESPOND:
 			ordered = FALSE;		// handled before the group is built
@@ -1727,6 +1841,29 @@ static Bool executeConstruct( const ScenarioAction &action, Player *player, cons
 	return TRUE;
 }
 
+/** The Ctrl+Alt build key on a factory: one MSG_SET_REPEAT_UNIT onto the message stream, recorded and
+	  sent to every machine like construct, so only the local player can press it. */
+static Bool executeRepeat( const ScenarioAction &action, Player *player )
+{
+	Object *building = findFirstMatching( player, action.selector );
+	const ThingTemplate *made = TheThingFactory->findTemplate( action.targetSelector );
+	if (player != ThePlayerList->getLocalPlayer() || building == NULL || made == NULL)
+	{
+		DEBUG_LOG(("SCENARIO: frame %d repeat: slot %d is not the local player, has no '%s', or '%s' is no template\n",
+							 action.frame, action.slot, action.selector.str(), action.targetSelector.str()));
+		return FALSE;
+	}
+
+	GameMessage *msg = TheMessageStream->appendMessage( GameMessage::MSG_SET_REPEAT_UNIT );
+	msg->appendIntegerArgument( made->getTemplateID() );
+	msg->appendObjectIDArgument( building->getID() );
+	msg->appendBooleanArgument( action.name == "on" );
+
+	DEBUG_LOG(("SCENARIO: frame %d repeat slot %d '%s' %d '%s' %s\n", action.frame, action.slot,
+						 action.selector.str(), building->getID(), action.targetSelector.str(), action.name.str()));
+	return TRUE;
+}
+
 Bool ScenarioDrill_execute( const ScenarioAction &action )
 {
 	Player *player = findPlayerForSlot( action.slot );
@@ -1757,6 +1894,9 @@ Bool ScenarioDrill_execute( const ScenarioAction &action )
 
 	if (action.action == SCENARIO_ACTION_PRODUCE)
 		return executeProduce( action, player );
+
+	if (action.action == SCENARIO_ACTION_REPEAT)
+		return executeRepeat( action, player );
 
 	if (action.action == SCENARIO_ACTION_TALLY)
 		return executeTally( action, player );
@@ -1797,8 +1937,9 @@ void ScenarioDrill_tick( void )
 
 	updateStatues( now );
 
+	// a scenario file counts 30 Hz frames, so the files written before 60 Hz logic play at the same seconds
 	while (theScenarioCursor < (Int)theScenarioActions.size()
-				 && theScenarioActions[ theScenarioCursor ].frame <= now)
+				 && ConvertRetailFrames( theScenarioActions[ theScenarioCursor ].frame ) <= now)
 	{
 		if (ScenarioDrill_execute( theScenarioActions[ theScenarioCursor ] ))
 			++theScenarioActionsRun;
