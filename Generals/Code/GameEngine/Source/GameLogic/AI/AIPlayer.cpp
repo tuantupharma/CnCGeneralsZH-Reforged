@@ -2583,6 +2583,9 @@ void AIPlayer::doTeamBuilding( void )
  */
 void AIPlayer::doUpgradesAndSkills( void )
 {
+	// Tắt mua skill của tướng (AI không sài skill tướng).
+	return;
+
 	if (TheGameLogic->getFrame() < 2) {
 		// can't do updates on the first few frames
 		return;
