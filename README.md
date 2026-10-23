@@ -195,8 +195,43 @@ because Zero Hour mounts both. Saves and replays go to
 `~/Library/Application Support/Command and Conquer Generals Zero Hour Data` on a Mac and
 `~/.local/share/Command and Conquer Generals Zero Hour Data` on Linux.
 
+<details>
+<summary>Where it looks for Zero Hour</summary>
+
+<br>
+
+First match wins (`PosixInstallRoot.cpp`, `PosixChooseInstallRoot`):
+
+1. `-root <folder>` on the command line
+2. `InstallPath` in `Registry.ini` in the data folder above, while it still holds the game
+3. The known places below, for the staged build (`build-linux/ZeroHourReforged/bin/generals`) and the packages.
+   A bare `build-linux/generals` uses its own folder instead
+4. A folder chooser, asked until the choice holds Zero Hour. The answer goes into `Registry.ini`
+
+| Where | Linux | macOS |
+|:--|:--|:--|
+| `~/Games/<name>` | ✓ | ✓ |
+| `<library>/steamapps/common/<name>` for every Steam library: `~/.local/share/Steam`, `~/.steam/steam`, `~/.steam/root`, Flatpak's `~/.var/app/com.valvesoftware.Steam/.local/share/Steam`, and each library their `libraryfolders.vdf` lists (an SD card's too) | ✓ | |
+| `/Applications/<name>` | | ✓ |
+| CrossOver and Whisky bottles: `drive_c/Program Files*/` (`EA Games`, `Origin Games`, `Steam/steamapps/common`, `Command & Conquer The First Decade`, or the folder itself) `/<name>` | | ✓ |
+
+`<name>` is any of `Command & Conquer Generals Zero Hour`, `Command and Conquer Generals Zero Hour`,
+`Command & Conquer Generals - Zero Hour`, `Command & Conquer(tm) Generals Zero Hour` or `Zero Hour`,
+spelled exactly. A folder counts when it holds `INIZH.big` and the original Generals' `Textures.big`
+is in it, in `ZH_Generals/`, in `../Command & Conquer Generals` or `../Command & Conquer(tm) Generals`
+beside it, or in the folder `Generals\InstallPath` in `Registry.ini` names. File names inside these
+folders match in any case. When only Generals is missing, the chooser asks for its folder too.
+
+</details>
+
 The upscaled art has no download there. Copy the `Reforged*.big` files into `ReforgedArt/` in that
 folder by hand, or play at the original textures.
+
+No install to point it at? `./extract-game.sh <iso|folder> [target]` lays the games out from a disc, an
+`.iso` or a copy of a Windows install, without installing or Wine: Zero Hour into target, Generals into
+`target/ZH_Generals`. The default target is `~/Games/Command & Conquer Generals Zero Hour`, after asking.
+Run it once per disc. It needs `7z` or `bsdtar` for an `.iso`, and `unshield` for InstallShield discs.
+Discs carry 1.00 and the engine is 1.04's, so files from a 1.04 install (Steam, the EA app) are safer.
 
 <details>
 <summary>Settings the options screen does not show</summary>
@@ -210,6 +245,16 @@ Almost everything is on the seven pages of the options screen. These still live 
 |:--|:--|
 | `ShowAllyCursors = no` | stops sending your mouse position to allies and stops drawing theirs |
 | `EdgeScrollInWindowedMode = yes` | scrolls at the screen edge in a window too |
+
+`Hotkeys.ini`, beside it, takes a block that brings back the command bar's keys as the game shipped
+them: attack move, stop, guard, rally point, evacuate, sell and combat drop on their own labels'
+letters, and every button that lost its letter to one of them keeping it.
+
+```ini
+FixedOrderKeys
+  Enabled = No
+End
+```
 
 On the command line, `-d3d9` starts the old renderer and `-dx11post off` gives the Direct3D 11 picture
 without its finishing passes. `-nologo` skips the EA logo and `-novideo` every movie, and `-loadsave
@@ -297,7 +342,7 @@ On Ubuntu 24.04 the Linux packages are:
 ```sh
 sudo apt-get install cmake ninja-build g++ git curl unzip xz-utils make pkg-config python3 libx11-dev \
   libxext-dev libxcursor-dev libxi-dev libxfixes-dev libxrandr-dev libxss-dev libxtst-dev libwayland-dev \
-  libxkbcommon-dev wayland-protocols libegl-dev libdrm-dev libgbm-dev libvulkan-dev
+  libxkbcommon-dev wayland-protocols libegl-dev libdrm-dev libgbm-dev libvulkan-dev libfontconfig-dev lld unifdef
 ```
 
 `GeneralsMD/Code/Tools/linux-portable.sh` builds inside Valve's Steam Runtime 3 "sniper" SDK and makes
