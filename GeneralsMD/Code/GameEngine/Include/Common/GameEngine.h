@@ -59,10 +59,11 @@ Int GameEngine_logicCatchupMaxFrames( Int logicFps );
 Int GameEngine_matchFramesPerSecond( Bool turbo );
 
 /** R1, smooth motion: the renderer's blend reads how far into the next logic tick the wall clock is
-	(0 just after a tick, 1 a whole tick later or more; always 1 in fast mode or before the first tick).
-	The logic loop notes each pass's last tick with GameEngine_noteLogicTickDone. */
-void GameEngine_noteLogicTickDone( Int logicFps, Bool fastMode );
+	(0 when the last tick was due, 1 a whole tick later or more; always 1 in fast mode or before the first
+	tick).  GameEngine_tickFraction is the arithmetic, on the fine clock's ticks: 1 for a tick length of
+	0, clamped to 0..1 otherwise. */
 Real GameEngine_logicTickFraction( void );
+Real GameEngine_tickFraction( Int64 now, Int64 due, Real msPerTick, Int64 ticksPerSecond );
 
 /** LOGIC-THREAD.md phase 4: a picture presented while the pass's tick still runs beside the render,
 	with another to follow in the same pass.  The frame-time histograms count each picture as a pass of
@@ -121,6 +122,8 @@ struct RateReading
 };
 
 // forward declarations
+class AsciiString;
+class UnicodeString;
 class AudioManager;
 class GameLogic;
 class GameClient;
@@ -167,6 +170,11 @@ public:
 	virtual void serviceWindowsOS(void) {};		///< service the native OS
 	virtual Bool isActive(void) {return m_isActive;}	///< returns whether app has OS focus.
 	virtual void setIsActive(Bool isActive) { m_isActive = isActive; };
+
+	/// The device's audio endpoints, for the options menu: the index-th one's id and name, FALSE past
+	/// the last.  An id is what setAudioOutputDevice takes and Options.ini keeps; "" is the default.
+	virtual Bool getAudioOutputDevice(Int index, AsciiString &id, UnicodeString &name) { return FALSE; }
+	virtual void setAudioOutputDevice(const AsciiString &id) {}
 
 	/** LOGIC-THREAD.md phase 3, step 3b.  Called by GameClient::update in front of the draw at
 		* -logicthread 1 and 2: in a single-player game it runs this pass's message stream and asks the

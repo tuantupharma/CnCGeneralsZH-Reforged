@@ -1545,11 +1545,11 @@ void Team::setTeamTargetObject(const Object *target)
 		// Whether a team fires together is a rung of the ladder now, not one of the three script
 		// tiers: the ladder has six steps and this is one of the capabilities that separates them
 		// (AI-ROADMAP.md D6). The bottom two rungs still do not do it, which is what the old
-		// DIFFICULTY_EASY test said.  A script-driven opponent keeps that test itself, so the ladder's
-		// tuning never reaches a Challenge or mission.
+		// DIFFICULTY_EASY test said.  A script-driven opponent, or one on a player's own map, keeps that
+		// test itself, so the ladder's tuning never reaches a Challenge, a mission or a custom map.
 		//
 		Player *player = getControllingPlayer();
-		const Bool focusFire = player->isSkirmishAIPlayer()
+		const Bool focusFire = player->aiRunsOwnAI()
 			? TheAI->getDifficultyProfile(player->getAISkillLevel())->m_focusFire
 			: player->getPlayerDifficulty() != DIFFICULTY_EASY;
 		if (!focusFire) {
@@ -2534,8 +2534,10 @@ void Team::killTeam(void)
 
 	evacuateTeam();
 
-	// beacons are effectively dead, so we need to destroy via a non-kill() method
-	const ThingTemplate *beaconTemplate = TheThingFactory->findTemplate( getControllingPlayer()->getPlayerTemplate()->getBeaconTemplate() );
+	// beacons are effectively dead, so we need to destroy via a non-kill() method.
+	// A neutral or civilian side has no player template and so no beacon.
+	const PlayerTemplate *playerTemplate = getControllingPlayer()->getPlayerTemplate();
+	const ThingTemplate *beaconTemplate = playerTemplate ? TheThingFactory->findTemplate( playerTemplate->getBeaconTemplate() ) : NULL;
 
 	// now find objects to kill
 	for (DLINK_ITERATOR<Object> iter = iterate_TeamMemberList(); !iter.done(); iter.advance()) {

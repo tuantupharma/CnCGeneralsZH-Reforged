@@ -42,11 +42,13 @@
 #include "GameClient/GameText.h"
 #include "GameClient/ChromaKeyboard.h"
 #include "GameClient/GameConsole.h" // for -freecam
+#include "GameClient/FactionPicker.h" // for -factionpicker
 #include "GameNetwork/GameInfo.h" // for the SlotState -autoskirmish hands the AI slots
 #include "GameLogic/AI.h" // for aiPersonalityFromName, which -aipersona reads its names with
 #include "GameNetwork/NetworkUtil.h" // for ResolveIP, which -lanip parses its address with
 #include "Common/FileSystem.h"
 #include "Common/RandomMapGenerator.h" // for -randommap
+#include "Common/RandomMapTemplate.h" // for -randommap's template
 
 #ifdef _INTERNAL
 // for occasional debugging...
@@ -460,7 +462,7 @@ Int parseMapName(char *args[], int num)
 }
 
 // parseRandomMap =============================================================
-/** -randommap <seed> [players] [cells|small|normal|large] [style]: generate a skirmish map from the seed,
+/** -randommap <seed> [players] [cells|tiny|small|normal|large|huge] [style] [template:<map>]: generate a skirmish map from the seed,
 	keep it in memory under the name
 	"RMG_v<generator version>_<seed>_<players>p_<cells>c", then point -map at it.  The version is in
 	the name because it is in the bytes: a build that generates a different map from the same seed
@@ -468,8 +470,9 @@ Int parseMapName(char *args[], int num)
 	downstream has to know: the file system serves that name out of the generator, so the map cache
 	lists it like any hand-made map and -autoskirmish starts on it.  The same seed gives the same
 	map on every machine, so both sides of a network game can be handed the same command line.
-	The size is either a cell count outright or one of the three sizes, which are counts
-	that grow with the number of players rather than fixed ones. A style name last ("twilight")
+	The size is either a cell count outright or one of the five sizes, which are counts
+	that grow with the number of players rather than fixed ones; with a template they come from the
+	ground a seat has on it, and no size word means its Medium. A style name last ("twilight")
 	makes a map in that shipped map's style and adds "_<style>" to the name. */
 //=============================================================================
 Int parseRandomMap(char *args[], int num)
@@ -488,29 +491,53 @@ Int parseRandomMap(char *args[], int num)
 	if (num > eaten && isdigit((UnsignedByte)args[eaten][0]))
 		settings.m_numPlayers = atoi( args[eaten++] );
 
+	// a size word becomes cells once the template is known, since a template's sizes are its own
+	RandomMapSize size = RANDOM_MAP_SIZE_COUNT;
 	if (num > eaten && isdigit((UnsignedByte)args[eaten][0]))
 	{
 		settings.m_playableCells = atoi( args[eaten++] );
 	}
 	else if (num > eaten)
 	{
-		RandomMapSize size = RANDOM_MAP_SIZE_COUNT;
-		if (strcasecmp( args[eaten], "small" ) == 0)
+		if (strcasecmp( args[eaten], "tiny" ) == 0)
+			size = RANDOM_MAP_SIZE_TINY;
+		else if (strcasecmp( args[eaten], "small" ) == 0)
 			size = RANDOM_MAP_SIZE_SMALL;
 		else if (strcasecmp( args[eaten], "normal" ) == 0)
 			size = RANDOM_MAP_SIZE_NORMAL;
 		else if (strcasecmp( args[eaten], "large" ) == 0)
 			size = RANDOM_MAP_SIZE_LARGE;
+		else if (strcasecmp( args[eaten], "huge" ) == 0 || strcasecmp( args[eaten], "xl" ) == 0)
+			size = RANDOM_MAP_SIZE_HUGE;
 
 		if (size != RANDOM_MAP_SIZE_COUNT)
-		{
-			settings.m_playableCells = RandomMapGenerator::cellsFor( size, settings.m_numPlayers );
 			eaten++;
-		}
 	}
 
 	if (num > eaten && RandomMapGenerator::styleNamed( args[eaten] ) != 0)
 		settings.m_style = RandomMapGenerator::styleNamed( args[eaten++] );
+
+	// template:<shipped map> - underscores for its spaces, or the name quoted as the next argument
+	const char *const templatePrefix = "template:";
+	const Int templatePrefixLength = (Int)strlen( templatePrefix );
+	if (num > eaten && strncasecmp( args[eaten], templatePrefix, templatePrefixLength ) == 0)
+	{
+		AsciiString name = args[eaten++] + templatePrefixLength;
+		if (name.isEmpty() && num > eaten)
+			name = args[eaten++];
+		AsciiString token;
+		for (const char *letter = name.str(); *letter; ++letter)
+			token.concat( *letter == '_' ? ' ' : *letter );
+		rmgTemplateFromToken( token, settings.m_template );
+		RandomMapSettings checked = settings;
+		RandomMapGenerator::clampSettings( checked );
+		if (checked.m_template.isEmpty())
+			DEBUG_LOG(("-randommap: no shipped map '%s' installed, generating without a template\n", settings.m_template.str()));
+		else if (settings.m_playableCells <= 0 && size == RANDOM_MAP_SIZE_COUNT)
+			size = RANDOM_MAP_SIZE_NORMAL;
+	}
+	if (size != RANDOM_MAP_SIZE_COUNT)
+		settings.m_playableCells = RandomMapGenerator::cellsFor( size, settings.m_numPlayers, settings.m_template );
 
 	AsciiString path;
 	if (!stageRandomMap( settings, path ))
@@ -741,6 +768,16 @@ Int parseBuildMapCache(char *args[], int)
 	return 1;
 }
 
+Int parseFile(char *args[], int num)
+{
+	if (TheWritableGlobalData && num > 1)
+	{
+		TheWritableGlobalData->m_initialFile = args[1];
+		ConvertShortMapPathToLongMapPath(TheWritableGlobalData->m_initialFile);
+	}
+	return 2;
+}
+
 
 #if defined(_DEBUG) || defined(_INTERNAL)
 Int parseDisplayDebug(char *args[], int)
@@ -750,16 +787,6 @@ Int parseDisplayDebug(char *args[], int)
 		TheWritableGlobalData->m_displayDebug = TRUE;
 	}
 	return 1;
-}
-
-Int parseFile(char *args[], int num)
-{
-	if (TheWritableGlobalData && num > 1)
-	{
-		TheWritableGlobalData->m_initialFile = args[1];
-		ConvertShortMapPathToLongMapPath(TheWritableGlobalData->m_initialFile);
-	}
-	return 2;
 }
 
 
@@ -940,6 +967,38 @@ Int parseParticleCap(char *args[], int num)
 	return 2;
 }
 
+/* -gpuparticles [slots]: how many spawn records the Direct3D 11 particle ring holds this run, over the
+	 detail preset's (Ultra 1 << 20 down to Low 1 << 17).  The preset is applied after the command line,
+	 so this is a field of its own, read through getEffectiveGpuParticleCapacity, as -particlecap is.
+	 Bare is Ultra's 1 << 20; 0 keeps every particle on the CPU path with its cap.  The number is
+	 optional, so only a word that starts with a digit is taken.  -d3d9, Classic and the SDL3 builds
+	 never draw on the GPU whatever this says.  GPU-PARTICLES.md. */
+Int parseGpuParticles(char *args[], int num)
+{
+	if (TheWritableGlobalData)
+	{
+		if (num > 1 && args[1] && args[1][0] >= '0' && args[1][0] <= '9')
+		{
+			TheWritableGlobalData->m_gpuParticleCapacityOverride = atoi(args[1]);
+			return 2;
+		}
+		TheWritableGlobalData->m_gpuParticleCapacityOverride = 1 << 20;
+	}
+	return 1;
+}
+
+/* -gpuparticlecheck: every GPU-eligible particle also runs the CPU update, and the log carries the
+	 largest difference between the closed form and the real Particle state.  For proving the shader's
+	 maths, not for playing: it costs both paths at once. */
+Int parseGpuParticleCheck(char *args[], int num)
+{
+	if (TheWritableGlobalData)
+	{
+		TheWritableGlobalData->m_gpuParticleCheck = TRUE;
+	}
+	return 1;
+}
+
 /* The sun's shadow map is how this game draws shadows, and there is no switch for it.  It fills
 	 every frame and the stencil volumes stand down behind it; a machine with no Direct3D 11 device
 	 fills no map and keeps the volumes on its own, which is the whole of the fallback.  What is
@@ -982,6 +1041,16 @@ Int parseShadowMapReport(char *args[], int num)
 	return 1;
 }
 
+/* -shadowmapoldcasters: the sun's depth pass draws every caster through the mesh renderer one draw a
+	 piece, as it did before the opaque rigid ones went into instanced depth-only draws.  The other half
+	 of any A/B of what that costs or of whether the map still holds the same depth. */
+Int parseShadowMapOldCasters(char *args[], int num)
+{
+	if (TheWritableGlobalData)
+		TheWritableGlobalData->m_shadowMapOldCasters = TRUE;
+	return 1;
+}
+
 /* -noparticleshadows: take the soft blob back off the ground under every particle cloud.
 
 	 ShadowsForParticles is on by default and the shipped INI has no entry for it, so without this
@@ -1009,12 +1078,53 @@ Int parseNoVolumetricSmoke(char *args[], int)
 	return 1;
 }
 
+/* -nosmoothmotion: every model drawn where the last logic tick left it, a tick's state held until the
+	 next, as on a 60 Hz screen.  -recordfps still blends its in-between pictures. */
+Int parseNoSmoothMotion(char *args[], int)
+{
+	if (TheWritableGlobalData)
+	{
+		TheWritableGlobalData->m_smoothMotion = FALSE;
+	}
+	return 1;
+}
+
+/* -smoothmotion: models drawn between their last two logic states whatever the display's refresh rate,
+	 for a 60 Hz screen rendering uncapped or a picture of the blend on any machine. */
+Int parseSmoothMotion(char *args[], int)
+{
+	if (TheWritableGlobalData)
+	{
+		TheWritableGlobalData->m_smoothMotion = TRUE;
+		TheWritableGlobalData->m_smoothMotionAnyDisplay = TRUE;
+	}
+	return 1;
+}
+
 /* -nosmokefirelight: smoke left unlit by the fire beside it, for one run. */
 Int parseNoSmokeFireLight(char *args[], int)
 {
 	if (TheWritableGlobalData)
 	{
 		TheWritableGlobalData->m_smokeFireLighting = FALSE;
+	}
+	return 1;
+}
+
+/* -volsmoke [off|low|high]: the VolumeSmoke option for one run; bare, High. */
+Int parseVolumeSmoke(char *args[], int num)
+{
+	if (!TheWritableGlobalData) return 1;
+	TheWritableGlobalData->m_volumeSmoke = 2;
+	if (num > 1)
+	{
+		static const char *const levels[] = { "off", "low", "high" };
+		for (Int level = 0; level < 3; ++level)
+			if (strcasecmp(args[1], levels[level]) == 0)
+			{
+				TheWritableGlobalData->m_volumeSmoke = level;
+				return 2;
+			}
 	}
 	return 1;
 }
@@ -1765,13 +1875,13 @@ Int parseDirect3D9(char *args[], int num)
 	return 1;
 }
 
-/* -language <english|turkish|german>: the language the game's words are in for this run, over whatever
+/* -language <english|turkish|german|ukrainian|russian|french>: the language the game's words are in for this run, over whatever
 	 * the Options menu saved.  The string table is built once, while the game starts and after this
 	 * line is read, so this is how the launcher lets a player pick a language before the first menu.
 	 * The names follow TextLanguageType.  A name this build does not know leaves the saved one. */
 Int parseTextLanguage(char *args[], int num)
 {
-	static const char *const TheTextLanguageNames[ TEXT_LANGUAGE_COUNT ] = { "english", "turkish", "german" };
+	static const char *const TheTextLanguageNames[ TEXT_LANGUAGE_COUNT ] = { "english", "turkish", "german", "ukrainian", "russian", "french" };
 
 	if (TheWritableGlobalData && num > 1)
 	{
@@ -2467,6 +2577,20 @@ Int parseSkirmishLobby(char *args[], int num)
 	return 1;
 }
 
+/* -factionpicker [custom [<side>]] opens the skirmish staging room with the army screen up on the
+   first seat, as a click on the seat's army box would, so the screen can be photographed without a
+   click.  "custom" opens it on Custom Selection with the Random pool's ticks showing, and a side
+   after it (America, China, GLA, Turkiye) narrows the pool to that side as a click on its name
+   does.  Implies -skirmishlobby. */
+Int parseFactionPicker(char *args[], int num)
+{
+	const Bool custom = num > 1 && args[1] && strcasecmp(args[1], "custom") == 0;
+	const Bool side = custom && num > 2 && args[2] && args[2][0] != '-';
+	FactionPickerOpenOnStart(custom, side ? args[2] : "");
+	parseSkirmishLobby(args, num);
+	return 1 + (custom ? 1 : 0) + (side ? 1 : 0);
+}
+
 /* -optionsmenu opens the options screen over the main menu at startup, where a click on Options
    would put it.  A change to that screen can then be photographed page by page from a script that
    only has to press the tabs, instead of first finding the main menu's buttons.  Implies
@@ -2478,18 +2602,6 @@ Int parseOptionsMenu(char *args[], int num)
 		TheWritableGlobalData->m_optionsMenuOnStart = TRUE;
 		TheWritableGlobalData->m_shellMapOn = FALSE;
 	}
-	return 1;
-}
-
-/* -randommaps puts the generated maps back in the skirmish map list.  They are off by default
-   because the generator is not finished - a seed can still leave a supply dock behind a cliff, and
-   a map list is not the place to find that out.  Everything else about them works from the command
-   line, where -randommap says exactly which map is being played. */
-Int parseRandomMapsInMenus(char *args[], int num)
-{
-	if (TheWritableGlobalData)
-		TheWritableGlobalData->m_randomMapsInMenus = TRUE;
-
 	return 1;
 }
 
@@ -2794,14 +2906,20 @@ static CommandLineParam params[] =
 	{ "-particlebounce", parseParticleBounce },
 	{ "-smoke", parseSmoke },
 	{ "-particlecap", parseParticleCap },
+	{ "-gpuparticles", parseGpuParticles },
+	{ "-gpuparticlecheck", parseGpuParticleCheck },
 	{ "-noDynamicLOD", parseNoDynamicLOD },
 	{ "-nochroma", parseNoChroma },
 	{ "-shadowmapreport", parseShadowMapReport },
+	{ "-shadowmapoldcasters", parseShadowMapOldCasters },
 	{ "-shadowmapboth", parseShadowMapBoth },
 	{ "-noparticleshadows", parseNoParticleShadows },
 	{ "-novolumetricsmoke", parseNoVolumetricSmoke },
+	{ "-nosmoothmotion", parseNoSmoothMotion },
+	{ "-smoothmotion", parseSmoothMotion },
 	{ "-nosmokefirelight", parseNoSmokeFireLight },
 	{ "-lighting", parseLightingStyle },
+	{ "-volsmoke", parseVolumeSmoke },
 	{ "-quickstart", parseQuickStart },
 	/* In every build: EA kept them to Debug and Internal, so a Release run could not skip the logo or the
 		 movies. */
@@ -2854,7 +2972,6 @@ static CommandLineParam params[] =
 	{ "-jabber", parseJabber },
 	{ "-munkee", parseMunkee },
 	{ "-displayDebug", parseDisplayDebug },
-	{ "-file", parseFile },
   
   { "-preloadEverything", parsePreloadEverything },
 	{ "-logAssets", parseLogAssets },
@@ -2891,7 +3008,6 @@ static CommandLineParam params[] =
 		 match itself is simulated - the command-line twin of the skirmish menu's game speed slider. */
 	{ "-map", parseMapName },
 	{ "-randommap", parseRandomMap },
-	{ "-randommaps", parseRandomMapsInMenus },
 	{ "-seed", parseSeed },
 	{ "-noFPSLimit", parseNoFPSLimit },
 	{ "-fps", parseFPSLimit },
@@ -2953,6 +3069,9 @@ static CommandLineParam params[] =
 	{ "-takeover", parseTakeover },
 	{ "-replay", parseReplay },
 	{ "-loadsave", parseLoadSave },
+	// EA kept -file to Debug and Internal, so a Release run had no way into a campaign mission
+	// without clicking through the shell
+	{ "-file", parseFile },
 	{ "-netgame", parseNetGame },
 	{ "-netslot", parseNetSlot },
 	{ "-netai", parseNetAI },
@@ -2960,6 +3079,7 @@ static CommandLineParam params[] =
 	{ "-lanname", parseLanName },
 	{ "-lanlobby", parseLanLobby },
 	{ "-skirmishlobby", parseSkirmishLobby },
+	{ "-factionpicker", parseFactionPicker },
 	{ "-optionsmenu", parseOptionsMenu },
 
 	//-allAdvice feature

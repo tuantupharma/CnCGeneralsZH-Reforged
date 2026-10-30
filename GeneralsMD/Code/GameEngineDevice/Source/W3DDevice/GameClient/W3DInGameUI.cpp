@@ -78,7 +78,7 @@
 #include "WW3D2/vertmaterial.h"
 #include "WW3D2/shader.h"
 
-#include "Common/UnitTimings.h" //Contains the DO_UNIT_TIMINGS define jba.		 
+#include "Common/UnitTimings.h" //Contains the DO_UNIT_TIMINGS define jba.
 
 #ifdef _INTERNAL
 // for occasional debugging...
@@ -412,12 +412,14 @@ void W3DInGameUI::reset( void )
 	m_dragBoxDraw.clear();
 	m_postDrawCalls.clear();
 	m_hudOverlayDraw.clear();
+	m_guardMarkersFrame = ~0u;
+	m_guardMarkerTops.clear();
 
 }  // end reset
 
 static void drawGroundRing( const Coord3D& center, Real radius, UnsignedInt color, Real width );
 
-/// -directorrecord's lines between panes and the radar's frame: the brand's gold (zerohour.gg's
+/// -directorrecord's lines between panes: the brand's gold (zerohour.gg's
 /// --gold, #f2c230) between two edges of its ground (--bg, #0c1220), so they read on snow and on
 /// night maps alike
 static const Color PANE_GOLD = GameMakeColor( 0xf2, 0xc2, 0x30, 255 );
@@ -428,8 +430,6 @@ static const UnsignedByte PANE_BAND_RGB[ 3 ] = { 0x80, 0x95, 0xea };
 static const Real PANE_BAND_OUTER_ALPHA = 0.3f;
 static const Real PANE_BAND_INNER_ALPHA = 0.55f;
 static const Real PANE_BAND_FAR_SHARE = 0.35f;
-/// the corner radar's dark edge is a pixel this many rows of the picture
-static const Real CORNER_EDGE_ROWS_A_PIXEL = 720.0f;
 /// the light that runs along the gold: --gold most of the way to white, as wide as the edged line and
 /// this share of its length, fading out to both ends.  At --gold half way to white and the gold's
 /// own width nobody saw it at 720p
@@ -512,13 +512,6 @@ static void drawPaneRays( void )
 	}
 }
 
-/// a rectangle the given pixels larger than window on every side, filled
-static void fillAround( const IRegion2D &window, Int outside, Color color )
-{
-	TheDisplay->drawFillRect( window.lo.x - outside, window.lo.y - outside,
-		window.hi.x - window.lo.x + 2 * outside, window.hi.y - window.lo.y + 2 * outside, color );
-}
-
 //-------------------------------------------------------------------------------------------------
 /** LOGIC-THREAD.md phase 3.  The parts of draw that ask logic what to show (the superweapon clocks,
 	* the guard markers, the world animations' fog, the production list) run here, at the sync point
@@ -594,10 +587,8 @@ void W3DInGameUI::draw( void )
 			drawPaneRays();
 
 		// the console's 'hidehud showmap=true': the bar is hidden, so its radar window is put in the
-		// corner by hand, where the radar's own pixel maths find it too, and painted.  Under
-		// -directorrecord it sits in the middle of the bottom edge, slides down off the screen before
-		// panes come and back up after them, and is not drawn while they are up: framed where the rays
-		// met, its box for every pane was one more thing on a split screen the owner found too busy
+		// corner by hand, where the radar's own pixel maths find it too, and painted.  -directorrecord
+		// never asks for it: a map on the film was one more thing on the screen
 		if( CinemaDirector_showsMap() && !framed && !TheObserverCamera.isDrawingSecond() )
 		{
 			GameWindow *radarWindow = TheWindowManager->winGetWindowFromId( NULL, TheNameKeyGenerator->nameToKey( "ControlBar.wnd:LeftHUD" ) );
@@ -613,30 +604,6 @@ void W3DInGameUI::draw( void )
 			corner.hi.x = corner.lo.x + ( lr.x - ul.x ) + 2 * RADAR_BEZEL;
 			corner.hi.y = TheDisplay->getHeight() + RADAR_BEZEL;
 			corner.lo.y = corner.hi.y - ( lr.y - ul.y ) - 2 * RADAR_BEZEL;
-			const Int mapWidth = corner.hi.x - corner.lo.x;
-			const Int mapHeight = corner.hi.y - corner.lo.y;
-			// -directorrecord frames it, half the rays' gold on a pixel of edge a 720 rows with the lines'
-			// band as a halo, flush with the bottom so only the top and the sides show; the console's
-			// showmap alone keeps it bare and flush with the corner
-			if( TheGlobalData->m_directorRecord )
-			{
-				const Int frameGold = ObserverCamera_paneLineWidth( TheDisplay->getHeight() );
-				const Int halo = max( ( ObserverCamera_paneBandWidth( TheDisplay->getHeight() ) - frameGold ) / 2 - OBSERVER_PANE_LINE_EDGE, 0 ) / 2;
-				const Int gold = max( frameGold / 2, 1 );
-				const Int outside = gold + max( REAL_TO_INT( TheDisplay->getHeight() / CORNER_EDGE_ROWS_A_PIXEL ), 1 );
-				// slid down far enough to take the frame and its halo off the screen too
-				const Int slide = REAL_TO_INT( TheObserverCamera.getCornerRadarSlide() * ( mapHeight + outside + halo ) );
-				corner.lo.x = ( TheDisplay->getWidth() - mapWidth ) / 2;
-				corner.hi.x = corner.lo.x + mapWidth;
-				corner.lo.y += slide;
-				corner.hi.y += slide;
-				// filled rectangles under the radar, square at the corners: the halo, the edge, then the gold
-				// up to the window, so the map sits on the gold with no gap
-				fillAround( corner, outside + halo, paneBand( PANE_BAND_OUTER_ALPHA ) );
-				fillAround( corner, outside + halo / 2, paneBand( PANE_BAND_INNER_ALPHA ) );
-				fillAround( corner, outside, PANE_EDGE );
-				fillAround( corner, gold, PANE_GOLD );
-			}
 			TheControlBar->placeWindowAt( radarWindow, corner );
 			W3DLeftHUDDraw( radarWindow, NULL );
 		}
@@ -1349,6 +1316,26 @@ static void drawShieldShape( Real centreX, Int top, Real width, Int height, Unsi
 }
 
 //-------------------------------------------------------------------------------------------------
+/** Player::iterateObjects callback: the spot over the head of one of the local player's guards, into
+	* the vector of them. */
+//-------------------------------------------------------------------------------------------------
+static void addGuardMarker( Object *obj, void *tops )
+{
+	if( !obj->isLocallyControlled() || obj->isEffectivelyDead() || obj->getContainedBy() )
+		return;
+	const AIUpdateInterface *ai = obj->getAI();
+	if( ai == NULL || ai->getCurrentStateID() != AI_GUARD )
+		return;
+	const Drawable *draw = obj->getDrawable();
+	if( draw == NULL || draw->isDrawableEffectivelyHidden() )
+		return;
+
+	Coord3D top = *obj->getPosition();
+	top.z += obj->getGeometryInfo().getMaxHeightAbovePosition();
+	( (std::vector<Coord3D> *)tops )->push_back( top );
+}
+
+//-------------------------------------------------------------------------------------------------
 /** A guarding unit looks like an idle one until something walks into its circle, so each of the
 	* local player's guards wears a small shield over its head, selected or not.  It follows the zoom
 	* like the health bar does, between a floor that still reads as a shield and a ceiling that does
@@ -1375,20 +1362,32 @@ void W3DInGameUI::drawGuardMarkers( void )
 	const Int lift = height / 2;		// clear of the health bar's line over the model's top
 	const Real rim = max( 1.0f, height / 10.0f );
 
-	// ponytail: walks every object each frame; share one walk with another per-object overlay if it shows
-	for( Object *obj = TheGameLogic->getFirstObject(); obj; obj = obj->getNextObject() )
+	// Who stands guard, and where, moves only with a tick, so the walk runs once a logic frame; it ran
+	// on every pass and was most of what this method cost.  Only the camera is this pass's, except under
+	// frozen time, whose scripts move units with no new frame.
+	// ponytail: two guards or more walk every object for the order; keep the list order if it shows
+	const UnsignedInt frame = TheGameLogic->getFrame();
+	const Player *local = ThePlayerList->getLocalPlayer();
+	if( frame != m_guardMarkersFrame || local != m_guardMarkersPlayer || isTimeFrozenWithoutTick() )
 	{
-		if( !obj->isLocallyControlled() || obj->isEffectivelyDead() || obj->getContainedBy() )
-			continue;
-		const AIUpdateInterface *ai = obj->getAI();
-		if( ai == NULL || ai->getCurrentStateID() != AI_GUARD )
-			continue;
-		const Drawable *draw = obj->getDrawable();
-		if( draw == NULL || draw->isDrawableEffectivelyHidden() )
-			continue;
+		m_guardMarkersFrame = frame;
+		m_guardMarkersPlayer = local;
+		m_guardMarkerTops.clear();
+		// Only the local player's own objects wear one, and an observer owns none, so his objects are
+		// asked first.  Two shields can overlap, and they go down in the order of the list of every
+		// object as they always did, so with two or more that list is walked for the order.
+		local->iterateObjects( addGuardMarker, &m_guardMarkerTops );
+		if( m_guardMarkerTops.size() > 1 )
+		{
+			m_guardMarkerTops.clear();
+			for( Object *obj = TheGameLogic->getFirstObject(); obj; obj = obj->getNextObject() )
+				addGuardMarker( obj, &m_guardMarkerTops );
+		}
+	}
 
-		Coord3D top = *obj->getPosition();
-		top.z += obj->getGeometryInfo().getMaxHeightAbovePosition();
+	for( size_t i = 0; i < m_guardMarkerTops.size(); ++i )
+	{
+		Coord3D top = m_guardMarkerTops[ i ];
 		ICoord2D spot;
 		if( !TheTacticalView->worldToScreen( &top, &spot ) )
 			continue;

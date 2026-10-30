@@ -616,6 +616,8 @@ public:
 
 	/// Is this player a skirmish ai player?
 	Bool isSkirmishAIPlayer( void );
+	Bool aiRunsOwnAI( void ) const;		///< a computer player on the fork's AI (AIPlayer::runsOwnAI); FALSE for a human and for EA's AI
+	Bool isForkMapComputer( void ) const;	///< any computer player, the civilians included, in a match on a map the fork's AI plays (SidesList::forkAIMap)
 
 	/// Have the ai check for bridges.
 	virtual Bool checkBridges(Object *unit, Waypoint *way);
@@ -853,7 +855,7 @@ public:
 
 	Real getCashBounty() const { return m_cashBountyPercent; }
 	void setCashBounty(Real percentage) { m_cashBountyPercent = percentage; }
-	void doBountyForKill(const Object* killer, const Object* victim);
+	void doBountyForKill(const Object* killer, const Object* victim, Real rankShare);	///< the bounty science's share plus the killer's rank share of the victim's cost
 
 	AcademyStats* getAcademyStats() { return &m_academyStats; }
 	const AcademyStats* getAcademyStats() const { return &m_academyStats; }

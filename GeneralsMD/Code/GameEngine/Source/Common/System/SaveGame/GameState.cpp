@@ -731,22 +731,35 @@ SaveCode GameState::missionSave( void )
 /** A replay's rewind checkpoint.  saveGame without the save list: any path, no description, and
 	* nothing told to the player, since one is taken every half minute of the replay. */
 // ------------------------------------------------------------------------------------------------
-void GameState::saveCheckpoint( AsciiString filepath )
+Bool GameState::saveCheckpoint( AsciiString filepath )
 {
 	getSaveGameInfo()->saveFileType = SAVE_FILE_TYPE_NORMAL;
 	getSaveGameInfo()->missionMapName.clear();
 
 	XferSave xferSave;
-	xferSave.open( filepath );
-	xferSaveData( &xferSave, SNAPSHOT_SAVELOAD );
-	xferSave.close();
+	try
+	{
+		xferSave.open( filepath );
+		xferSaveData( &xferSave, SNAPSHOT_SAVELOAD );
+		xferSave.close();
+	}
+	catch( ... )
+	{
+		// the destructor throws away what was written; a mod object whose module cannot save
+		// costs the replay its rewind, not the whole game (report 1858)
+		DEBUG_LOG(( "GameState::saveCheckpoint - '%s' could not be written\n", filepath.str() ));
+		return FALSE;
+	}
+	return TRUE;
 }
 
 // ------------------------------------------------------------------------------------------------
 /** loadGame for a checkpoint, with the recorder's turn between the reset and the load: the reset
-	* closes the replay, and the load's new game reads the players out of it. */
+	* closes the replay, and the load's new game reads the players out of it.  FALSE when the load
+	* failed part way: the half-loaded match is cleared, as a replay's end clears it, and the player
+	* is told, so a mod object whose module cannot load ends the replay rather than the game. */
 // ------------------------------------------------------------------------------------------------
-void GameState::loadCheckpoint( AsciiString filepath, const std::function< void( void ) > &afterReset )
+Bool GameState::loadCheckpoint( AsciiString filepath, const std::function< void( void ) > &afterReset )
 {
 	TheGameStateMap->clearScratchPadMaps();
 
@@ -764,12 +777,45 @@ void GameState::loadCheckpoint( AsciiString filepath, const std::function< void(
 
 	TheGhostObjectManager->saveLockGhostObjects( TRUE );
 	TheGameLogic->setLoadingWithoutScreen( TRUE );
-	xferSaveData( &xferLoad, SNAPSHOT_SAVELOAD );
+	Bool error = FALSE;
+	try
+	{
+		xferSaveData( &xferLoad, SNAPSHOT_SAVELOAD );
+	}
+	catch( ... )
+	{
+		error = TRUE;
+	}
 	TheGameLogic->setLoadingWithoutScreen( FALSE );
 	xferLoad.close();
 	TheGhostObjectManager->saveLockGhostObjects( FALSE );
 
-	gameStatePostProcessLoad();
+	if( !error )
+	{
+		try
+		{
+			gameStatePostProcessLoad();
+		}
+		catch( ... )
+		{
+			error = TRUE;
+		}
+	}
+
+	if( error )
+	{
+		DEBUG_LOG(( "GameState::loadCheckpoint - '%s' could not be loaded, the replay stops\n", filepath.str() ));
+		const AsciiString replayFile = TheRecorder->getCurrentReplayFilename();
+		TheGameLogic->clearGameData();
+
+		UnicodeString ufilepath;
+		ufilepath.translate( replayFile );
+		UnicodeString msg;
+		msg.format( TheGameText->fetch( "GUI:ErrorLoadingGame" ), ufilepath.str() );
+		MessageBoxOk( TheGameText->fetch( "GUI:Error" ), msg, NULL );
+		return FALSE;
+	}
+	return TRUE;
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -1439,9 +1485,13 @@ void GameState::friend_xferSaveDataForCRC( Xfer *xfer, SnapshotType which )
 	gameInfo->description.clear();
 	gameInfo->saveFileType = SAVE_FILE_TYPE_NORMAL;
 	gameInfo->missionMapName.clear();
+	// cleared for the CRC's sake and put back after: a loaded save still needs to know the map it
+	// was started on (SidesList::isForkAIMapPath), and the next save writes it out again
+	const AsciiString pristine = gameInfo->pristineMapName;
 	gameInfo->pristineMapName.clear();
 
 	xferSaveData(xfer, which);
+	gameInfo->pristineMapName = pristine;
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -1503,8 +1553,11 @@ void GameState::xferSaveData( Xfer *xfer, SnapshotType which )
 				catch( ... )
 				{
 
+					// the DEBUG_CRASH is compiled out of a release build; the module that threw logged itself
+					DEBUG_LOG(( "GameState::xferSaveData - error saving block '%s' in file '%s'\n",
+											blockName.str(), xfer->getIdentifier().str() ));
 					DEBUG_CRASH(( "Error saving block '%s' in file '%s'\n",
-												blockName.str(), xfer->getIdentifier() ));
+												blockName.str(), xfer->getIdentifier().str() ));
 					throw;
 
 				}  // end catch
@@ -1583,8 +1636,11 @@ void GameState::xferSaveData( Xfer *xfer, SnapshotType which )
 				catch( ... )
 				{
 
+					// the DEBUG_CRASH is compiled out of a release build; the module that threw logged itself
+					DEBUG_LOG(( "GameState::xferSaveData - error loading block '%s' in file '%s'\n",
+											blockInfo->blockName.str(), xfer->getIdentifier().str() ));
 					DEBUG_CRASH(( "Error loading block '%s' in file '%s'\n",
-												blockInfo->blockName.str(), xfer->getIdentifier() ));
+												blockInfo->blockName.str(), xfer->getIdentifier().str() ));
 					throw;
 
 				}  // end catch

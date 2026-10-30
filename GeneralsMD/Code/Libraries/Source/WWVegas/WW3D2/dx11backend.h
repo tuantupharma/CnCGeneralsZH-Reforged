@@ -112,6 +112,13 @@ public:
 	// frame.  While they are, the engine leaves the dynamic lights out of its own vertex lighting.
 	bool Lights_Per_Pixel() const { return ShadowReceiving && ShadowMapTexture != NULL; }
 
+	// How many blast lights the pixel block the last draw went up with carries.  A pass multiplying
+	// what is under it carries none (Upload_Pixel_Constants).
+	unsigned Pixel_Block_Blast_Lights() const
+	{
+		return static_cast<unsigned>(HeldPixelConstants.BlastLightParameters[0]);
+	}
+
 	// The draws that follow are sorted particle billboards, which fade where they meet the scene's
 	// depth (SOFT_PARTICLE_SAMPLING).  Only the sorting pool sets it, around the billboards' runs.
 	void Set_Soft_Particles(bool soft);
@@ -119,6 +126,9 @@ public:
 	// Copy the scene's depth for the soft particles if anything wrote it since the last copy.  The
 	// sorting pool calls it at the top of each flush, before any particle run resolves its program.
 	void Take_Scene_Depth();
+	// The copy Take_Scene_Depth keeps, for a pass drawn behind the backend's back that fades where
+	// it meets the world (the GPU particles).  Null before the first copy and under Classic.
+	ID3D11ShaderResourceView * Scene_Depth_Copy() const { return SceneDepthCopyView; }
 	// How many depth copies Take_Scene_Depth made since the last call.  Taking it resets it.
 	unsigned Take_Frame_Depth_Copies();
 	// Off under the Classic graphics setting, whose picture is -d3d9's: no draw fades, no copy.
@@ -129,6 +139,7 @@ public:
 			PipelineChanged = true;
 		}
 	}
+	bool Soft_Particles_Allowed() const { return SoftParticlesAllowed; }
 
 	// The engine bound a texture at this stage that has no D3D11 copy - a render target it drew
 	// into, most often.  Sampling white there paints a full screen quad over the frame, so a draw
@@ -240,6 +251,58 @@ public:
 	bool Fill_Smoke_Map(const float * casters, unsigned count, float strength);
 	ID3D11ShaderResourceView * Smoke_Map() const { return SmokeMapFilled ? SmokeMapTexture : NULL; }
 
+	// The opaque casters of the sun's depth pass, drawn depth only and instanced: one run is one
+	// piece of one mesh model (a buffer pair, an index range, a cull and a depth test), drawn once
+	// for each of its instances.  Upload_Shadow_Casters takes the pass's instances, each a world as
+	// the three rows of a Matrix3D (NULL for an identity world) and the first bone of a skinned one,
+	// and the pass's bones, three rows of a Matrix3D each, and writes them straight into the mapped
+	// buffers; it is false, with nothing written, when the device refused a program or a buffer, and
+	// the caller draws them the old way.  Each instance's world is the matrix the texture category's
+	// walk sets (the Matrix3D transposed into Direct3D 9's layout) and its position goes through the
+	// product Upload_Vertex_Constants builds, in the same order, so the map holds the depth the
+	// generated programs wrote.  An alpha tested run samples the texture and
+	// sampler on stage 0 as they stand, so Draw_Shadow_Casters is handed the runs of one texture at
+	// a time, and is false, with nothing drawn, when alpha tested runs find no texture there.  A
+	// skinned run's vertices are the shadow skin source.  Only while the map is bound.  Every run
+	// counts in Draws_Made.
+	enum ShadowCasterKind
+	{
+		SHADOW_CASTER_RIGID,
+		SHADOW_CASTER_ALPHA_TESTED,
+		SHADOW_CASTER_SKINNED
+	};
+	struct ShadowCasterRun
+	{
+		ShadowCasterKind Kind;
+		ID3D11Buffer * Vertices;
+		unsigned Stride;
+		unsigned TextureOffset;		///< bytes into a vertex to stage 0's coordinates, alpha tested only
+		ID3D11Buffer * Indices;
+		unsigned StartIndex;
+		unsigned IndexCount;
+		unsigned BaseVertex;
+		bool Strip;
+		DWORD CullMode;			///< D3DCULL
+		DWORD DepthFunction;	///< D3DCMPFUNC
+		unsigned FirstInstance;
+		unsigned InstanceCount;
+	};
+	struct ShadowSkinVertex
+	{
+		float Position[3];		///< the bind pose, in its bone's space
+		unsigned Bone;
+	};
+	bool Upload_Shadow_Casters(const float * const * worlds, const unsigned * first_bones,
+		unsigned instance_count, const float * const * bones, unsigned bone_count);
+	bool Draw_Shadow_Casters(const ShadowCasterRun * runs, unsigned run_count);
+
+	// The bind poses of the skins the depth pass skins on the GPU, appended a model at a time and
+	// kept across passes.  A model whose vertices do not fit starts a new, larger buffer, and so does
+	// a release of the device; either moves the generation on, and a model uploaded under an older
+	// generation uploads again.  False when the device refused the buffer.
+	bool Upload_Shadow_Skin(const ShadowSkinVertex * vertices, unsigned count, unsigned & first_vertex);
+	unsigned Shadow_Skin_Generation() const { return ShadowSkinGeneration; }
+
 	// The scene camera's view, which a camera space draw's pixels go back to the world through: the
 	// sorted particles are written in camera space and drawn with an identity world and view
 	// (PointGroupClass::Insert_Sorted_Billboards), so the view the backend holds for them says
@@ -289,6 +352,19 @@ public:
 	// Where the scene is going now: its own target, or a screen filter's texture drawn over the
 	// scene's depth; NULL for a mirror or the sun's map.
 	ID3D11RenderTargetView * Scene_Target() const;
+	// The depth that goes with Scene_Target: the scene's own, multisampled with the scene, or the
+	// single-sample one a screen filter's texture is drawn over.
+	ID3D11DepthStencilView * Scene_Depth_Target() const;
+
+	// With a multisampled scene, its depth resolved into the device's single-sample depth buffer,
+	// which is what Get_Depth_Texture reads and what every pass reading the scene's depth samples:
+	// a full screen pass taking sample 0 of each pixel, since a depth buffer cannot be resolved the
+	// way a colour target is.  Only while the draws go into the scene, and only when a clear or a
+	// draw wrote its depth since the last one; anything that reads the depth calls it first.
+	void Resolve_Scene_Depth();
+	// Makes that pass now; false when the device refuses it, and a multisampled scene without it
+	// would leave every reader of the depth an unwritten buffer (Direct3D11_Create drops to one sample).
+	bool Make_Depth_Resolve();
 
 	// The scene's target, its depth and the draws' viewport bound again after a pass that bound
 	// its own on the context mid-scene (the post chain's occlusion).
@@ -517,6 +593,7 @@ private:
 	bool Build_Combiner_Description(CombinerDescription & description) const;
 	void Upload_Constants();
 	void Upload_Vertex_Constants();
+	void Upload_World_Constants();
 	void Upload_Pixel_Constants();
 
 	// Both indexed draws land here; only the topology differs.
@@ -537,6 +614,7 @@ private:
 		unsigned Bytes;			///< the whole buffer, a whole number of entries
 		unsigned Next;			///< where the next write goes; Bytes makes it discard
 		unsigned Current;		///< where the last write went, which is what the draws read
+		unsigned Discards;		///< every discard and every new buffer: an entry written since is still there
 	};
 	bool Create_Constant_Ring(ConstantRing & ring, unsigned block_bytes);
 	bool Write_Constants(ConstantRing & ring, const void * block, unsigned bytes);
@@ -548,7 +626,7 @@ private:
 	void Bind_State_Objects();
 	void Release_Cached();
 
-	ID3D11BlendState * Blend_State(bool glow);
+	ID3D11BlendState * Blend_State(bool glow, bool coverage);
 	ID3D11DepthStencilState * Depth_Stencil_State();
 	ID3D11RasterizerState * Rasterizer_State();
 	ID3D11SamplerState * Sampler_State(unsigned sampler);
@@ -665,6 +743,11 @@ private:
 	float AdditiveGain;
 	bool GlowDraw;
 	bool Additive_Glow() const;
+	// An alpha tested draw without blending into the multisampled scene covers the samples its
+	// alpha says, which smooths a leaf's or a fence's cut edge the way the samples smooth a
+	// triangle's.  Never into a single-sample target, where it would only dither, never for a test
+	// that keeps the low alphas, and never under Classic, whose fences are -d3d9's hard ones.
+	bool Alpha_To_Coverage() const;
 	ID3D11ShaderResourceView * SceneStandIn;
 	// A stage samples the target the draw is going into: the heat haze, which bends a picture that
 	// already took its shadows, and would take them a second time.
@@ -687,6 +770,24 @@ private:
 	bool SmokeMapRefused;
 	bool SmokeMapFilled;
 	float SmokeStrength;
+	// Draw_Shadow_Casters' programs and layouts a kind of run, the alpha test's pixel program, the
+	// instance buffer and the bones' buffer, both of which grow by doubling and are written once a
+	// pass, and the skin source.  Made on the first pass.
+	bool Make_Shadow_Caster_Program();
+	void Release_Shadow_Casters();
+	ID3D11VertexShader * ShadowCasterVertexShaders[3];
+	ID3D11InputLayout * ShadowCasterLayouts[3];
+	ID3D11PixelShader * ShadowCasterAlphaTest;
+	ID3D11Buffer * ShadowCasterInstances;
+	unsigned ShadowCasterCapacity;
+	ID3D11Buffer * ShadowCasterBones;
+	ID3D11ShaderResourceView * ShadowCasterBonesView;
+	unsigned ShadowCasterBonesCapacity;
+	bool ShadowCasterRefused;
+	ID3D11Buffer * ShadowSkinSource;
+	unsigned ShadowSkinCapacity;
+	unsigned ShadowSkinUsed;
+	unsigned ShadowSkinGeneration;
 	// Set_Headlights' slots, eight floats each, how many are lit and the gain per channel.
 	float Headlights[HEADLIGHT_SLOTS][8];
 	unsigned HeadlightCount;
@@ -706,6 +807,15 @@ private:
 	bool SceneDepthRefused;		///< the device would not make the copy; no draw fades again
 	unsigned FrameDepthCopies;
 	void Release_Scene_Depth();
+	// Resolve_Scene_Depth's pass (Make_Depth_Resolve); refused for good if the device cannot.
+	// Stale while a clear or a draw into the scene wrote the multisampled depth since the last one.
+	ID3D11VertexShader * DepthResolveVertexShader;
+	ID3D11PixelShader * DepthResolvePixelShader;
+	ID3D11DepthStencilState * DepthResolveState;
+	ID3D11RasterizerState * DepthResolveRasterizer;
+	bool DepthResolveStale;
+	bool DepthResolveRefused;
+	void Release_Depth_Resolve();
 	bool Make_Smoke_Map();
 	void Release_Smoke_Map();
 
@@ -764,6 +874,17 @@ private:
 	PixelConstantBlock HeldPixelConstants;
 	float HeldEngineConstants[ENGINE_SHADER_CONSTANTS][4];
 
+	// The last few pixel blocks written, with the entry each went to and the ring's discard count
+	// then.  The sorted flush goes back and forth between a few of them, a billboard run's soft
+	// particle depth and a streak's none, and one still in the buffer is bound where it lies instead
+	// of written again (Rebind_Recent_Pixel_Constants).
+	enum { RECENT_PIXEL_BLOCKS = 4 };
+	PixelConstantBlock RecentPixelConstants[RECENT_PIXEL_BLOCKS];
+	unsigned RecentPixelOffset[RECENT_PIXEL_BLOCKS];
+	unsigned RecentPixelDiscards[RECENT_PIXEL_BLOCKS];
+	unsigned NextRecentPixel;
+	bool Rebind_Recent_Pixel_Constants(const PixelConstantBlock & block);
+
 	// A freshly created dynamic buffer holds nothing in particular, and a Map can fail, so a copy
 	// above only stands for what is in its buffer once a write has actually gone through.  One flag
 	// each rather than one between them: the engine bank is skipped on every draw that takes no
@@ -787,6 +908,19 @@ private:
 	// whose bytes always matched.  ConstantsChanged stands for both.
 	bool VertexConstantsChanged;
 	bool PixelConstantsChanged;
+	// The blend switch or either factor, which the pixel block reads only through Pixel_Blend_Key:
+	// the block is built again only when the key moved from the one it was last built with.  The
+	// sorted flush flips the blend at nearly every run, and each flip rebuilt and compared the
+	// whole block to find the same bytes.
+	bool PixelBlendChanged;
+	unsigned HeldPixelBlendKey;
+	unsigned Pixel_Blend_Key() const;
+	// A blend that multiplies what is under it: it takes no blast light.
+	bool Multiplies_Below() const;
+	// The world transform alone, which is every mesh draw: with nothing else flagged the held block
+	// is the rest of the next one, and only its three world products are made again
+	// (Upload_World_Constants).
+	bool WorldChanged;
 	bool PipelineChanged;
 	bool SamplerChanged[DX11_BACKEND_TEXTURE_STAGES];
 	// A stage's texture changed, or the last draw sampled the current target and so needs a fresh
@@ -962,6 +1096,7 @@ private:
 	D3D11_BLEND_DESC LastBlendDescription;
 	ID3D11BlendState * LastBlendState;
 	bool LastBlendGlow;
+	bool LastBlendCoverage;
 	D3D11_DEPTH_STENCIL_DESC LastDepthStencilDescription;
 	ID3D11DepthStencilState * LastDepthStencilState;
 	D3D11_RASTERIZER_DESC LastRasterizerDescription;

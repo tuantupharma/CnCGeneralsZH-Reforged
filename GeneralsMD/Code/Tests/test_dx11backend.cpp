@@ -28,6 +28,7 @@
 #include "test_harness.h"
 
 #include "dx11backend.h"
+#include "dx11post.h"
 #include "dx11resource.h"
 #include "dx11water.h"
 #include "Platform/HazardCloudCore.h"
@@ -39,6 +40,7 @@
 #include <chrono>
 #include <thread>
 #include <vector>
+#include <windows.h>
 
 static const unsigned TARGET_SIZE = 64;
 static const DWORD BACKEND_FVF = D3DFVF_XYZ|D3DFVF_NORMAL|D3DFVF_TEX2|D3DFVF_DIFFUSE;
@@ -597,6 +599,178 @@ TEST(dx11backend_a_wrapped_constant_ring_draws_with_the_latest_block)
 	vertices->Release();
 	target_view->Release();
 	staging->Release();
+	target->Release();
+	backend.Shutdown();
+}
+
+// The sorted runs flip between a few pixel blocks, so a block still in the ring is bound again at
+// the entry it was written to rather than written again (Rebind_Recent_Pixel_Constants).  Two texture
+// factors alternate with two fresh ones after each pair, which takes both out of the four the
+// backend remembers every other round, and the rounds go on until the ring has wrapped more than
+// once.  A block bound again from before a wrap, where later writes have gone since, draws another
+// colour.
+TEST(dx11backend_a_pixel_block_bound_again_draws_its_own_colour_across_a_ring_wrap)
+{
+	const unsigned ROUNDS = 1500;
+	const DWORD FACTORS[2] = { 0xff112233, 0xff445566 };
+	const DWORD FRESH_FACTOR = 0xff800000;
+
+	DX11DeviceClass device;
+	CHECK(device.Create_Offscreen());
+	ID3D11Device * d3d = device.Get_Device();
+
+	DX11BackendClass backend;
+	CHECK(backend.Initialise(&device));
+
+	D3D11_TEXTURE2D_DESC target_description;
+	memset(&target_description, 0, sizeof(target_description));
+	target_description.Width = TARGET_SIZE;
+	target_description.Height = TARGET_SIZE;
+	target_description.MipLevels = 1;
+	target_description.ArraySize = 1;
+	target_description.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+	target_description.SampleDesc.Count = 1;
+	target_description.Usage = D3D11_USAGE_DEFAULT;
+	target_description.BindFlags = D3D11_BIND_RENDER_TARGET;
+
+	ID3D11Texture2D * target = NULL;
+	CHECK(SUCCEEDED(d3d->CreateTexture2D(&target_description, NULL, &target)));
+
+	D3D11_TEXTURE2D_DESC staging_description = target_description;
+	staging_description.Usage = D3D11_USAGE_STAGING;
+	staging_description.BindFlags = 0;
+	staging_description.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+
+	ID3D11Texture2D * staging = NULL;
+	CHECK(SUCCEEDED(d3d->CreateTexture2D(&staging_description, NULL, &staging)));
+
+	ID3D11RenderTargetView * target_view = NULL;
+	CHECK(SUCCEEDED(d3d->CreateRenderTargetView(target, NULL, &target_view)));
+	device.Get_Context()->OMSetRenderTargets(1, &target_view, NULL);
+
+	backend.Set_Viewport(0, 0, TARGET_SIZE, TARGET_SIZE);
+	configure_unlit_pass_through(backend);
+	backend.Set_Texture_Stage_State(0, D3DTSS_COLORARG1, D3DTA_TFACTOR);
+	backend.Set_Texture_Stage_State(0, D3DTSS_ALPHAARG1, D3DTA_TFACTOR);
+
+	ID3D11Buffer * vertices = NULL;
+	CHECK(DX11Resource_Create_Vertex_Buffer(d3d, sizeof(QUAD_VERTICES), D3DPOOL_MANAGED, 0,
+		QUAD_VERTICES, &vertices));
+	ID3D11Buffer * indices = NULL;
+	CHECK(DX11Resource_Create_Index_Buffer(d3d, sizeof(QUAD_INDICES), D3DPOOL_MANAGED, 0,
+		QUAD_INDICES, &indices));
+	backend.Set_Stream_Source(vertices, sizeof(BackendVertex), 0);
+	backend.Set_Indices(indices, DXGI_FORMAT_R16_UINT);
+
+	unsigned wrong = 0;
+	for (unsigned round = 0; round < ROUNDS; ++round) {
+		for (unsigned pick = 0; pick < 2; ++pick) {
+			backend.Set_Render_State(D3DRS_TEXTUREFACTOR, FACTORS[pick]);
+			CHECK(backend.Draw_Indexed_Triangles(6, 0, 0));
+
+			device.Get_Context()->CopyResource(staging, target);
+			D3D11_MAPPED_SUBRESOURCE mapped;
+			CHECK(SUCCEEDED(device.Get_Context()->Map(staging, 0, D3D11_MAP_READ, 0, &mapped)));
+			const unsigned char * centre = static_cast<const unsigned char *>(mapped.pData)
+				+ mapped.RowPitch * (TARGET_SIZE / 2) + (TARGET_SIZE / 2) * 4;
+			const DWORD drawn = (static_cast<DWORD>(centre[3]) << 24) | (centre[2] << 16)
+				| (centre[1] << 8) | centre[0];
+			if (drawn != FACTORS[pick]) {
+				if (wrong == 0) {
+					printf("  round %u factor %08x drew %08x\n", round, FACTORS[pick], drawn);
+				}
+				++wrong;
+			}
+			device.Get_Context()->Unmap(staging, 0);
+		}
+		for (unsigned fresh = 0; fresh < 2; ++fresh) {
+			backend.Set_Render_State(D3DRS_TEXTUREFACTOR, FRESH_FACTOR | (round * 2 + fresh));
+			CHECK(backend.Draw_Indexed_Triangles(6, 0, 0));
+		}
+	}
+	CHECK_EQ(wrong, 0u);
+
+	// Fewer pixel blocks written than drawn, so the two were bound again, and the vertex ring's
+	// first write and the pixel ring's first write and two wraps at least.
+	unsigned writes = 0;
+	unsigned renames = 0;
+	backend.Take_Frame_Constant_Writes(writes, renames);
+	printf("  %u constant writes, %u renames over %u draws\n", writes, renames, ROUNDS * 4);
+	if (backend.Constant_Offsets()) {
+		CHECK(writes < ROUNDS * 4);
+		CHECK(renames >= 4u);
+	}
+
+	indices->Release();
+	vertices->Release();
+	target_view->Release();
+	staging->Release();
+	target->Release();
+	backend.Shutdown();
+}
+
+// A pass multiplying what is under it goes up without the blast lights: the pass under it took
+// them, and the multiply would light the surface twice.  A blend change raises no constant flag of
+// its own, so the pixel block is built again only when Pixel_Blend_Key moves, and the multiply test
+// is part of it.  Read through the block the draw went up with: the multiply passes that read the
+// lights are the terrain's programs, and a generated multiply program samples none.
+TEST(dx11backend_a_multiply_pass_goes_up_without_the_blast_lights)
+{
+	DX11DeviceClass device;
+	CHECK(device.Create_Offscreen());
+	ID3D11Device * d3d = device.Get_Device();
+
+	DX11BackendClass backend;
+	CHECK(backend.Initialise(&device));
+
+	D3D11_TEXTURE2D_DESC target_description;
+	memset(&target_description, 0, sizeof(target_description));
+	target_description.Width = TARGET_SIZE;
+	target_description.Height = TARGET_SIZE;
+	target_description.MipLevels = 1;
+	target_description.ArraySize = 1;
+	target_description.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+	target_description.SampleDesc.Count = 1;
+	target_description.Usage = D3D11_USAGE_DEFAULT;
+	target_description.BindFlags = D3D11_BIND_RENDER_TARGET;
+
+	ID3D11Texture2D * target = NULL;
+	CHECK(SUCCEEDED(d3d->CreateTexture2D(&target_description, NULL, &target)));
+	ID3D11RenderTargetView * target_view = NULL;
+	CHECK(SUCCEEDED(d3d->CreateRenderTargetView(target, NULL, &target_view)));
+
+	configure_unlit_pass_through(backend);
+	CHECK(backend.Begin_Shadow_Map(64));
+	backend.End_Shadow_Map();
+	backend.Set_Shadow_Parameters(0.001f, 0.5f, 2.0f, 1.0f, 1.0f, 1.0f, 0.0f);
+	const float blast[BLAST_LIGHT_FLOATS] = {
+		0.0f, 0.0f, 0.5f, 10.0f,  1.0f, 0.5f, 0.25f, 1.0f,  0.1f, 0.1f, 0.1f, 0.0f };
+	backend.Set_Blast_Lights(blast, 1);
+
+	device.Get_Context()->OMSetRenderTargets(1, &target_view, NULL);
+	backend.Set_Viewport(0, 0, TARGET_SIZE, TARGET_SIZE);
+
+	ID3D11Buffer * vertices = NULL;
+	CHECK(DX11Resource_Create_Vertex_Buffer(d3d, sizeof(QUAD_VERTICES), D3DPOOL_MANAGED, 0,
+		QUAD_VERTICES, &vertices));
+	ID3D11Buffer * indices = NULL;
+	CHECK(DX11Resource_Create_Index_Buffer(d3d, sizeof(QUAD_INDICES), D3DPOOL_MANAGED, 0,
+		QUAD_INDICES, &indices));
+	backend.Set_Stream_Source(vertices, sizeof(BackendVertex), 0);
+	backend.Set_Indices(indices, DXGI_FORMAT_R16_UINT);
+
+	backend.Set_Render_State(D3DRS_ALPHABLENDENABLE, TRUE);
+	for (unsigned pass = 0; pass < 3; ++pass) {
+		const bool multiply = pass == 1;
+		backend.Set_Render_State(D3DRS_SRCBLEND, multiply ? D3DBLEND_ZERO : D3DBLEND_SRCALPHA);
+		backend.Set_Render_State(D3DRS_DESTBLEND, multiply ? D3DBLEND_SRCCOLOR : D3DBLEND_INVSRCALPHA);
+		CHECK(backend.Draw_Indexed_Triangles(6, 0, 0));
+		CHECK_EQ(backend.Pixel_Block_Blast_Lights(), multiply ? 0u : 1u);
+	}
+
+	indices->Release();
+	vertices->Release();
+	target_view->Release();
 	target->Release();
 	backend.Shutdown();
 }
@@ -1261,6 +1435,330 @@ TEST(dx11backend_the_smoke_map_holds_each_casters_three_sums)
 	backend.Shutdown();
 }
 
+// The sun's depth map read back as its 24-bit depths, one a texel.
+static void read_shadow_depths(DX11DeviceClass & device, DX11BackendClass & backend,
+	std::vector<unsigned> & depths)
+{
+	ID3D11Resource * resource = NULL;
+	backend.Shadow_Map()->GetResource(&resource);
+	ID3D11Texture2D * texture = static_cast<ID3D11Texture2D *>(resource);
+	D3D11_TEXTURE2D_DESC description;
+	texture->GetDesc(&description);
+	description.Usage = D3D11_USAGE_STAGING;
+	description.BindFlags = 0;
+	description.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+	ID3D11Texture2D * staging = NULL;
+	CHECK(SUCCEEDED(device.Get_Device()->CreateTexture2D(&description, NULL, &staging)));
+	device.Get_Context()->CopyResource(staging, texture);
+	D3D11_MAPPED_SUBRESOURCE mapped;
+	CHECK(SUCCEEDED(device.Get_Context()->Map(staging, 0, D3D11_MAP_READ, 0, &mapped)));
+	depths.resize(description.Width * description.Height);
+	for (unsigned y = 0; y < description.Height; ++y) {
+		const unsigned * row = reinterpret_cast<const unsigned *>(
+			static_cast<const unsigned char *>(mapped.pData) + mapped.RowPitch * y);
+		for (unsigned x = 0; x < description.Width; ++x) {
+			depths[y * description.Width + x] = row[x] & 0x00ffffff;
+		}
+	}
+	device.Get_Context()->Unmap(staging, 0);
+	staging->Release();
+	resource->Release();
+}
+
+// The instanced depth-only casters (Draw_Shadow_Casters) have to leave the sun's map holding the
+// depth the generated programs leave in it for the same mesh drawn once a copy, to the bit: a
+// mesh drawn twice, turned and moved, and tilted in depth so every texel's value is its own.
+TEST(dx11backend_instanced_shadow_casters_write_the_depth_the_old_draws_write)
+{
+	DX11DeviceClass device;
+	CHECK(device.Create_Offscreen());
+	ID3D11Device * d3d = device.Get_Device();
+
+	DX11BackendClass backend;
+	CHECK(backend.Initialise(&device));
+	configure_unlit_pass_through(backend);
+
+	// The sun's box: x and y across four units, depth over ten.
+	float sun[16];
+	set_identity(sun);
+	sun[0] = 0.5f;
+	sun[5] = 0.5f;
+	sun[10] = 0.1f;
+	backend.Set_Transform(D3DTS_PROJECTION, sun);
+
+	// Two copies of the mesh, turned by different angles and moved, in Direct3D 9's layout.
+	float worlds[2][16];
+	const float angles[2] = { 0.5236f, -1.1f };
+	const float moves[2][3] = { { 0.3f, -0.2f, 2.75f }, { -0.45f, 0.35f, 3.1f } };
+	for (unsigned copy = 0; copy < 2; ++copy) {
+		set_identity(worlds[copy]);
+		worlds[copy][0] = cosf(angles[copy]);
+		worlds[copy][1] = sinf(angles[copy]);
+		worlds[copy][4] = -sinf(angles[copy]);
+		worlds[copy][5] = cosf(angles[copy]);
+		worlds[copy][12] = moves[copy][0];
+		worlds[copy][13] = moves[copy][1];
+		worlds[copy][14] = moves[copy][2];
+	}
+
+	// The quad, tilted from front to back.
+	BackendVertex vertices_data[4];
+	memcpy(vertices_data, QUAD_VERTICES, sizeof(vertices_data));
+	const float depths_at[4] = { 0.37f, 1.91f, 4.13f, 2.59f };
+	for (unsigned index = 0; index < 4; ++index) {
+		vertices_data[index].Position[0] *= 1.3f;
+		vertices_data[index].Position[1] *= 0.9f;
+		vertices_data[index].Position[2] = depths_at[index];
+	}
+	ID3D11Buffer * vertices = NULL;
+	CHECK(DX11Resource_Create_Vertex_Buffer(d3d, sizeof(vertices_data), D3DPOOL_MANAGED, 0,
+		vertices_data, &vertices));
+	ID3D11Buffer * indices = NULL;
+	CHECK(DX11Resource_Create_Index_Buffer(d3d, sizeof(QUAD_INDICES), D3DPOOL_MANAGED, 0,
+		QUAD_INDICES, &indices));
+
+	// What renderShadowMap sets for the pass, and an opaque mesh's shader: both faces, so the
+	// cull cannot hide a difference.
+	backend.Set_Render_State(D3DRS_COLORWRITEENABLE, 0);
+	backend.Set_Render_State(D3DRS_ZENABLE, D3DZB_TRUE);
+	backend.Set_Render_State(D3DRS_ZWRITEENABLE, TRUE);
+	backend.Set_Render_State(D3DRS_ZFUNC, D3DCMP_LESSEQUAL);
+	backend.Set_Render_State(D3DRS_CULLMODE, D3DCULL_NONE);
+
+	CHECK(backend.Begin_Shadow_Map(64));
+	backend.Set_Stream_Source(vertices, sizeof(BackendVertex), 0);
+	backend.Set_Indices(indices, DXGI_FORMAT_R16_UINT);
+	for (unsigned copy = 0; copy < 2; ++copy) {
+		backend.Set_Transform(D3DTS_WORLD, worlds[copy]);
+		CHECK(backend.Draw_Indexed_Triangles(6, 0, 0));
+	}
+	backend.End_Shadow_Map();
+	std::vector<unsigned> old_depths;
+	read_shadow_depths(device, backend, old_depths);
+
+	// The pass before the instanced one has to have drawn something, or the comparison proves
+	// nothing: some texels near, some still at the far plane.
+	unsigned covered = 0;
+	for (size_t texel = 0; texel < old_depths.size(); ++texel) {
+		if (old_depths[texel] != 0x00ffffff) {
+			++covered;
+		}
+	}
+	printf("  %u of %u texels covered\n", covered, (unsigned)old_depths.size());
+	CHECK(covered > 0);
+	CHECK(covered < old_depths.size());
+
+	// The instanced draw, with the cull and depth test left somewhere else first: the run's own
+	// have to be the ones it draws with.
+	backend.Set_Render_State(D3DRS_CULLMODE, D3DCULL_CW);
+	backend.Set_Render_State(D3DRS_ZFUNC, D3DCMP_ALWAYS);
+	CHECK(backend.Begin_Shadow_Map(64));
+	DX11BackendClass::ShadowCasterRun run;
+	run.Kind = DX11BackendClass::SHADOW_CASTER_RIGID;
+	run.Vertices = vertices;
+	run.Stride = sizeof(BackendVertex);
+	run.TextureOffset = 0;
+	run.Indices = indices;
+	run.StartIndex = 0;
+	run.IndexCount = 6;
+	run.BaseVertex = 0;
+	run.Strip = false;
+	run.CullMode = D3DCULL_NONE;
+	run.DepthFunction = D3DCMP_LESSEQUAL;
+	run.FirstInstance = 0;
+	run.InstanceCount = 2;
+	// The same worlds as the rows of a Matrix3D, which is what the mesh renderer hands over.
+	float rows[2][12];
+	for (unsigned copy = 0; copy < 2; ++copy) {
+		for (unsigned row = 0; row < 3; ++row) {
+			for (unsigned column = 0; column < 4; ++column) {
+				rows[copy][row * 4 + column] = worlds[copy][column * 4 + row];
+			}
+		}
+	}
+	const float * const instance_rows[2] = { rows[0], rows[1] };
+	const unsigned first_bones[2] = { 0, 0 };
+	CHECK(backend.Upload_Shadow_Casters(instance_rows, first_bones, 2, NULL, 0));
+	CHECK(backend.Draw_Shadow_Casters(&run, 1));
+	backend.End_Shadow_Map();
+	std::vector<unsigned> lean_depths;
+	read_shadow_depths(device, backend, lean_depths);
+
+	CHECK_EQ(lean_depths.size(), old_depths.size());
+	unsigned differing = 0;
+	for (size_t texel = 0; texel < old_depths.size() && texel < lean_depths.size(); ++texel) {
+		if (old_depths[texel] != lean_depths[texel]) {
+			++differing;
+		}
+	}
+	if (differing != 0) {
+		printf("  %u texels differ\n", differing);
+	}
+	CHECK_EQ(differing, 0u);
+
+	indices->Release();
+	vertices->Release();
+	backend.Shutdown();
+}
+
+// A skin skinned in the depth pass's vertex program has to leave the depth the CPU fill leaves
+// (Matrix3D::Transform_Vector per vertex, then drawn with an identity world), within a level or
+// two of a 24-bit depth for the order the GPU adds the products in: two copies of a quad whose
+// halves hang on two bones, each copy on its own pair of bones.
+TEST(dx11backend_skinned_shadow_casters_write_the_depth_the_cpu_skinned_draws_write)
+{
+	static const unsigned BONES = 4;
+	static const unsigned DEPTH_LEVELS_ALLOWED = 2;
+	static const unsigned EDGE_TEXELS_ALLOWED = 4;
+
+	DX11DeviceClass device;
+	CHECK(device.Create_Offscreen());
+	ID3D11Device * d3d = device.Get_Device();
+
+	DX11BackendClass backend;
+	CHECK(backend.Initialise(&device));
+	configure_unlit_pass_through(backend);
+
+	float sun[16];
+	set_identity(sun);
+	sun[0] = 0.5f;
+	sun[5] = 0.5f;
+	sun[10] = 0.1f;
+	backend.Set_Transform(D3DTS_PROJECTION, sun);
+
+	// Four bones, three rows of a Matrix3D each: turned about z, tipped about x, moved.
+	float bone_rows[BONES][12];
+	const float turns[BONES] = { 0.4f, -0.7f, 1.3f, 0.15f };
+	const float tips[BONES] = { 0.2f, -0.35f, 0.1f, 0.45f };
+	const float moves[BONES][3] = {
+		{ 0.2f, -0.1f, 3.0f }, { -0.3f, 0.25f, 2.2f }, { 0.35f, 0.3f, 4.1f }, { -0.2f, -0.4f, 1.7f } };
+	for (unsigned bone = 0; bone < BONES; ++bone) {
+		const float c = cosf(turns[bone]);
+		const float s = sinf(turns[bone]);
+		const float ct = cosf(tips[bone]);
+		const float st = sinf(tips[bone]);
+		// The turn about z, then the tip about x: rows of tip * turn.
+		const float rows[3][4] = {
+			{ c, -s, 0.0f, moves[bone][0] },
+			{ ct * s, ct * c, -st, moves[bone][1] },
+			{ st * s, st * c, ct, moves[bone][2] } };
+		memcpy(bone_rows[bone], rows, sizeof(rows));
+	}
+
+	// The bind pose: the quad, its first two corners on one bone and the other two on the next.
+	DX11BackendClass::ShadowSkinVertex bind[4];
+	for (unsigned index = 0; index < 4; ++index) {
+		bind[index].Position[0] = QUAD_VERTICES[index].Position[0] * 0.8f;
+		bind[index].Position[1] = QUAD_VERTICES[index].Position[1] * 0.6f;
+		bind[index].Position[2] = 0.25f * (float)index - 0.3f;
+		bind[index].Bone = (index < 2) ? 0 : 1;
+	}
+
+	// The CPU fill's result for each copy, drawn the old way with an identity world.
+	BackendVertex deformed[2][4];
+	for (unsigned copy = 0; copy < 2; ++copy) {
+		for (unsigned index = 0; index < 4; ++index) {
+			const float * row = bone_rows[copy * 2 + bind[index].Bone];
+			const float * p = bind[index].Position;
+			deformed[copy][index] = QUAD_VERTICES[index];
+			for (unsigned axis = 0; axis < 3; ++axis) {
+				const float * r = row + axis * 4;
+				deformed[copy][index].Position[axis] = r[0] * p[0] + r[1] * p[1] + r[2] * p[2] + r[3];
+			}
+		}
+	}
+	ID3D11Buffer * vertices = NULL;
+	CHECK(DX11Resource_Create_Vertex_Buffer(d3d, sizeof(deformed), D3DPOOL_MANAGED, 0, deformed, &vertices));
+	ID3D11Buffer * indices = NULL;
+	CHECK(DX11Resource_Create_Index_Buffer(d3d, sizeof(QUAD_INDICES), D3DPOOL_MANAGED, 0,
+		QUAD_INDICES, &indices));
+
+	backend.Set_Render_State(D3DRS_COLORWRITEENABLE, 0);
+	backend.Set_Render_State(D3DRS_ZENABLE, D3DZB_TRUE);
+	backend.Set_Render_State(D3DRS_ZWRITEENABLE, TRUE);
+	backend.Set_Render_State(D3DRS_ZFUNC, D3DCMP_LESSEQUAL);
+	backend.Set_Render_State(D3DRS_CULLMODE, D3DCULL_NONE);
+
+	float identity[16];
+	set_identity(identity);
+	CHECK(backend.Begin_Shadow_Map(64));
+	backend.Set_Transform(D3DTS_WORLD, identity);
+	backend.Set_Stream_Source(vertices, sizeof(BackendVertex), 0);
+	backend.Set_Indices(indices, DXGI_FORMAT_R16_UINT);
+	for (unsigned copy = 0; copy < 2; ++copy) {
+		CHECK(backend.Draw_Indexed_Triangles(6, 0, copy * 4));
+	}
+	backend.End_Shadow_Map();
+	std::vector<unsigned> old_depths;
+	read_shadow_depths(device, backend, old_depths);
+
+	unsigned covered = 0;
+	for (size_t texel = 0; texel < old_depths.size(); ++texel) {
+		if (old_depths[texel] != 0x00ffffff) {
+			++covered;
+		}
+	}
+	printf("  %u of %u texels covered\n", covered, (unsigned)old_depths.size());
+	CHECK(covered > 0);
+	CHECK(covered < old_depths.size());
+
+	// Uploaded behind a few vertices of another model, so the base vertex is not nought.
+	DX11BackendClass::ShadowSkinVertex padding[3];
+	memset(padding, 0, sizeof(padding));
+	unsigned padding_first = 0;
+	CHECK(backend.Upload_Shadow_Skin(padding, 3, padding_first));
+	unsigned first_vertex = 0;
+	CHECK(backend.Upload_Shadow_Skin(bind, 4, first_vertex));
+	CHECK_EQ(first_vertex, padding_first + 3);
+
+	CHECK(backend.Begin_Shadow_Map(64));
+	DX11BackendClass::ShadowCasterRun run;
+	run.Kind = DX11BackendClass::SHADOW_CASTER_SKINNED;
+	run.Vertices = NULL;
+	run.Stride = 0;
+	run.TextureOffset = 0;
+	run.Indices = indices;
+	run.StartIndex = 0;
+	run.IndexCount = 6;
+	run.BaseVertex = first_vertex;
+	run.Strip = false;
+	run.CullMode = D3DCULL_NONE;
+	run.DepthFunction = D3DCMP_LESSEQUAL;
+	run.FirstInstance = 0;
+	run.InstanceCount = 2;
+	// Identity worlds, as a skin's always is.
+	const float * const worlds[2] = { NULL, NULL };
+	const unsigned first_bones[2] = { 0, 2 };
+	const float * const bones[BONES] = { bone_rows[0], bone_rows[1], bone_rows[2], bone_rows[3] };
+	CHECK(backend.Upload_Shadow_Casters(worlds, first_bones, 2, bones, BONES));
+	CHECK(backend.Draw_Shadow_Casters(&run, 1));
+	backend.End_Shadow_Map();
+	std::vector<unsigned> lean_depths;
+	read_shadow_depths(device, backend, lean_depths);
+
+	CHECK_EQ(lean_depths.size(), old_depths.size());
+	unsigned edge = 0;
+	unsigned widest = 0;
+	for (size_t texel = 0; texel < old_depths.size() && texel < lean_depths.size(); ++texel) {
+		const bool old_covered = old_depths[texel] != 0x00ffffff;
+		const bool lean_covered = lean_depths[texel] != 0x00ffffff;
+		if (old_covered != lean_covered) {
+			++edge;
+		} else {
+			const unsigned gap = (old_depths[texel] > lean_depths[texel])
+				? old_depths[texel] - lean_depths[texel] : lean_depths[texel] - old_depths[texel];
+			widest = (gap > widest) ? gap : widest;
+		}
+	}
+	printf("  %u edge texels differ, widest depth gap %u\n", edge, widest);
+	CHECK(edge <= EDGE_TEXELS_ALLOWED);
+	CHECK(widest <= DEPTH_LEVELS_ALLOWED);
+
+	indices->Release();
+	vertices->Release();
+	backend.Shutdown();
+}
+
 // The volumetric hazard clouds' text is the SDL GPU backend's too, written for DXC.  Every pass of
 // it has to go through the compiler this backend uses at shader model 5, and the device has to take
 // what comes out, or the clouds go Classic on the first hazard of the match.
@@ -1433,4 +1931,261 @@ TEST(dx11backend_the_modern_water_constants_are_built_from_the_registers)
 	CHECK(block.HullParameters[0] == 0.0f);
 	WaterConstants::FillVisual(block, registers, visual);
 	CHECK(visual.VisualHullMeta[0][3] == 0.0f);
+}
+
+// A multisampled scene the way the game draws one: four samples asked of the device, the post
+// chain's target and the scene's depth made at four, the backend drawing into them, the chain
+// resolving the colour onto the swap chain and Resolve_Scene_Depth the depth into the buffer every
+// depth reader samples.  The left half is an opaque quad at depth 0.5 and has to come back as the
+// vertex colour and as 0.5.  The right half is an alpha tested white quad whose alpha climbs across
+// it and a little up it (0.75 of the width, 0.25 of the height), tested GREATER than a half, so the
+// cut is a slanted line.  A plain clip cuts it with no grey at all; the alpha itself taken as
+// coverage greys every pixel past the cut, which is what thinned the willows; the sharpened alpha
+// greys the pixel or two each row's cut passes through and covers the rest.
+TEST(dx11backend_a_multisampled_scene_resolves_its_colour_and_depth_and_covers_by_alpha)
+{
+	HWND window = CreateWindowExA(0, "STATIC", "dx11msaa", WS_OVERLAPPED, 0, 0, TARGET_SIZE,
+		TARGET_SIZE, NULL, NULL, GetModuleHandle(NULL), NULL);
+	CHECK(window != NULL);
+	DX11DeviceClass device;
+	device.Request_Debug_Layer();
+	device.Request_Sample_Count(4);
+	CHECK(device.Create(window, TARGET_SIZE, TARGET_SIZE));
+	CHECK_EQ(device.Get_Sample_Count(), 4u);
+	ID3D11Device * d3d = device.Get_Device();
+	ID3D11DeviceContext * context = device.Get_Context();
+
+	// No chain at all: a multisampled scene still goes into the post target and out through a copy.
+	DX11PostProcessClass post;
+	CHECK(post.Initialise(&device));
+	post.Begin_Frame();
+	device.Set_Scene_View(post.Scene_View());
+	CHECK(device.Scene_Is_Multisampled());
+
+	DX11BackendClass backend;
+	CHECK(backend.Initialise(&device));
+	backend.Begin_Scene();
+	const float black[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+	backend.Clear(true, true, black);
+
+	// White at alpha 0, 0.25, 1 and 0.75: bottom left, top left, top right, bottom right, one plane.
+	const BackendVertex halves[8] = {
+		{ { -1.0f, -1.0f, 0.5f }, { 0.0f, 0.0f, 1.0f }, VERTEX_COLOUR, { 0.0f, 0.0f }, { 0.0f, 0.0f } },
+		{ { -1.0f,  1.0f, 0.5f }, { 0.0f, 0.0f, 1.0f }, VERTEX_COLOUR, { 0.0f, 0.0f }, { 0.0f, 0.0f } },
+		{ {  0.0f,  1.0f, 0.5f }, { 0.0f, 0.0f, 1.0f }, VERTEX_COLOUR, { 0.0f, 0.0f }, { 0.0f, 0.0f } },
+		{ {  0.0f, -1.0f, 0.5f }, { 0.0f, 0.0f, 1.0f }, VERTEX_COLOUR, { 0.0f, 0.0f }, { 0.0f, 0.0f } },
+		{ {  0.0f, -1.0f, 0.5f }, { 0.0f, 0.0f, 1.0f }, 0x00ffffff, { 0.0f, 0.0f }, { 0.0f, 0.0f } },
+		{ {  0.0f,  1.0f, 0.5f }, { 0.0f, 0.0f, 1.0f }, 0x40ffffff, { 0.0f, 0.0f }, { 0.0f, 0.0f } },
+		{ {  1.0f,  1.0f, 0.5f }, { 0.0f, 0.0f, 1.0f }, 0xffffffff, { 0.0f, 0.0f }, { 0.0f, 0.0f } },
+		{ {  1.0f, -1.0f, 0.5f }, { 0.0f, 0.0f, 1.0f }, 0xbfffffff, { 0.0f, 0.0f }, { 0.0f, 0.0f } },
+	};
+	ID3D11Buffer * vertices = NULL;
+	CHECK(DX11Resource_Create_Vertex_Buffer(d3d, sizeof(halves), D3DPOOL_MANAGED, 0, halves, &vertices));
+	ID3D11Buffer * indices = NULL;
+	CHECK(DX11Resource_Create_Index_Buffer(d3d, sizeof(QUAD_INDICES), D3DPOOL_MANAGED, 0,
+		QUAD_INDICES, &indices));
+
+	configure_unlit_pass_through(backend);
+	backend.Set_Render_State(D3DRS_ZENABLE, D3DZB_TRUE);
+	backend.Set_Render_State(D3DRS_ZWRITEENABLE, TRUE);
+	backend.Set_Render_State(D3DRS_ZFUNC, D3DCMP_LESSEQUAL);
+	backend.Set_Stream_Source(vertices, sizeof(BackendVertex), 0);
+	backend.Set_Indices(indices, DXGI_FORMAT_R16_UINT);
+	CHECK(backend.Draw_Indexed_Triangles(6, 0, 0));
+	backend.Set_Render_State(D3DRS_ALPHATESTENABLE, TRUE);
+	backend.Set_Render_State(D3DRS_ALPHAREF, 0x80);
+	backend.Set_Render_State(D3DRS_ALPHAFUNC, D3DCMP_GREATER);
+	CHECK(backend.Draw_Indexed_Triangles(6, 0, 4));
+
+	backend.Resolve_Scene_Depth();
+	CHECK(post.Run_Chain());
+
+	// The colour, off the swap chain.
+	ID3D11Resource * back_buffer = NULL;
+	device.Get_Back_Buffer_View()->GetResource(&back_buffer);
+	D3D11_TEXTURE2D_DESC staging_description;
+	static_cast<ID3D11Texture2D *>(back_buffer)->GetDesc(&staging_description);
+	staging_description.Usage = D3D11_USAGE_STAGING;
+	staging_description.BindFlags = 0;
+	staging_description.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+	staging_description.MiscFlags = 0;
+	ID3D11Texture2D * staging = NULL;
+	CHECK(SUCCEEDED(d3d->CreateTexture2D(&staging_description, NULL, &staging)));
+	context->CopyResource(staging, back_buffer);
+	D3D11_MAPPED_SUBRESOURCE mapped;
+	CHECK(SUCCEEDED(context->Map(staging, 0, D3D11_MAP_READ, 0, &mapped)));
+	const unsigned char * pixels = static_cast<const unsigned char *>(mapped.pData);
+	const unsigned char * opaque = pixels + mapped.RowPitch * (TARGET_SIZE / 2) + (TARGET_SIZE / 4) * 4;
+	CHECK_EQ(opaque[0], EXPECTED_BLUE);
+	CHECK_EQ(opaque[1], EXPECTED_GREEN);
+	CHECK_EQ(opaque[2], EXPECTED_RED);
+	// Row by row across the right half: black before the cut, white past it, grey only where it
+	// passes.  Under a tenth of the way across every row is short of the reference, and past nine
+	// tenths every row is well over it.
+	unsigned grey = 0;
+	unsigned widest = 0;
+	unsigned lit_early = 0;
+	unsigned dark_late = 0;
+	for (unsigned y = TARGET_SIZE / 8; y < TARGET_SIZE * 7 / 8; ++y) {
+		unsigned row_grey = 0;
+		for (unsigned x = TARGET_SIZE / 2; x < TARGET_SIZE; ++x) {
+			const unsigned value = pixels[mapped.RowPitch * y + x * 4];
+			row_grey += (value > 8 && value < 247) ? 1u : 0u;
+		}
+		grey += row_grey;
+		widest = (row_grey > widest) ? row_grey : widest;
+		lit_early += (pixels[mapped.RowPitch * y + (TARGET_SIZE * 21 / 40) * 4] > 8) ? 1u : 0u;
+		dark_late += (pixels[mapped.RowPitch * y + (TARGET_SIZE * 39 / 40) * 4] < 247) ? 1u : 0u;
+	}
+	if (grey < 8 || widest > 2 || lit_early != 0 || dark_late != 0) {
+		printf("  alpha tested half: %u grey pixels, at most %u a row, %u lit early, %u dark late\n",
+			grey, widest, lit_early, dark_late);
+	}
+	CHECK(grey >= 8);
+	CHECK(widest <= 2);
+	CHECK_EQ(lit_early, 0u);
+	CHECK_EQ(dark_late, 0u);
+	context->Unmap(staging, 0);
+
+	// The depth, off the single-sample buffer the resolve wrote.  D24: the low 24 bits.
+	ID3D11Resource * depth = NULL;
+	device.Get_Depth_Texture()->GetResource(&depth);
+	D3D11_TEXTURE2D_DESC depth_description;
+	static_cast<ID3D11Texture2D *>(depth)->GetDesc(&depth_description);
+	depth_description.Usage = D3D11_USAGE_STAGING;
+	depth_description.BindFlags = 0;
+	depth_description.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+	depth_description.MiscFlags = 0;
+	ID3D11Texture2D * depth_staging = NULL;
+	CHECK(SUCCEEDED(d3d->CreateTexture2D(&depth_description, NULL, &depth_staging)));
+	context->CopyResource(depth_staging, depth);
+	CHECK(SUCCEEDED(context->Map(depth_staging, 0, D3D11_MAP_READ, 0, &mapped)));
+	const unsigned texel = *reinterpret_cast<const unsigned *>(static_cast<const unsigned char *>(mapped.pData)
+		+ mapped.RowPitch * (TARGET_SIZE / 2) + (TARGET_SIZE / 4) * 4);
+	const float resolved = static_cast<float>(texel & 0xffffff) / 16777215.0f;
+	if (fabsf(resolved - 0.5f) > 0.001f) {
+		printf("  resolved depth %f, wanted 0.5\n", resolved);
+	}
+	CHECK(fabsf(resolved - 0.5f) <= 0.001f);
+	context->Unmap(depth_staging, 0);
+
+	depth_staging->Release();
+	depth->Release();
+	staging->Release();
+	back_buffer->Release();
+	indices->Release();
+	vertices->Release();
+	backend.Shutdown();
+	post.Shutdown();
+	device.Release();
+	DestroyWindow(window);
+}
+
+// The black and white view, the motion blur and the cross fade bind a texture the size of the screen
+// right after the frame's clear and draw the scene into it over the single-sample depth (Depth_For).
+// With multisampling the scene's clear lands on the multisampled depth, so the frame's clear has to
+// take the single-sample one too: here it holds the last frame's resolve at 0.2, and a quad at 0.5
+// drawn into the filter's texture fails the depth test and leaves the texture black without it.
+TEST(dx11backend_a_screen_filter_after_a_multisampled_clear_draws_over_a_cleared_depth)
+{
+	HWND window = CreateWindowExA(0, "STATIC", "dx11msaafilter", WS_OVERLAPPED, 0, 0, TARGET_SIZE,
+		TARGET_SIZE, NULL, NULL, GetModuleHandle(NULL), NULL);
+	CHECK(window != NULL);
+	DX11DeviceClass device;
+	device.Request_Debug_Layer();
+	device.Request_Sample_Count(4);
+	CHECK(device.Create(window, TARGET_SIZE, TARGET_SIZE));
+	CHECK_EQ(device.Get_Sample_Count(), 4u);
+	ID3D11Device * d3d = device.Get_Device();
+	ID3D11DeviceContext * context = device.Get_Context();
+
+	DX11PostProcessClass post;
+	CHECK(post.Initialise(&device));
+	post.Begin_Frame();
+	device.Set_Scene_View(post.Scene_View());
+	CHECK(device.Scene_Is_Multisampled());
+
+	DX11BackendClass backend;
+	CHECK(backend.Initialise(&device));
+	backend.Begin_Scene();
+
+	const BackendVertex near_then_middle[8] = {
+		{ { -1.0f, -1.0f, 0.2f }, { 0.0f, 0.0f, 1.0f }, VERTEX_COLOUR, { 0.0f, 0.0f }, { 0.0f, 0.0f } },
+		{ { -1.0f,  1.0f, 0.2f }, { 0.0f, 0.0f, 1.0f }, VERTEX_COLOUR, { 0.0f, 0.0f }, { 0.0f, 0.0f } },
+		{ {  1.0f,  1.0f, 0.2f }, { 0.0f, 0.0f, 1.0f }, VERTEX_COLOUR, { 0.0f, 0.0f }, { 0.0f, 0.0f } },
+		{ {  1.0f, -1.0f, 0.2f }, { 0.0f, 0.0f, 1.0f }, VERTEX_COLOUR, { 0.0f, 0.0f }, { 0.0f, 0.0f } },
+		{ { -1.0f, -1.0f, 0.5f }, { 0.0f, 0.0f, 1.0f }, VERTEX_COLOUR, { 0.0f, 0.0f }, { 0.0f, 0.0f } },
+		{ { -1.0f,  1.0f, 0.5f }, { 0.0f, 0.0f, 1.0f }, VERTEX_COLOUR, { 0.0f, 0.0f }, { 0.0f, 0.0f } },
+		{ {  1.0f,  1.0f, 0.5f }, { 0.0f, 0.0f, 1.0f }, VERTEX_COLOUR, { 0.0f, 0.0f }, { 0.0f, 0.0f } },
+		{ {  1.0f, -1.0f, 0.5f }, { 0.0f, 0.0f, 1.0f }, VERTEX_COLOUR, { 0.0f, 0.0f }, { 0.0f, 0.0f } },
+	};
+	ID3D11Buffer * vertices = NULL;
+	CHECK(DX11Resource_Create_Vertex_Buffer(d3d, sizeof(near_then_middle), D3DPOOL_MANAGED, 0,
+		near_then_middle, &vertices));
+	ID3D11Buffer * indices = NULL;
+	CHECK(DX11Resource_Create_Index_Buffer(d3d, sizeof(QUAD_INDICES), D3DPOOL_MANAGED, 0,
+		QUAD_INDICES, &indices));
+	configure_unlit_pass_through(backend);
+	backend.Set_Render_State(D3DRS_ZENABLE, D3DZB_TRUE);
+	backend.Set_Render_State(D3DRS_ZWRITEENABLE, TRUE);
+	backend.Set_Render_State(D3DRS_ZFUNC, D3DCMP_LESSEQUAL);
+	backend.Set_Stream_Source(vertices, sizeof(BackendVertex), 0);
+	backend.Set_Indices(indices, DXGI_FORMAT_R16_UINT);
+
+	// Last frame: the near quad, resolved into the single-sample depth.
+	const float black[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+	backend.Clear(true, true, black);
+	CHECK(backend.Draw_Indexed_Triangles(6, 0, 0));
+	backend.Resolve_Scene_Depth();
+
+	// This frame: the clear, then the filter's texture and the quad behind last frame's depth.
+	backend.Clear(true, true, black);
+	D3D11_TEXTURE2D_DESC target_description;
+	memset(&target_description, 0, sizeof(target_description));
+	target_description.Width = TARGET_SIZE;
+	target_description.Height = TARGET_SIZE;
+	target_description.MipLevels = 1;
+	target_description.ArraySize = 1;
+	target_description.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+	target_description.SampleDesc.Count = 1;
+	target_description.Usage = D3D11_USAGE_DEFAULT;
+	target_description.BindFlags = D3D11_BIND_RENDER_TARGET;
+	ID3D11Texture2D * target = NULL;
+	CHECK(SUCCEEDED(d3d->CreateTexture2D(&target_description, NULL, &target)));
+	ID3D11RenderTargetView * target_view = NULL;
+	CHECK(SUCCEEDED(d3d->CreateRenderTargetView(target, NULL, &target_view)));
+	backend.Set_Render_Target(target_view);
+	backend.Clear(true, false, black);
+	CHECK(backend.Draw_Indexed_Triangles(6, 0, 4));
+	backend.Set_Render_Target(NULL);
+
+	D3D11_TEXTURE2D_DESC staging_description = target_description;
+	staging_description.Usage = D3D11_USAGE_STAGING;
+	staging_description.BindFlags = 0;
+	staging_description.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+	ID3D11Texture2D * staging = NULL;
+	CHECK(SUCCEEDED(d3d->CreateTexture2D(&staging_description, NULL, &staging)));
+	context->CopyResource(staging, target);
+	D3D11_MAPPED_SUBRESOURCE mapped;
+	CHECK(SUCCEEDED(context->Map(staging, 0, D3D11_MAP_READ, 0, &mapped)));
+	const unsigned char * centre = static_cast<const unsigned char *>(mapped.pData)
+		+ mapped.RowPitch * (TARGET_SIZE / 2) + (TARGET_SIZE / 2) * 4;
+	if (centre[0] != EXPECTED_BLUE) {
+		printf("  filter texture centre bgra %02x %02x %02x %02x\n", centre[0], centre[1], centre[2],
+			centre[3]);
+	}
+	CHECK_EQ(centre[0], EXPECTED_BLUE);
+	CHECK_EQ(centre[1], EXPECTED_GREEN);
+	CHECK_EQ(centre[2], EXPECTED_RED);
+	context->Unmap(staging, 0);
+
+	staging->Release();
+	target_view->Release();
+	target->Release();
+	indices->Release();
+	vertices->Release();
+	backend.Shutdown();
+	post.Shutdown();
+	device.Release();
+	DestroyWindow(window);
 }

@@ -40,6 +40,7 @@
 #include "Common/PlayerTemplate.h"
 #include "Common/QuotedPrintable.h"
 #include "Common/RandomValue.h"
+#include "Common/RandomMapGenerator.h"
 #include "Common/SkirmishBattleHonors.h"
 #include "Common/SkirmishPreferences.h"
 #include "GameLogic/GameLogic.h"
@@ -215,6 +216,7 @@ static Bool justEntered = FALSE;
 static Bool buttonPushed = FALSE;
 static Bool stillNeedsToSetOptions = FALSE;
 void skirmishUpdateSlotList( void );
+void skirmishPositionStartSpots( void );
 static void populateSkirmishBattleHonors( void );
 // The turbo mode box, the only speed a skirmish has besides normal.  It is the fork's control, so a
 // stock or modded SkirmishGameOptionsMenu.wnd that wins over Run/Window has none and plays at normal
@@ -309,8 +311,8 @@ Int SkirmishPreferences::getPreferredFaction(void)
 		return PLAYERTEMPLATE_RANDOM;
 	}
 
-	ret = atoi(it->second.str());
-	if (ret < PLAYERTEMPLATE_MIN || ret >= ThePlayerTemplateStore->getPlayerTemplateCount())
+	ret = PlayerTemplateFromPreference(it->second);
+	if (!IsValidPlayerTemplatePick(ret))
 		ret = PLAYERTEMPLATE_RANDOM;
 
 	if (ret >= 0)
@@ -414,10 +416,11 @@ Bool SkirmishPreferences::write(void)
 	tmp.format("%d", TheSkirmishGameInfo->getConstSlot(0)->getColor());
 	(*this)["Color"] = tmp;
 
-	tmp.format("%d", TheSkirmishGameInfo->getConstSlot(0)->getPlayerTemplate());
-	(*this)["PlayerTemplate"] = tmp;
+	(*this)["PlayerTemplate"] = PlayerTemplatePreference(TheSkirmishGameInfo->getConstSlot(0)->getPlayerTemplate());
 
-	(*this)["Map"] = TheSkirmishGameInfo->getMap();
+	// read back through QuotedPrintableToAsciiString, whose escape is '_': a generated map's
+	// "rmg_v17_..." written as it is came back as garbage and the room fell back to another map
+	(*this)["Map"] = AsciiStringToQuotedPrintable(TheSkirmishGameInfo->getMap());
 
 	(*this)["UserName"] = UnicodeStringToQuotedPrintable(TheSkirmishGameInfo->getConstSlot(0)->getName());
 
@@ -557,6 +560,11 @@ void CheckForCDAtGameStart( gameStartCallback callback )
 Bool sandboxOk = FALSE;
 static void startPressed(void)
 {
+	if (FitRandomMapToRoom(TheSkirmishGameInfo))
+	{
+		skirmishPositionStartSpots();
+		skirmishUpdateSlotList();
+	}
 
 	Bool isReady = FALSE;
 	Int playerCount = TheSkirmishGameInfo->getNumPlayers();
@@ -879,7 +887,24 @@ void positionStartSpots( GameInfo *myGame, GameWindow *buttonMapStartPositions[]
 			}
 		}
 	}
-	positionStartSpots(localMapFname, buttonMapStartPositions, mapWindow);	
+	// A generated map shows the shipped map it is made from (Surprise me the unknown map) until the
+	// match loads.  Its spots, depots and tech are not that map's, so none is shown and nobody picks
+	// a spot: every seat starts where the map puts it.
+	if (isGeneratedMapPath(localMapFname))
+	{
+		AsciiString templatePath;
+		generatedMapTemplate(localMapFname, templatePath);
+		positionStartSpots(templatePath, buttonMapStartPositions, mapWindow);
+		mapWindow->winSetUserData(NULL);
+		positionAdditionalImages(NULL, mapWindow, TRUE);
+		for (Int i = 0; i < MAX_SLOTS; ++i)
+		{
+			if (buttonMapStartPositions[i] != NULL)
+				buttonMapStartPositions[i]->winHide(TRUE);
+		}
+		return;
+	}
+	positionStartSpots(localMapFname, buttonMapStartPositions, mapWindow);
 }
 
 // A start spot draws as the button it is; a taken one then has its dark middle filled with its team's
@@ -982,12 +1007,12 @@ void updateMapStartSpots( GameInfo *myGame, GameWindow *buttonMapStartPositions[
 		// a taken spot is filled with its team's colour, or the player's without a team; the number
 		// stays for whoever cannot tell the colours apart
 		const Int spot = onLoadScreen ? gs->getApparentStartPos() : gs->getStartPos();
-		if (spot >= 0 && spot < mmd.m_numPlayers && gs->getPlayerTemplate() > PLAYERTEMPLATE_MIN)
+		if (spot >= 0 && spot < mmd.m_numPlayers && gs->getPlayerTemplate() != PLAYERTEMPLATE_OBSERVER)
 			startSpotFill(buttonMapStartPositions[spot])->fill =
 				gs->getTeamNumber() >= 0 ? LobbyTeamColor(gs->getTeamNumber()) : LobbySeatColor(gs);
 		if(onLoadScreen)
 		{
-			if(gs->getApparentStartPos() >=0 && gs->getApparentStartPos() < mmd.m_numPlayers && gs->getPlayerTemplate() > PLAYERTEMPLATE_MIN )
+			if(gs->getApparentStartPos() >=0 && gs->getApparentStartPos() < mmd.m_numPlayers && gs->getPlayerTemplate() != PLAYERTEMPLATE_OBSERVER )
 			{
 				AsciiString displayNumber;
 				displayNumber.format("NUMBER:%d",i + 1);
@@ -996,7 +1021,7 @@ void updateMapStartSpots( GameInfo *myGame, GameWindow *buttonMapStartPositions[
 		}
 		else
 		{
-			if(gs->getStartPos() >=0 && gs->getStartPos() < mmd.m_numPlayers && gs->getPlayerTemplate() > PLAYERTEMPLATE_MIN )
+			if(gs->getStartPos() >=0 && gs->getStartPos() < mmd.m_numPlayers && gs->getPlayerTemplate() != PLAYERTEMPLATE_OBSERVER )
 			{
 				AsciiString displayNumber;
 				displayNumber.format("NUMBER:%d",i + 1);
@@ -1234,12 +1259,17 @@ void InitSkirmishGameGadgets( void )
 	buttonRecordCloseID = NAMEKEY( "SkirmishGameOptionsMenu.wnd:ButtonRecordClose" );
 	recordPopover = TheWindowManager->winGetWindowFromId( parentSkirmishGameOptions, NAMEKEY( "SkirmishGameOptionsMenu.wnd:RecordPopover" ) );
 	recordVeil = TheWindowManager->winGetWindowFromId( parentSkirmishGameOptions, NAMEKEY( "SkirmishGameOptionsMenu.wnd:RecordVeil" ) );
-	recordPopover->winSetInputFunc( recordPopoverInput );
-	// Close's press goes to its parent, the record, which hands it up to the room; the layout gives
-	// the record no system callback, and the press died there
-	recordPopover->winSetSystemFunc( PassMessagesToParentSystem );
-	recordVeil->winSetInputFunc( recordVeilInput );
-	showRecord( FALSE );
+	// a layout from before the record (retail's, or a mod's in the install folder) has neither, and
+	// no Record button to open them
+	if ( recordPopover )
+	{
+		recordPopover->winSetInputFunc( recordPopoverInput );
+		// Close's press goes to its parent, the record, which hands it up to the room; the layout gives
+		// the record no system callback, and the press died there
+		recordPopover->winSetSystemFunc( PassMessagesToParentSystem );
+		recordVeil->winSetInputFunc( recordVeilInput );
+		showRecord( FALSE );
+	}
 	textEntryMapDisplay =TheWindowManager->winGetWindowFromId( parentSkirmishGameOptions, textEntryMapDisplayID );
 	DEBUG_ASSERTCRASH(textEntryMapDisplay, ("Could not find the textEntryMapDisplay"));
 	buttonReset = TheWindowManager->winGetWindowFromId( parentSkirmishGameOptions, buttonResetID );
@@ -1700,6 +1730,13 @@ void SkirmishGameOptionsMenuUpdate( WindowLayout * layout, void *userData)
 		stillNeedsToSetOptions = FALSE;
 	}
 
+	// Back deletes the room's game at once, and the screen goes on updating while it animates out
+	if (TheSkirmishGameInfo && FitRandomMapToRoom(TheSkirmishGameInfo))
+	{
+		skirmishPositionStartSpots();
+		skirmishUpdateSlotList();
+	}
+
 	if(TheShell->isAnimFinished() && TheTransitionHandler->isFinished())
 			TheShell->shutdownComplete( layout );
 }// void SkirmishGameOptionsMenuUpdate( WindowLayout * layout, void *userData)
@@ -1729,7 +1766,7 @@ WindowMsgHandledType SkirmishGameOptionsMenuInput( GameWindow *window, UnsignedI
 					// back/exit button
 					//
 					// an open record closes first
-					if( BitTest( state, KEY_STATE_UP ) && !recordPopover->winIsHidden() )
+					if( BitTest( state, KEY_STATE_UP ) && recordPopover && !recordPopover->winIsHidden() )
 						showRecord( FALSE );
 					else if( BitTest( state, KEY_STATE_UP ) )
 					{

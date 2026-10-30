@@ -100,13 +100,42 @@ enum RankPerk
 	RANK_PERK_SCATTER,						///< share of its own weapons' scatter taken away
 	RANK_PERK_DEATH_RALLY,				///< on death, allies within its aura radius take this share less damage for RallyTime
 	RANK_PERK_DETECT,							///< stealthed enemies within this radius are detected
-	RANK_PERK_AURA_RADIUS,				///< its aura radius, a multiplier
+	RANK_PERK_AURA_RADIUS,				///< every aura radius it gives, a multiplier (DETECT's excepted)
+	RANK_PERK_RATE_OF_FIRE,				///< added to its own weapons' rate of fire, on top of the grade's stat
+	RANK_PERK_RANGE,							///< added to its own weapons' range, on top of the grade's stat
+	RANK_PERK_HEALTH,							///< its max health times 1 + this, on top of the grade's stat
+	RANK_PERK_SPEED,							///< its speed times 1 + this, on top of the grade's stat
+	RANK_PERK_LAST_STAND,					///< added to its rate of fire while it is below RANK_LAST_STAND_HEALTH
+	RANK_PERK_SCAVENGE,						///< each kill it scores pays its player this share of the victim's cost
+	RANK_PERK_DESIGNATE,					///< seconds whatever it hurts wears FAERIE_FIRE, which everyone shooting at it fires faster on
+	RANK_PERK_DESIGNATE_REVEAL,		///< its mark also detects a stealthed target for as long
+	RANK_PERK_SALVAGE_CRATE,			///< on death it leaves the Veterancy block's SalvageCrate
 	RANK_PERK_AURA_RATE_OF_FIRE,	///< the first of the aura perks, in RankAura order
 	RANK_PERK_AURA_SIGHT,
 	RANK_PERK_AURA_GUARD,
 	RANK_PERK_AURA_RANGE,
+	RANK_PERK_AURA_MEND,
+	RANK_PERK_AURA_PACE,
+	RANK_PERK_AURA_DRILL,
+	RANK_PERK_AURA_STEADY,
+	RANK_PERK_AURA_CAPTURE,
+	RANK_PERK_AURA_SPOILS,
 
 	RANK_PERK_COUNT
+};
+
+/// the share of max health under which the LAST_STAND perk fires faster
+#define RANK_LAST_STAND_HEALTH 0.35f
+
+/** Who an aura line reaches besides its leader's allies' units: Perk_<side> = grade AURA_<kind> value
+	* radius INFANTRY, or STRUCTURES for units and buildings both. */
+enum RankReach
+{
+	RANK_REACH_UNITS,							///< every allied unit, buildings left out
+	RANK_REACH_INFANTRY,					///< allied infantry only
+	RANK_REACH_STRUCTURES,				///< allied units and buildings
+
+	RANK_REACH_COUNT
 };
 
 /** A leader's bonus to friendly units within its aura radius, refilled once a second.  Of one kind a
@@ -117,6 +146,12 @@ enum RankAura
 	RANK_AURA_SIGHT,							///< shroud clearing, 1 + this
 	RANK_AURA_GUARD,							///< damage taken, 1 - this
 	RANK_AURA_RANGE,							///< an artillery weapon's range, added
+	RANK_AURA_MEND,								///< share of max health healed a second, hurt or not
+	RANK_AURA_PACE,								///< speed, 1 + this
+	RANK_AURA_DRILL,							///< experience a second (DrillRate) up to this grade of the unit's own ladder
+	RANK_AURA_STEADY,							///< a timed paralysis or EMP runs 1 - this as long, subdual wears off 1 / (1 - this) as fast
+	RANK_AURA_CAPTURE,						///< taking a building takes 1 - this as long
+	RANK_AURA_SPOILS,							///< each kill it scores pays its player this share of the victim's cost
 	RANK_AURA_RALLY,							///< damage taken, 1 - this, until the rally runs out
 
 	RANK_AURA_COUNT,
@@ -125,6 +160,7 @@ enum RankAura
 
 extern const char *const TheRankPerkNames[RANK_PERK_COUNT + 1];
 extern const char *const TheRankAuraNames[RANK_AURA_COUNT];
+extern const char *const TheRankReachNames[RANK_REACH_COUNT + 1];
 
 /** One side's rank ladder, the Veterancy block in BalanceReforged.ini (docs/plans/RANK-LADDER.md).
 	* A unit's grade is a pure function of its experience and its template's E, its regular
@@ -140,12 +176,16 @@ struct RankLadder
 	Real	m_statTop[RANK_STAT_COUNT];				///< each stat at the top of the ladder
 	Real	m_auraRadius;											///< a leader's aura radius before RANK_PERK_AURA_RADIUS
 	Real	m_perkAt[RANK_GRADES_MAX + 1][RANK_PERK_COUNT];	///< the perks a grade's own lines name, 0 for none
+	Real	m_radiusAt[RANK_GRADES_MAX + 1][RANK_PERK_COUNT];	///< an aura line's own radius, 0 for the one before it, or m_auraRadius
+	RankReach m_reachAt[RANK_GRADES_MAX + 1][RANK_PERK_COUNT];	///< an aura line's receivers
 
 	// filled by finish()
 	Real	m_ratio;
 	Real	m_total[RANK_GRADES_MAX + 1];			///< experience to hold grade g, in E
 	Real	m_stat[RANK_GRADES_MAX + 1][RANK_STAT_COUNT];	///< each stat at grade g
 	Real	m_perk[RANK_GRADES_MAX + 1][RANK_PERK_COUNT];	///< each perk grade g holds, the strongest of its grade and those below
+	Real	m_radius[RANK_GRADES_MAX + 1][RANK_PERK_COUNT];	///< the radius that came with it, carried up the same way
+	RankReach m_reach[RANK_GRADES_MAX + 1][RANK_PERK_COUNT];	///< the receivers that came with it
 
 	void clear();
 	/** The ratio from m_grades and m_top, the totals, and the stats: worth (rate of fire times damage
@@ -160,8 +200,16 @@ struct RankLadder
 	Int clipGain( Int unitValue, Int experience, Int gain ) const;
 	Int insigniaIndex( Int grade, Bool hero ) const;						///< a hero's insignia runs from m_heroStart to the top over its grades
 	Real perk( Int grade, RankPerk perk ) const;								///< what the grade holds of the kind, 0 for nothing
-	Real auraRadius( Int grade ) const;													///< m_auraRadius times the AURA_RADIUS perk
+	/// a Perk_<side> line's tokens after the =: grade kind [value [radius [reach]]]
+	void addPerkLine( const char *const *tokens, Int count );
+	/** The aura's own radius at the grade (RALLY's is m_auraRadius, and so is a line that gave none on
+		* a side with no radius before it), times the AURA_RADIUS perk. */
+	Real auraRadius( Int grade, RankAura aura ) const;
+	RankReach auraReach( Int grade, RankAura aura ) const;			///< who the aura reaches; RALLY reaches units
 	Real aura( Int grade, RankAura aura ) const;								///< what a leader of this grade gives; RALLY is its death rally
+	/** What a DRILL aura capped at capGrade adds to a unit with the experience this second: rate times
+		* its E, at least 1, never past the cap's threshold, 0 once there. */
+	Int drillGain( Int unitValue, Int experience, Int capGrade, Real rate ) const;
 
 	static Int unitValue( const ThingTemplate *thing );				///< E: the regular ExperienceValue, else half the Veteran threshold, at least 1
 };
@@ -199,8 +247,11 @@ enum TextLanguageType
 	TEXT_LANGUAGE_ENGLISH	= 0,
 	TEXT_LANGUAGE_TURKISH	= 1,
 	TEXT_LANGUAGE_GERMAN	= 2,
+	TEXT_LANGUAGE_UKRAINIAN	= 3,
+	TEXT_LANGUAGE_RUSSIAN	= 4,
+	TEXT_LANGUAGE_FRENCH	= 5,
 
-	TEXT_LANGUAGE_COUNT		= 3,
+	TEXT_LANGUAGE_COUNT		= 6,
 };
 
 /** The LightingStyle option.  Classic draws a map's lights as the map gives them; Reforged takes
@@ -250,6 +301,8 @@ public:
 	Bool isDynamicLODEnabled() const { return m_enableDynamicLOD && !m_noDynamicLODOverride; }
 	/// The particle ceiling in force: -particlecap's, or the options slider's MaxParticleCount.
 	Int getEffectiveParticleCap() const { return (m_particleCapOverride > 0) ? m_particleCapOverride : m_maxParticleCount; }
+	/// The Direct3D 11 particle ring in force: -gpuparticles' (0 included, which is off), or the detail preset's.
+	Int getEffectiveGpuParticleCapacity() const { return (m_gpuParticleCapacityOverride >= 0) ? m_gpuParticleCapacityOverride : m_gpuParticleCapacity; }
 
 	static void parseGameDataDefinition( INI* ini );
 	static void parseVeterancyDefinition( INI* ini );	///< the Veterancy block, m_veterancy*
@@ -320,14 +373,19 @@ public:
 	Bool m_shadowsForParticles;		// "ShadowsForParticles": big alpha-blended particle clouds drop a soft blob on the ground
 	Bool m_volumetricSmokeShadows;	// "VolumetricSmokeShadows": smoke and dust shade the world and themselves through the sun's map (Direct3D 11)
 	Bool m_smokeFireLighting;		// "SmokeFireLighting": smoke takes light from the fire beside it
+	Bool m_smoothMotion;				// R1: on a display faster than the logic, models drawn between their last two logic states (W3DSmoothMotion.h); -nosmoothmotion turns it off
+	Bool m_smoothMotionAnyDisplay;	// -smoothmotion: the same whatever the display's refresh rate
 	Int m_waterStyle;					// "WaterStyle": 0 = Classic, 1 = Modern (SDL); applied between render frames
 	Int m_cloudStyle;					// "CloudStyle": 0 = Classic (default), 1 = Volumetric (when supported)
+	Int m_volumeSmoke;				// "VolumeSmoke": smoke as a simulated volume, 0 Off (default), 1 Low, 2 High (Direct3D 11); -volsmoke for one run
 	Bool m_explosionDebrisTrails;	// "DebrisTrails": blasts throw smoke-trailing fragments and burning shrapnel
 	Int m_shadowQuality;				// "ShadowQuality": the sun's depth map at 1024, 2048 or 4096 texels a side (Direct3D 11)
+	Int m_graphicsQuality;			// "GraphicsQuality": where the options menu's Performance / Quality slider stands; Custom takes the particle ring from the preset at or below it
 	Bool m_classicGraphics;				// "ClassicGraphics": the game's own art, tile, shadows and picture; read at startup
 	Int m_lightingStyle;					// "LightingStyle": LightingStyleType; the map's lights are rebalanced as each map loads
 	Bool m_shadowMap;							// "-shadowmap": draw the casters into the sun's depth buffer as well
 	Bool m_shadowMapReport;				// "-shadowmapreport": log what ended up in that buffer, once a second
+	Bool m_shadowMapOldCasters;		// "-shadowmapoldcasters": every caster through the mesh renderer, none instanced
 	Bool m_shadowMapOnly;					// "-shadowmaponly": the map's shadows with the stencil volumes' own darkening off
 	Real m_shadowMapPenumbra;			// "-shadowtune": penumbra per world unit of gap under the caster, 0 for the built-in
 	Real m_shadowMapSkyFill;			// how much of a wide shadow the sky fills back in
@@ -337,6 +395,9 @@ public:
 	Bool m_particleGroundBounce;	// "-particlebounce": terrain collision on for every particle system
 	Real m_smokeThickness;				// "-smoke": how much longer and thicker every smoke system runs, 0 for shipped behaviour
 	Int  m_particleCapOverride;		// "-particlecap": stand in for the options slider's MaxParticleCount, 0 to use it
+	Int  m_gpuParticleCapacity;		// spawn-record slots in the Direct3D 11 particle ring, the detail preset's GpuParticleCapacity; 0 keeps every particle on the CPU
+	Int  m_gpuParticleCapacityOverride;	// "-gpuparticles": stand in for the preset's ring for one run, -1 to use it
+	Bool m_gpuParticleCheck;			// "-gpuparticlecheck": run the CPU path beside the GPU one and log the closed form's largest error
 	Int  m_textureReductionFactor;	//how much to cut texture resolution: 2 is half, 3 is quarter, etc.
 	Bool m_enableBehindBuildingMarkers;
 	Real m_waterPositionX;
@@ -642,7 +703,6 @@ public:
 	Bool m_lanLobbyOnStart;						///< -lanlobby: open the LAN lobby instead of stopping at the main menu
 	Bool m_skirmishLobbyOnStart;			///< -skirmishlobby: open the skirmish staging room instead of stopping at the main menu
 	Bool m_optionsMenuOnStart;				///< -optionsmenu: open the options screen over the main menu at startup
-	Bool m_randomMapsInMenus;					///< -randommaps: offer the generated maps in the map lists (off until the generator is finished)
 	Bool m_mapLight;								///< "MapLight": warm low sun, ground haze and aircraft wakes (Direct3D 11, client only)
 	Bool m_teamGlow;								///< "TeamGlow": bright house colour glows (Direct3D 11, client only)
 	Bool m_waterFoam;								///< "WaterFoam": foam, shore band and the sun's shadow on water (Direct3D 11, client only)
@@ -663,8 +723,10 @@ public:
 	WeaponBonusSet* m_veterancyWeaponBonus[VETERANCY_SIDE_COUNT];	///< NULL: nothing beyond the grade
 	UnsignedInt m_veterancySelfRepairDelay;												///< frames unhurt before self-repair starts
 	Real m_rankAuraRateOfFireCap;																	///< the most a rate-of-fire aura adds
+	Real m_rankDrillRate;																					///< what a drill aura adds a second, a share of the unit's E
+	AsciiString m_rankSalvageCrate;																///< the crate a SALVAGE_CRATE perk leaves
 	UnsignedInt m_rankRallyTime;																	///< frames a death rally lasts
-	RadiusDecalTemplate m_rankAuraRing[RANK_AURA_COUNT];					///< the ground ring under a selected leader, one per aura kind (client)
+	RadiusDecalTemplate m_rankAuraRing[RANK_AURA_COUNT];					///< the ground ring under every visible leader, one per aura kind (client)
 
 	static VeterancySide veterancySideOf( const ThingTemplate *thing );
 	const RankLadder *getRankLadder( const ThingTemplate *thing ) const;	///< NULL: the thing's side keeps EA's levels
@@ -689,6 +751,10 @@ public:
   Real m_SFXVolumeFactor;           ///< Factor applied to loudness of SFX volume
   Real m_voiceVolumeFactor;         ///< Factor applied to loudness of voice volume
 	Int m_ambientVolume;							///< "AmbientVolume" in Options.ini: percent for looping world ambience, in place of the effects slider
+	Int m_masterVolume;								///< "MasterVolume" in Options.ini: percent every other slider is multiplied by, music and speech included
+	Bool m_dynamicMusic;							///< "DynamicMusic" in Options.ini: a skirmish's music follows the fight (MusicManager::update)
+	Bool m_legacySound;								///< "LegacySound" in Options.ini: retail's mix, none of the v3.4 processing (MilesAudioManager::applyLegacySound)
+	Bool m_muteInBackground;					///< "MuteInBackground" in Options.ini: silent while another window has the focus (WinMain's WM_ACTIVATE)
   Bool m_3DSoundPref;               ///< Whether user wants to use 3DSound or not
 
 	Bool m_animateWindows;						///< Should we animate window transitions?
@@ -797,6 +863,7 @@ public:
 	UnsignedInt m_networkPlayerSilenceTime;		      	///< The number of milliseconds we can go without hearing anything at all from a player before a stall is treated as a disconnect rather than a slow game.
 	UnsignedInt m_networkStallCeilingTime;		      	///< The number of milliseconds a stall can last with everyone still talking before we bring up the disconnect screen anyway.
 	UnsignedInt m_networkPlayerTimeoutTime;		      	///< The number of milliseconds between when a player's last keep alive command was recieved and when they are considered disconnected from the game.
+	UnsignedInt m_networkSilentPlayerDropTime;	      	///< The number of milliseconds a player can go without sending anything before the disconnect screen drops them; replaces m_networkPlayerTimeoutTime there.
 	UnsignedInt	m_networkDisconnectScreenNotifyTime;  ///< The number of milliseconds between when the disconnect screen comes up and when the other players are notified that we are on the disconnect screen.
 	
 	Real				m_keyboardCameraRotateSpeed;    ///< How fast the camera rotates when rotated via keyboard controls.

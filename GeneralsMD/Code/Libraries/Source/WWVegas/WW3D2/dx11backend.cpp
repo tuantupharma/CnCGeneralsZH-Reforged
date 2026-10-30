@@ -31,6 +31,10 @@
 #include <stdio.h>
 #include <string.h>
 #include <windows.h>
+#if defined(_M_X64) || defined(_M_IX86) || defined(__SSE__)
+#include <xmmintrin.h>
+#endif
+#include <cstddef>
 
 typedef HRESULT (WINAPI *D3DCompileFunction)(LPCVOID source_data, SIZE_T source_size,
 	LPCSTR source_name, const D3D_SHADER_MACRO * defines, ID3DInclude * include,
@@ -287,6 +291,8 @@ DX11BackendClass::DX11BackendClass()
 	Forget_Last_State_Objects();
 	memset(&HeldVertexConstants, 0, sizeof(HeldVertexConstants));
 	memset(&HeldPixelConstants, 0, sizeof(HeldPixelConstants));
+	memset(RecentPixelDiscards, 0, sizeof(RecentPixelDiscards));	// no ring is at nought once made
+	NextRecentPixel = 0;
 	memset(HeldEngineConstants, 0, sizeof(HeldEngineConstants));
 	VertexConstantsHeld = false;
 	PixelConstantsHeld = false;
@@ -294,6 +300,9 @@ DX11BackendClass::DX11BackendClass()
 	ConstantsChanged = true;
 	VertexConstantsChanged = false;
 	PixelConstantsChanged = false;
+	PixelBlendChanged = false;
+	HeldPixelBlendKey = 0;
+	WorldChanged = false;
 	TexturesChanged = true;
 	PipelineChanged = true;
 	StateObjectsChanged = true;
@@ -332,6 +341,19 @@ DX11BackendClass::DX11BackendClass()
 	SmokeMapRefused = false;
 	SmokeMapFilled = false;
 	SmokeStrength = 0.0f;
+	memset(ShadowCasterVertexShaders, 0, sizeof(ShadowCasterVertexShaders));
+	memset(ShadowCasterLayouts, 0, sizeof(ShadowCasterLayouts));
+	ShadowCasterAlphaTest = NULL;
+	ShadowCasterInstances = NULL;
+	ShadowCasterCapacity = 0;
+	ShadowCasterBones = NULL;
+	ShadowCasterBonesView = NULL;
+	ShadowCasterBonesCapacity = 0;
+	ShadowCasterRefused = false;
+	ShadowSkinSource = NULL;
+	ShadowSkinCapacity = 0;
+	ShadowSkinUsed = 0;
+	ShadowSkinGeneration = 1;
 	memset(Headlights, 0, sizeof(Headlights));
 	HeadlightCount = 0;
 	memset(HeadlightGain, 0, sizeof(HeadlightGain));
@@ -344,6 +366,12 @@ DX11BackendClass::DX11BackendClass()
 	SceneDepthStale = true;
 	SceneDepthRefused = false;
 	FrameDepthCopies = 0;
+	DepthResolveVertexShader = NULL;
+	DepthResolvePixelShader = NULL;
+	DepthResolveState = NULL;
+	DepthResolveRasterizer = NULL;
+	DepthResolveStale = true;
+	DepthResolveRefused = false;
 	DrawEffect = DRAW_EFFECT_NONE;
 	memset(DrawEffectNumbers, 0, sizeof(DrawEffectNumbers));
 	SceneColourCopy = NULL;
@@ -439,6 +467,7 @@ bool DX11BackendClass::Create_Constant_Ring(ConstantRing & ring, unsigned block_
 	// Full, so the first write discards: the buffer has never been mapped.
 	ring.Next = ring.Bytes;
 	ring.Current = 0;
+	++ring.Discards;
 
 	D3D11_BUFFER_DESC description;
 	memset(&description, 0, sizeof(description));
@@ -469,6 +498,7 @@ bool DX11BackendClass::Write_Constants(ConstantRing & ring, const void * block, 
 	++FrameConstantWrites;
 	if (wraps) {
 		++FrameConstantRenames;
+		++ring.Discards;
 	}
 	return true;
 }
@@ -478,7 +508,9 @@ void DX11BackendClass::Release_Constant_Ring(ConstantRing & ring)
 	if (ring.Buffer != NULL) {
 		ring.Buffer->Release();
 	}
+	const unsigned discards = ring.Discards;
 	memset(&ring, 0, sizeof(ring));
+	ring.Discards = discards + 1;
 }
 
 void DX11BackendClass::Release_Cached()
@@ -585,7 +617,9 @@ void DX11BackendClass::Shutdown()
 	ShadowMapSize = 0;
 	ShadowMapBound = false;
 	Release_Smoke_Map();
+	Release_Shadow_Casters();
 	Release_Scene_Depth();
+	Release_Depth_Resolve();
 	Release_Scene_Colour();
 	RenderStates.Set_Shadow_Caster_Pass(false);
 	Note_Shadow_State_Changed();
@@ -1036,6 +1070,482 @@ bool DX11BackendClass::Fill_Smoke_Map(const float * casters, unsigned count, flo
 	return true;
 }
 
+// A caster's depth and nothing else.  The position goes through the instance's product of world,
+// view and projection the way the generated vertex programs take it through theirs
+// (ffvertex.cpp: mul of the model position by a row major matrix), so the same vertex lands on the
+// same depth.  No pixel program for an opaque caster: the pass writes no colour, and it discards
+// nothing.
+#define SHADOW_CASTER_INSTANCE_INPUT \
+	"    float4 Row0 : WORLDVIEWPROJECTION0;\n" \
+	"    float4 Row1 : WORLDVIEWPROJECTION1;\n" \
+	"    float4 Row2 : WORLDVIEWPROJECTION2;\n" \
+	"    float4 Row3 : WORLDVIEWPROJECTION3;\n"
+#define SHADOW_CASTER_PROJECT(position) \
+	"    float4x4 world_view_projection = float4x4(caster.Row0, caster.Row1, caster.Row2, caster.Row3);\n" \
+	"    return mul(float4(" position ", 1.0), world_view_projection);\n"
+
+static const char SHADOW_CASTER_VERTEX_PROGRAM[] =
+	"struct Caster\n"
+	"{\n"
+	"    float3 Position : POSITION;\n"
+	SHADOW_CASTER_INSTANCE_INPUT
+	"};\n"
+	"float4 main(Caster caster) : SV_Position\n"
+	"{\n"
+	SHADOW_CASTER_PROJECT("caster.Position")
+	"}\n";
+
+// An alpha tested caster carries stage 0's coordinates to the pixel program, untransformed, as the
+// generated programs pass them for a stage without a mapper.
+static const char SHADOW_CASTER_ALPHA_VERTEX_PROGRAM[] =
+	"struct Caster\n"
+	"{\n"
+	"    float3 Position : POSITION;\n"
+	"    float2 TexCoord : TEXCOORD;\n"
+	SHADOW_CASTER_INSTANCE_INPUT
+	"};\n"
+	"struct Output\n"
+	"{\n"
+	"    float4 Position : SV_Position;\n"
+	"    float2 TexCoord : TEXCOORD0;\n"
+	"};\n"
+	"Output main(Caster caster)\n"
+	"{\n"
+	"    Output output;\n"
+	"    float4x4 world_view_projection = float4x4(caster.Row0, caster.Row1, caster.Row2, caster.Row3);\n"
+	"    output.Position = mul(float4(caster.Position, 1.0), world_view_projection);\n"
+	"    output.TexCoord = caster.TexCoord;\n"
+	"    return output;\n"
+	"}\n";
+
+// A skin's vertex through its bone the way MeshGeometryClass::get_deformed_vertices takes it
+// (Matrix3D::Transform_Vector: each row's dot with the position plus its translation), then through
+// view and projection with the identity world the texture category's walk gives a skin.  The
+// bones are three rows each, the pass's skins one after another.
+static const char SHADOW_CASTER_SKIN_VERTEX_PROGRAM[] =
+	"Buffer<float4> Bones : register(t0);\n"
+	"struct Caster\n"
+	"{\n"
+	"    float3 Position : POSITION;\n"
+	"    uint Bone : BONE;\n"
+	SHADOW_CASTER_INSTANCE_INPUT
+	"    uint FirstBone : FIRSTBONE;\n"
+	"};\n"
+	"float4 main(Caster caster) : SV_Position\n"
+	"{\n"
+	"    uint row = (caster.FirstBone + caster.Bone) * 3;\n"
+	"    float4 x = Bones[row];\n"
+	"    float4 y = Bones[row + 1];\n"
+	"    float4 z = Bones[row + 2];\n"
+	"    float3 p = caster.Position;\n"
+	"    float3 skinned = float3(x.x * p.x + x.y * p.y + x.z * p.z + x.w,\n"
+	"        y.x * p.x + y.y * p.y + y.z * p.z + y.w,\n"
+	"        z.x * p.x + z.y * p.y + z.z * p.z + z.w);\n"
+	SHADOW_CASTER_PROJECT("skinned")
+	"}\n";
+
+// ShaderClass::Apply's test for an opaque material (reference 0x60, greater or equal) on stage 0's
+// alpha, rounded to a level first as ffshader.cpp's ALPHA_LEVEL does.  The material's diffuse
+// alpha that stage 0 multiplies by is one for every caster taken (Add_Shadow_Caster).
+static const char SHADOW_CASTER_ALPHA_PIXEL_PROGRAM[] =
+	"Texture2D Texture0 : register(t0);\n"
+	"SamplerState Sampler0 : register(s0);\n"
+	"struct Input\n"
+	"{\n"
+	"    float4 Position : SV_Position;\n"
+	"    float2 TexCoord : TEXCOORD0;\n"
+	"};\n"
+	"void main(Input input)\n"
+	"{\n"
+	"    float alpha_level = floor(Texture0.Sample(Sampler0, input.TexCoord).a * 255.0 + 0.5);\n"
+	"    clip(alpha_level - 96.0);\n"
+	"}\n";
+
+#undef SHADOW_CASTER_INSTANCE_INPUT
+#undef SHADOW_CASTER_PROJECT
+
+static const unsigned SHADOW_CASTER_MATRIX_FLOATS = 16;
+// The matrix, the first bone and three floats of padding.
+static const unsigned SHADOW_CASTER_INSTANCE_FLOATS = 20;
+static const unsigned SHADOW_CASTER_FIRST_BONE_BYTES = SHADOW_CASTER_MATRIX_FLOATS * sizeof(float);
+static const unsigned SHADOW_CASTER_ROWS_A_BONE = 3;
+static const unsigned SHADOW_CASTER_FIRST_INSTANCES = 1024;
+static const unsigned SHADOW_CASTER_FIRST_BONE_ROWS = 4096;
+static const unsigned SHADOW_SKIN_FIRST_VERTICES = 65536;
+
+void DX11BackendClass::Release_Shadow_Casters()
+{
+	IUnknown ** const held[] = {
+		(IUnknown **)&ShadowCasterVertexShaders[0], (IUnknown **)&ShadowCasterVertexShaders[1],
+		(IUnknown **)&ShadowCasterVertexShaders[2], (IUnknown **)&ShadowCasterLayouts[0],
+		(IUnknown **)&ShadowCasterLayouts[1], (IUnknown **)&ShadowCasterLayouts[2],
+		(IUnknown **)&ShadowCasterAlphaTest, (IUnknown **)&ShadowCasterInstances,
+		(IUnknown **)&ShadowCasterBonesView, (IUnknown **)&ShadowCasterBones,
+		(IUnknown **)&ShadowSkinSource,
+	};
+	for (unsigned index = 0; index < sizeof(held) / sizeof(held[0]); ++index) {
+		if (*held[index] != NULL) {
+			(*held[index])->Release();
+			*held[index] = NULL;
+		}
+	}
+	ShadowCasterCapacity = 0;
+	ShadowCasterBonesCapacity = 0;
+	ShadowCasterRefused = false;
+	ShadowSkinCapacity = 0;
+	ShadowSkinUsed = 0;
+	++ShadowSkinGeneration;
+}
+
+bool DX11BackendClass::Make_Shadow_Caster_Program()
+{
+	if (ShadowCasterAlphaTest != NULL) {
+		return true;
+	}
+	if (ShadowCasterRefused) {
+		return false;
+	}
+	const D3D11_INPUT_ELEMENT_DESC rigid[] = {
+		{ "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+		{ "WORLDVIEWPROJECTION", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 1, 0, D3D11_INPUT_PER_INSTANCE_DATA, 1 },
+		{ "WORLDVIEWPROJECTION", 1, DXGI_FORMAT_R32G32B32A32_FLOAT, 1, 16, D3D11_INPUT_PER_INSTANCE_DATA, 1 },
+		{ "WORLDVIEWPROJECTION", 2, DXGI_FORMAT_R32G32B32A32_FLOAT, 1, 32, D3D11_INPUT_PER_INSTANCE_DATA, 1 },
+		{ "WORLDVIEWPROJECTION", 3, DXGI_FORMAT_R32G32B32A32_FLOAT, 1, 48, D3D11_INPUT_PER_INSTANCE_DATA, 1 },
+	};
+	// The coordinates come from the vertex buffer bound a second time at slot 2, its offset moved on
+	// to the stage's set, so one layout serves every vertex format.
+	const D3D11_INPUT_ELEMENT_DESC alpha_tested[] = {
+		rigid[0], rigid[1], rigid[2], rigid[3], rigid[4],
+		{ "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 2, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+	};
+	const D3D11_INPUT_ELEMENT_DESC skinned[] = {
+		rigid[0], rigid[1], rigid[2], rigid[3], rigid[4],
+		{ "BONE", 0, DXGI_FORMAT_R32_UINT, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+		{ "FIRSTBONE", 0, DXGI_FORMAT_R32_UINT, 1, SHADOW_CASTER_FIRST_BONE_BYTES, D3D11_INPUT_PER_INSTANCE_DATA, 1 },
+	};
+	struct Program
+	{
+		const char * Source;
+		const char * Name;
+		const D3D11_INPUT_ELEMENT_DESC * Elements;
+		unsigned ElementCount;
+	};
+	const Program programs[3] = {
+		{ SHADOW_CASTER_VERTEX_PROGRAM, "shadowcaster", rigid, sizeof(rigid) / sizeof(rigid[0]) },
+		{ SHADOW_CASTER_ALPHA_VERTEX_PROGRAM, "shadowcasteralpha", alpha_tested,
+			sizeof(alpha_tested) / sizeof(alpha_tested[0]) },
+		{ SHADOW_CASTER_SKIN_VERTEX_PROGRAM, "shadowcasterskin", skinned, sizeof(skinned) / sizeof(skinned[0]) },
+	};
+	ID3D11Device * device = Device->Get_Device();
+	std::vector<unsigned char> code;
+	bool made = true;
+	for (unsigned kind = 0; kind < 3 && made; ++kind) {
+		made = Compile_Program(programs[kind].Source, programs[kind].Name, VERTEX_PROFILE, code)
+			&& SUCCEEDED(device->CreateVertexShader(&code[0], code.size(), NULL, &ShadowCasterVertexShaders[kind]))
+			&& SUCCEEDED(device->CreateInputLayout(programs[kind].Elements, programs[kind].ElementCount,
+				&code[0], code.size(), &ShadowCasterLayouts[kind]));
+	}
+	made = made && Compile_Program(SHADOW_CASTER_ALPHA_PIXEL_PROGRAM, "shadowcasteralphatest", PIXEL_PROFILE, code)
+		&& SUCCEEDED(device->CreatePixelShader(&code[0], code.size(), NULL, &ShadowCasterAlphaTest));
+	if (!made) {
+		Note_Refusal("the device would not make the instanced shadow caster programs");
+		Release_Shadow_Casters();
+		ShadowCasterRefused = true;
+		return false;
+	}
+	return true;
+}
+
+bool DX11BackendClass::Upload_Shadow_Skin(const ShadowSkinVertex * vertices, unsigned count,
+	unsigned & first_vertex)
+{
+	if (Device == NULL) {
+		return false;
+	}
+	ID3D11Device * device = Device->Get_Device();
+	if (ShadowSkinSource == NULL || ShadowSkinUsed + count > ShadowSkinCapacity) {
+		unsigned capacity = (ShadowSkinCapacity != 0) ? ShadowSkinCapacity * 2 : SHADOW_SKIN_FIRST_VERTICES;
+		while (capacity < count) {
+			capacity *= 2;
+		}
+		if (ShadowSkinSource != NULL) {
+			ShadowSkinSource->Release();
+			ShadowSkinSource = NULL;
+		}
+		ShadowSkinCapacity = 0;
+		ShadowSkinUsed = 0;
+		++ShadowSkinGeneration;
+		D3D11_BUFFER_DESC buffer;
+		memset(&buffer, 0, sizeof(buffer));
+		buffer.ByteWidth = capacity * sizeof(ShadowSkinVertex);
+		buffer.Usage = D3D11_USAGE_DEFAULT;
+		buffer.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+		if (FAILED(device->CreateBuffer(&buffer, NULL, &ShadowSkinSource))) {
+			Note_Refusal("the device refused the shadow skin source");
+			ShadowSkinSource = NULL;
+			return false;
+		}
+		ShadowSkinCapacity = capacity;
+	}
+	D3D11_BOX box;
+	box.left = ShadowSkinUsed * sizeof(ShadowSkinVertex);
+	box.right = (ShadowSkinUsed + count) * sizeof(ShadowSkinVertex);
+	box.top = 0;
+	box.bottom = 1;
+	box.front = 0;
+	box.back = 1;
+	Device->Get_Context()->UpdateSubresource(ShadowSkinSource, 0, &box, vertices, 0, 0);
+	first_vertex = ShadowSkinUsed;
+	ShadowSkinUsed += count;
+	return true;
+}
+
+// The world matrix the texture category's walk puts on the device for a Matrix3D's three rows:
+// Matrix4x4(Matrix3D).Transpose(), Direct3D 9's layout, the translation in the last row.
+static void world_from_rows(const float rows[12], float world[16])
+{
+	for (unsigned row = 0; row < 3; ++row) {
+		world[row * 4 + 0] = rows[0 * 4 + row];
+		world[row * 4 + 1] = rows[1 * 4 + row];
+		world[row * 4 + 2] = rows[2 * 4 + row];
+		world[row * 4 + 3] = 0.0f;
+	}
+	world[12] = rows[3];
+	world[13] = rows[7];
+	world[14] = rows[11];
+	world[15] = 1.0f;
+}
+
+#if defined(_M_X64) || defined(_M_IX86) || defined(__SSE__)
+// multiply()'s product a row of four columns at a time: every element still starts from nought
+// and adds its four products in index order, each a multiply and then an add, never a fused
+// multiply-add, so the floats are multiply()'s to the bit.
+static void multiply_rows(const float left[16], const float right[16], float result[16])
+{
+	const __m128 right0 = _mm_loadu_ps(right);
+	const __m128 right1 = _mm_loadu_ps(right + 4);
+	const __m128 right2 = _mm_loadu_ps(right + 8);
+	const __m128 right3 = _mm_loadu_ps(right + 12);
+	for (unsigned row = 0; row < 4; ++row) {
+		const float * const factors = left + row * 4;
+		__m128 sum = _mm_setzero_ps();
+		sum = _mm_add_ps(sum, _mm_mul_ps(_mm_set1_ps(factors[0]), right0));
+		sum = _mm_add_ps(sum, _mm_mul_ps(_mm_set1_ps(factors[1]), right1));
+		sum = _mm_add_ps(sum, _mm_mul_ps(_mm_set1_ps(factors[2]), right2));
+		sum = _mm_add_ps(sum, _mm_mul_ps(_mm_set1_ps(factors[3]), right3));
+		_mm_storeu_ps(result + row * 4, sum);
+	}
+}
+#else
+static void multiply_rows(const float left[16], const float right[16], float result[16])
+{
+	multiply(left, right, result);
+}
+#endif
+
+static const float IDENTITY_ROWS[12] ={ 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f };
+
+bool DX11BackendClass::Upload_Shadow_Casters(const float * const * worlds, const unsigned * first_bones,
+	unsigned instance_count, const float * const * bones, unsigned bone_count)
+{
+	if (Device == NULL || !ShadowMapBound || !Make_Shadow_Caster_Program()) {
+		return false;
+	}
+	if (instance_count == 0) {
+		return true;
+	}
+
+	ID3D11Device * device = Device->Get_Device();
+	ID3D11DeviceContext * context = Device->Get_Context();
+	if (ShadowCasterCapacity < instance_count) {
+		if (ShadowCasterInstances != NULL) {
+			ShadowCasterInstances->Release();
+			ShadowCasterInstances = NULL;
+		}
+		ShadowCasterCapacity = 0;
+		unsigned capacity = SHADOW_CASTER_FIRST_INSTANCES;
+		while (capacity < instance_count) {
+			capacity *= 2;
+		}
+		D3D11_BUFFER_DESC buffer;
+		memset(&buffer, 0, sizeof(buffer));
+		buffer.ByteWidth = capacity * SHADOW_CASTER_INSTANCE_FLOATS * sizeof(float);
+		buffer.Usage = D3D11_USAGE_DYNAMIC;
+		buffer.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+		buffer.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+		if (FAILED(device->CreateBuffer(&buffer, NULL, &ShadowCasterInstances))) {
+			Note_Refusal("the device refused the shadow casters' instance buffer");
+			ShadowCasterInstances = NULL;
+			return false;
+		}
+		ShadowCasterCapacity = capacity;
+	}
+	const unsigned row_count = bone_count * SHADOW_CASTER_ROWS_A_BONE;
+	if (ShadowCasterBonesCapacity < row_count) {
+		if (ShadowCasterBonesView != NULL) {
+			ShadowCasterBonesView->Release();
+			ShadowCasterBonesView = NULL;
+		}
+		if (ShadowCasterBones != NULL) {
+			ShadowCasterBones->Release();
+			ShadowCasterBones = NULL;
+		}
+		ShadowCasterBonesCapacity = 0;
+		unsigned capacity = SHADOW_CASTER_FIRST_BONE_ROWS;
+		while (capacity < row_count) {
+			capacity *= 2;
+		}
+		D3D11_BUFFER_DESC buffer;
+		memset(&buffer, 0, sizeof(buffer));
+		buffer.ByteWidth = capacity * 4 * sizeof(float);
+		buffer.Usage = D3D11_USAGE_DYNAMIC;
+		buffer.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+		buffer.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+		D3D11_SHADER_RESOURCE_VIEW_DESC view;
+		memset(&view, 0, sizeof(view));
+		view.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+		view.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
+		view.Buffer.FirstElement = 0;
+		view.Buffer.NumElements = capacity;
+		if (FAILED(device->CreateBuffer(&buffer, NULL, &ShadowCasterBones))
+				|| FAILED(device->CreateShaderResourceView(ShadowCasterBones, &view, &ShadowCasterBonesView))) {
+			Note_Refusal("the device refused the shadow casters' bone buffer");
+			if (ShadowCasterBones != NULL) {
+				ShadowCasterBones->Release();
+				ShadowCasterBones = NULL;
+			}
+			ShadowCasterBonesView = NULL;
+			return false;
+		}
+		ShadowCasterBonesCapacity = capacity;
+	}
+
+	/* Each instance's matrix as Upload_Vertex_Constants makes it, world times view, then times the
+		 projection, written straight into the mapped buffer.  The same two products in the same order
+		 are the same floats.  Every identity world (the skins, and meshes at the origin) has the same
+		 product, made once. */
+	D3D11_MAPPED_SUBRESOURCE mapped;
+	if (FAILED(context->Map(ShadowCasterInstances, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
+		return false;
+	}
+	float identity[16];
+	world_from_rows(IDENTITY_ROWS, identity);
+	float identity_view[16];
+	float identity_product[16];
+	multiply(identity, View, identity_view);
+	multiply(identity_view, Projection, identity_product);
+	float * target = static_cast<float *>(mapped.pData);
+	for (unsigned instance = 0; instance < instance_count; ++instance, target += SHADOW_CASTER_INSTANCE_FLOATS) {
+		if (worlds[instance] == NULL) {
+			memcpy(target, identity_product, sizeof(identity_product));
+		} else {
+			float world[16];
+			float world_view[16];
+			world_from_rows(worlds[instance], world);
+			multiply_rows(world, View, world_view);
+			multiply_rows(world_view, Projection, target);
+		}
+		// The padding too: a write-combined buffer left with gaps goes out in pieces.
+		const unsigned tail[SHADOW_CASTER_INSTANCE_FLOATS - SHADOW_CASTER_MATRIX_FLOATS] ={ first_bones[instance], 0, 0, 0 };
+		memcpy(target + SHADOW_CASTER_MATRIX_FLOATS, tail, sizeof(tail));
+	}
+	context->Unmap(ShadowCasterInstances, 0);
+
+	if (row_count != 0) {
+		if (FAILED(context->Map(ShadowCasterBones, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
+			return false;
+		}
+		float * rows = static_cast<float *>(mapped.pData);
+		for (unsigned bone = 0; bone < bone_count; ++bone, rows += SHADOW_CASTER_ROWS_A_BONE * 4) {
+			memcpy(rows, bones[bone], SHADOW_CASTER_ROWS_A_BONE * 4 * sizeof(float));
+		}
+		context->Unmap(ShadowCasterBones, 0);
+	}
+	return true;
+}
+
+bool DX11BackendClass::Draw_Shadow_Casters(const ShadowCasterRun * runs, unsigned run_count)
+{
+	if (run_count == 0) {
+		return true;
+	}
+	ID3D11DeviceContext * context = Device->Get_Context();
+	bool alpha_tested = false;
+	for (unsigned index = 0; index < run_count && !alpha_tested; ++index) {
+		alpha_tested = runs[index].Kind == SHADOW_CASTER_ALPHA_TESTED;
+	}
+	if (alpha_tested) {
+		if (Textures[0] == NULL) {
+			return false;
+		}
+		ID3D11SamplerState * const sampler = Sampler_State(0);
+		context->PSSetShaderResources(0, 1, &Textures[0]);
+		context->PSSetSamplers(0, 1, &sampler);
+	}
+	context->VSSetShaderResources(0, 1, &ShadowCasterBonesView);
+
+	/* The cull and the depth test are each run's own, the rest of the rasterizer and depth state
+		 (the bias, the clipping, the depth writes the caster pass forces) is what the pass holds, which
+		 is what the mesh renderer's draws would have read.  Built through the render states so a
+		 state object is the one those draws would have been given; both go back as they were. */
+	const DWORD held_cull = RenderStates.Get_Stored_Render_State(D3DRS_CULLMODE);
+	const DWORD held_depth = RenderStates.Get_Stored_Render_State(D3DRS_ZFUNC);
+	ID3D11Buffer * bound_vertices = NULL;
+	unsigned bound_stride = 0;
+	unsigned bound_texture_offset = 0;
+	ID3D11Buffer * bound_indices = NULL;
+	bool bound_strip = false;
+	bool states_known = false;
+	ShadowCasterKind bound_kind = SHADOW_CASTER_RIGID;
+	for (unsigned index = 0; index < run_count; ++index) {
+		const ShadowCasterRun & run = runs[index];
+		if (!states_known || run.CullMode != RenderStates.Get_Stored_Render_State(D3DRS_CULLMODE)
+				|| run.DepthFunction != RenderStates.Get_Stored_Render_State(D3DRS_ZFUNC)) {
+			Set_Render_State(D3DRS_CULLMODE, run.CullMode);
+			Set_Render_State(D3DRS_ZFUNC, run.DepthFunction);
+			context->RSSetState(Rasterizer_State());
+			context->OMSetDepthStencilState(Depth_Stencil_State(), RenderStates.Get_Stencil_Reference());
+			states_known = true;
+		}
+		if (index == 0 || run.Kind != bound_kind) {
+			context->IASetInputLayout(ShadowCasterLayouts[run.Kind]);
+			context->VSSetShader(ShadowCasterVertexShaders[run.Kind], NULL, 0);
+			context->PSSetShader((run.Kind == SHADOW_CASTER_ALPHA_TESTED) ? ShadowCasterAlphaTest : NULL, NULL, 0);
+			bound_kind = run.Kind;
+			bound_vertices = NULL;
+		}
+		ID3D11Buffer * const vertices = (run.Kind == SHADOW_CASTER_SKINNED) ? ShadowSkinSource : run.Vertices;
+		const unsigned stride = (run.Kind == SHADOW_CASTER_SKINNED) ? sizeof(ShadowSkinVertex) : run.Stride;
+		if (vertices != bound_vertices || stride != bound_stride || run.TextureOffset != bound_texture_offset) {
+			ID3D11Buffer * const buffers[3] = { vertices, ShadowCasterInstances, vertices };
+			const UINT strides[3] = { stride, SHADOW_CASTER_INSTANCE_FLOATS * sizeof(float), stride };
+			const UINT offsets[3] = { 0, 0, run.TextureOffset };
+			context->IASetVertexBuffers(0, 3, buffers, strides, offsets);
+			bound_vertices = vertices;
+			bound_stride = stride;
+			bound_texture_offset = run.TextureOffset;
+		}
+		if (index == 0 || run.Indices != bound_indices) {
+			context->IASetIndexBuffer(run.Indices, DXGI_FORMAT_R16_UINT, 0);
+			bound_indices = run.Indices;
+		}
+		if (index == 0 || run.Strip != bound_strip) {
+			context->IASetPrimitiveTopology(run.Strip
+				? D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP : D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+			bound_strip = run.Strip;
+		}
+		context->DrawIndexedInstanced(run.IndexCount, run.InstanceCount, run.StartIndex,
+			static_cast<INT>(run.BaseVertex), run.FirstInstance);
+		++DrawsMade;
+	}
+	Set_Render_State(D3DRS_CULLMODE, held_cull);
+	Set_Render_State(D3DRS_ZFUNC, held_depth);
+	ID3D11ShaderResourceView * const no_view = NULL;
+	context->VSSetShaderResources(0, 1, &no_view);
+	Forget_Bindings();
+	return true;
+}
+
 bool DX11BackendClass::Camera_Space_Draw() const
 {
 	static const float IDENTITY[16] = {
@@ -1205,6 +1715,11 @@ ID3D11RenderTargetView * DX11BackendClass::Scene_Target() const
 	return CurrentDepth == Device->Get_Depth_Stencil_View() ? CurrentTarget : NULL;
 }
 
+ID3D11DepthStencilView * DX11BackendClass::Scene_Depth_Target() const
+{
+	return (CurrentTarget != NULL) ? CurrentDepth : Device->Get_Scene_Depth_View();
+}
+
 /** The black and white view, the motion blur and the cross fade draw the whole scene into a target
 		of their own, and Draw_Effect refuses every look there; asked first, the scene keeps the heat
 		vision and the disabled tint for those frames instead of drawing the object plain. */
@@ -1271,10 +1786,10 @@ void DX11BackendClass::Release_Scene_Colour()
 }
 
 /** The texture the cloak's copy of the scene goes into, made at the scene target's own size and
-		format and made again when a resize changes either.  A multisampled target cannot be copied
-		into a texture that is read by pixel, so that refuses the cloak.  Asked by the scene for each
-		cloaked object before it decides on the look (Takes_Draw_Effect), so a refusal is known
-		before the first such object goes without its heat vision. */
+		format and made again when a resize changes either.  One sample: a multisampled scene is
+		resolved into it.  Asked by the scene for each cloaked object before it decides on the look
+		(Takes_Draw_Effect), so a refusal is known before the first such object goes without its heat
+		vision. */
 bool DX11BackendClass::Make_Scene_Colour()
 {
 	if (SceneColourRefused) {
@@ -1297,6 +1812,8 @@ bool DX11BackendClass::Make_Scene_Colour()
 		description.MiscFlags = 0;
 		description.Usage = D3D11_USAGE_DEFAULT;
 		description.CPUAccessFlags = 0;
+		description.SampleDesc.Count = 1;
+		description.SampleDesc.Quality = 0;
 		// Read the copy the way the scene is written, which also covers a typeless surface.
 		D3D11_RENDER_TARGET_VIEW_DESC written;
 		Device->Get_Scene_View()->GetDesc(&written);
@@ -1305,8 +1822,7 @@ bool DX11BackendClass::Make_Scene_Colour()
 		view.Format = written.Format;
 		view.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
 		view.Texture2D.MipLevels = 1;
-		if (description.SampleDesc.Count > 1
-			|| FAILED(Device->Get_Device()->CreateTexture2D(&description, NULL, &SceneColourCopy))
+		if (FAILED(Device->Get_Device()->CreateTexture2D(&description, NULL, &SceneColourCopy))
 			|| FAILED(Device->Get_Device()->CreateShaderResourceView(SceneColourCopy, &view,
 				&SceneColourCopyView))) {
 			Note_Refusal("the device refused a copy of the scene's colour for the cloak");
@@ -1331,7 +1847,7 @@ bool DX11BackendClass::Take_Scene_Colour()
 	}
 	ID3D11Resource * source = NULL;
 	Device->Get_Scene_View()->GetResource(&source);
-	Device->Get_Context()->CopyResource(SceneColourCopy, source);
+	DX11Resource_Copy_Readable(Device->Get_Context(), SceneColourCopy, source);
 	SceneColourStale = false;
 	++FrameDepthCopies;		// counted with the depth copies, so DX11 FRAME COST sees it
 	source->Release();
@@ -1406,6 +1922,7 @@ void DX11BackendClass::Take_Scene_Depth()
 	if (SceneDepthRefused || !SoftParticlesAllowed || Device == NULL) {
 		return;
 	}
+	Resolve_Scene_Depth();
 	ID3D11ShaderResourceView * const source_view = Device->Get_Depth_Texture();
 	if (source_view == NULL) {
 		return;
@@ -1459,6 +1976,127 @@ unsigned DX11BackendClass::Take_Frame_Depth_Copies()
 	const unsigned copies = FrameDepthCopies;
 	FrameDepthCopies = 0;
 	return copies;
+}
+
+// A triangle over the whole target out of the vertex number, and each pixel's first sample written
+// as its depth.  The test is ALWAYS, so the triangle's own depth never decides anything.
+static const char DEPTH_RESOLVE_VERTEX_PROGRAM[] =
+	"float4 main(uint vertex : SV_VertexID) : SV_Position\n"
+	"{\n"
+	"    float2 corner = float2((vertex << 1) & 2, vertex & 2);\n"
+	"    return float4(corner * float2(2.0, -2.0) + float2(-1.0, 1.0), 0.0, 1.0);\n"
+	"}\n";
+
+static const char DEPTH_RESOLVE_PIXEL_PROGRAM[] =
+	"Texture2DMS<float> SceneDepth : register(t0);\n"
+	"float main(float4 position : SV_Position) : SV_Depth\n"
+	"{\n"
+	"    return SceneDepth.Load(int2(position.xy), 0);\n"
+	"}\n";
+
+bool DX11BackendClass::Make_Depth_Resolve()
+{
+	if (DepthResolvePixelShader != NULL) {
+		return true;
+	}
+	if (DepthResolveRefused) {
+		return false;
+	}
+	ID3D11Device * device = Device->Get_Device();
+
+	D3D11_DEPTH_STENCIL_DESC depth;
+	memset(&depth, 0, sizeof(depth));
+	depth.DepthEnable = TRUE;
+	depth.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
+	depth.DepthFunc = D3D11_COMPARISON_ALWAYS;
+
+	D3D11_RASTERIZER_DESC rasterizer;
+	memset(&rasterizer, 0, sizeof(rasterizer));
+	rasterizer.FillMode = D3D11_FILL_SOLID;
+	rasterizer.CullMode = D3D11_CULL_NONE;
+	rasterizer.DepthClipEnable = TRUE;
+
+	// Shader model 5: 4.0 wants the sample count in the texture's type.
+	std::vector<unsigned char> vertex_code;
+	std::vector<unsigned char> pixel_code;
+	const bool made = SUCCEEDED(device->CreateDepthStencilState(&depth, &DepthResolveState))
+		&& SUCCEEDED(device->CreateRasterizerState(&rasterizer, &DepthResolveRasterizer))
+		&& Compile_Program(DEPTH_RESOLVE_VERTEX_PROGRAM, "depthresolve", VERTEX_PROFILE, vertex_code)
+		&& Compile_Program(DEPTH_RESOLVE_PIXEL_PROGRAM, "depthresolve", "ps_5_0", pixel_code)
+		&& SUCCEEDED(device->CreateVertexShader(&vertex_code[0], vertex_code.size(), NULL,
+			&DepthResolveVertexShader))
+		&& SUCCEEDED(device->CreatePixelShader(&pixel_code[0], pixel_code.size(), NULL,
+			&DepthResolvePixelShader));
+	if (!made) {
+		Note_Refusal("the device would not make the pass that resolves the multisampled scene's depth");
+		Release_Depth_Resolve();
+		DepthResolveRefused = true;
+		return false;
+	}
+	return true;
+}
+
+void DX11BackendClass::Release_Depth_Resolve()
+{
+	IUnknown ** const held[] = {
+		(IUnknown **)&DepthResolveVertexShader, (IUnknown **)&DepthResolvePixelShader,
+		(IUnknown **)&DepthResolveState, (IUnknown **)&DepthResolveRasterizer,
+	};
+	for (unsigned index = 0; index < sizeof(held) / sizeof(held[0]); ++index) {
+		if (*held[index] != NULL) {
+			(*held[index])->Release();
+			*held[index] = NULL;
+		}
+	}
+	DepthResolveRefused = false;
+	DepthResolveStale = true;
+}
+
+void DX11BackendClass::Resolve_Scene_Depth()
+{
+	if (!DepthResolveStale || !Draws_Into_Scene() || !Device->Scene_Is_Multisampled()
+			|| !Make_Depth_Resolve()) {
+		return;
+	}
+	DepthResolveStale = false;
+
+	ID3D11DeviceContext * context = Device->Get_Context();
+	// The draws' viewport carries Direct3D 9's half pixel (Set_Viewport); this pass wants each
+	// pixel's own sample, so it sets a plain one and puts the draws' back afterwards.
+	D3D11_VIEWPORT saved;
+	UINT saved_count = 1;
+	context->RSGetViewports(&saved_count, &saved);
+	D3D11_VIEWPORT viewport;
+	viewport.TopLeftX = 0.0f;
+	viewport.TopLeftY = 0.0f;
+	viewport.Width = static_cast<float>(Device->Get_Width());
+	viewport.Height = static_cast<float>(Device->Get_Height());
+	viewport.MinDepth = 0.0f;
+	viewport.MaxDepth = 1.0f;
+
+	context->OMSetRenderTargets(0, NULL, Device->Get_Depth_Stencil_View());
+	context->RSSetViewports(1, &viewport);
+	context->RSSetState(DepthResolveRasterizer);
+	context->OMSetDepthStencilState(DepthResolveState, 0);
+	context->OMSetBlendState(NULL, NULL, 0xffffffff);
+	context->IASetInputLayout(NULL);
+	context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+	context->VSSetShader(DepthResolveVertexShader, NULL, 0);
+	context->PSSetShader(DepthResolvePixelShader, NULL, 0);
+	ID3D11ShaderResourceView * samples = Device->Get_Multisampled_Depth_Texture();
+	context->PSSetShaderResources(0, 1, &samples);
+	context->Draw(3, 0);
+	// Unbound before the same surface goes back on as the scene's depth.
+	samples = NULL;
+	context->PSSetShaderResources(0, 1, &samples);
+
+	ID3D11RenderTargetView * target = Device->Get_Scene_View();
+	context->OMSetRenderTargets(1, &target, Device->Get_Scene_Depth_View());
+	if (saved_count == 1) {
+		context->RSSetViewports(1, &saved);
+	}
+	Forget_Bindings();
+	++FrameDepthCopies;
 }
 
 void DX11BackendClass::Set_Blast_Lights(const float * lights, unsigned count)
@@ -1641,20 +2279,28 @@ void DX11BackendClass::Set_Render_State(D3DRENDERSTATETYPE state, DWORD value)
 		// Upload_Pixel_Constants.  The blend switch is there because the caster pass's alpha
 		// reference depends on it.  A blend, depth or cull change used to rebuild and compare both
 		// blocks to find the same bytes.
+		// The first two groups are read by a constant block and by nothing else: no description and
+		// no state object is built from them, so they leave both alone.  Every object sets its own
+		// ambient, and a scaled one turns NORMALIZENORMALS, which nothing here reads, on and off
+		// around its draws; each of those sent the next draw down the whole Resolve.
 		switch (state) {
 		case D3DRS_AMBIENT:
 		case D3DRS_FOGSTART:
 		case D3DRS_FOGEND:
 		case D3DRS_FOGDENSITY:
 			VertexConstantsChanged = true;
-			break;
+			return;
 		case D3DRS_FOGCOLOR:
 		case D3DRS_TEXTUREFACTOR:
 		case D3DRS_ALPHAREF:
+			PixelConstantsChanged = true;
+			return;
+		case D3DRS_NORMALIZENORMALS:
+			return;
 		case D3DRS_ALPHABLENDENABLE:
 		case D3DRS_SRCBLEND:		// a multiply pass takes no blast light (Upload_Pixel_Constants)
 		case D3DRS_DESTBLEND:
-			PixelConstantsChanged = true;
+			PixelBlendChanged = true;
 			break;
 		default:
 			break;
@@ -1838,6 +2484,8 @@ void DX11BackendClass::Set_Transform(D3DTRANSFORMSTATETYPE state, const float ma
 		// are the vertex block's alone.
 		if (held == View || held == Projection) {
 			ConstantsChanged = true;
+		} else if (held == World) {
+			WorldChanged = true;
 		} else {
 			VertexConstantsChanged = true;
 		}
@@ -1894,7 +2542,8 @@ void DX11BackendClass::Set_Light(unsigned index, DWORD type, const float positio
 	memcpy(light.Attenuation, attenuation, sizeof(light.Attenuation));
 	memcpy(light.Spot, spot, sizeof(light.Spot));
 	memcpy(light.Ambient, ambient, sizeof(light.Ambient));
-	ConstantsChanged = true;
+	// The lights are the vertex block's alone; the pixel block's lamps and blasts are its own.
+	VertexConstantsChanged = true;
 	if (pipeline_changed) {
 		PipelineChanged = true;
 	}
@@ -1904,7 +2553,7 @@ void DX11BackendClass::Disable_Light(unsigned index)
 {
 	if (index < MAXIMUM_VERTEX_LIGHTS && Lights[index].Enabled) {
 		Lights[index].Enabled = false;
-		ConstantsChanged = true;
+		VertexConstantsChanged = true;
 		PipelineChanged = true;
 	}
 }
@@ -2257,7 +2906,7 @@ void DX11BackendClass::Begin_Scene()
 		return;
 	}
 
-	Device->Get_Context()->OMSetRenderTargets(1, &target, Device->Get_Depth_Stencil_View());
+	Device->Get_Context()->OMSetRenderTargets(1, &target, Device->Get_Scene_Depth_View());
 	Forget_Bindings();
 	Set_Viewport(0, 0, Device->Get_Width(), Device->Get_Height());
 }
@@ -2335,7 +2984,7 @@ void DX11BackendClass::Set_Render_Target(ID3D11RenderTargetView * target)
 		ID3D11RenderTargetView * back_buffer = Device->Get_Scene_View();
 		if (back_buffer != NULL) {
 			Device->Get_Context()->OMSetRenderTargets(1, &back_buffer,
-				Device->Get_Depth_Stencil_View());
+				Device->Get_Scene_Depth_View());
 			Forget_Bindings();
 			Set_Viewport(0, 0, Device->Get_Width(), Device->Get_Height());
 		}
@@ -2409,8 +3058,7 @@ void DX11BackendClass::Clear(bool colour, bool depth, const float colour_value[4
 	// target and then draws into it would otherwise clear the picture instead.
 	ID3D11RenderTargetView * target = (CurrentTarget != NULL)
 		? CurrentTarget : Device->Get_Scene_View();
-	ID3D11DepthStencilView * depth_view = (CurrentTarget != NULL)
-		? CurrentDepth : Device->Get_Depth_Stencil_View();
+	ID3D11DepthStencilView * depth_view = Scene_Depth_Target();
 
 	if (colour && target != NULL) {
 		Device->Get_Context()->ClearRenderTargetView(target, colour_value);
@@ -2424,7 +3072,14 @@ void DX11BackendClass::Clear(bool colour, bool depth, const float colour_value[4
 	if (depth && depth_view != NULL) {
 		Device->Get_Context()->ClearDepthStencilView(depth_view,
 			D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1.0f, 0);
+		if (depth_view != Device->Get_Depth_Stencil_View() && CurrentTarget == NULL) {
+			// The single-sample depth too: a screen filter binds it for its own texture after this
+			// clear (Depth_For), and it still holds the last frame's resolve and stencil.
+			Device->Get_Context()->ClearDepthStencilView(Device->Get_Depth_Stencil_View(),
+				D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1.0f, 0);
+		}
 		SceneDepthStale = true;
+		DepthResolveStale = DepthResolveStale || CurrentTarget == NULL;
 	}
 }
 
@@ -2438,6 +3093,7 @@ bool DX11BackendClass::Build_Combiner_Description(CombinerDescription & descript
 		RenderStates.Get_Render_State(D3DRS_ALPHATESTENABLE) != FALSE;
 	description.PixelPipeline.AlphaFunction = RenderStates.Get_Render_State(D3DRS_ALPHAFUNC);
 	description.PixelPipeline.FogEnabled = RenderStates.Get_Render_State(D3DRS_FOGENABLE) != FALSE;
+	description.PixelPipeline.AlphaToCoverage = Alpha_To_Coverage();
 	description.SpecularAdd = RenderStates.Get_Render_State(D3DRS_SPECULARENABLE) != FALSE;
 
 	description.StageCount = 0;
@@ -2560,8 +3216,10 @@ bool DX11BackendClass::Build_Vertex_Description(VertexPipelineDescription & desc
 
 bool DX11BackendClass::Resolve(Pipeline & pipeline)
 {
-	// Nothing either description is built from has been set since the last draw resolved.
-	if (!PipelineChanged && LastResolveHeld) {
+	// Nothing either description is built from has been set since the last draw resolved.  Alpha to
+	// coverage is read off the target as well as the states, and a target change sets nothing.
+	if (!PipelineChanged && LastResolveHeld
+		&& Memos[LastMemo].Combiner.PixelPipeline.AlphaToCoverage == Alpha_To_Coverage()) {
 		ResolveMemo & memo = Memos[LastMemo];
 		pipeline = memo.Resolved;
 		++memo.Use->Draws;
@@ -2868,16 +3526,44 @@ void DX11BackendClass::Upload_Constants()
 	// Each block is built only when something it is built from has been set since its buffer was
 	// last written.
 	const bool vertex_due = ConstantsChanged || VertexConstantsChanged || !VertexConstantsHeld;
-	const bool pixel_due = ConstantsChanged || PixelConstantsChanged || !PixelConstantsHeld;
+	const bool world_due = !vertex_due && WorldChanged;
+	bool pixel_due = ConstantsChanged || PixelConstantsChanged || !PixelConstantsHeld;
+	// A blend change rebuilt the pixel block on every sorted run, and nearly always to the same
+	// bytes: the block reads the blend only through Pixel_Blend_Key.
+	if (!pixel_due && PixelBlendChanged) {
+		pixel_due = Pixel_Blend_Key() != HeldPixelBlendKey;
+	}
 	ConstantsChanged = false;
 	VertexConstantsChanged = false;
 	PixelConstantsChanged = false;
+	PixelBlendChanged = false;
+	WorldChanged = false;
 	if (vertex_due) {
 		Upload_Vertex_Constants();
+	} else if (world_due) {
+		Upload_World_Constants();
 	}
 	if (pixel_due) {
 		Upload_Pixel_Constants();
 	}
+}
+
+// What the pixel block takes from the blend, and from the vertex format and the programs, which raise
+// no flag of their own: the look Draw_Effect picks, the multiply test that keeps the blast lights off
+// a pass multiplying what is under it, whether the program reads the scene's depth, and the alpha
+// reference, which the sun's caster pass answers by the blend switch.  The same key is the same block.
+unsigned DX11BackendClass::Pixel_Blend_Key() const
+{
+	return Draw_Effect() | (Multiplies_Below() ? 0x100u : 0u)
+		| (EngineShader_Reads_Scene_Depth(PixelProgram) ? 0x200u : 0u)
+		| ((RenderStates.Get_Render_State(D3DRS_ALPHAREF) & 0xffu) << 10);
+}
+
+bool DX11BackendClass::Multiplies_Below() const
+{
+	return RenderStates.Get_Render_State(D3DRS_ALPHABLENDENABLE) != FALSE
+		&& (RenderStates.Get_Render_State(D3DRS_SRCBLEND) == D3DBLEND_ZERO
+			|| RenderStates.Get_Render_State(D3DRS_DESTBLEND) == D3DBLEND_SRCCOLOR);
 }
 
 void DX11BackendClass::Upload_Vertex_Constants()
@@ -2946,8 +3632,31 @@ void DX11BackendClass::Upload_Vertex_Constants()
 	}
 }
 
+// Everything but the world came from the same inputs as the held block (only WorldChanged is up),
+// so the held block with its three world products made again is what Upload_Vertex_Constants would
+// build, byte for byte, without its light transforms, colour conversions and kilobyte compare.
+void DX11BackendClass::Upload_World_Constants()
+{
+	float world[3][16];
+	multiply(World, View, world[1]);
+	multiply(world[1], Projection, world[0]);
+	inverse_transpose(world[1], world[2]);
+	// Set back to the matrices it holds, the block would be the one already in the buffer.
+	if (memcmp(HeldVertexConstants.WorldViewProjection, world, sizeof(world)) == 0) {
+		return;
+	}
+	static_assert(offsetof(VertexConstantBlock, WorldView) == sizeof(float) * 16
+		&& offsetof(VertexConstantBlock, NormalTransform) == sizeof(float) * 32,
+		"the three world products lead the block");
+	memcpy(HeldVertexConstants.WorldViewProjection, world, sizeof(world));
+	VertexConstantsHeld = Write_Constants(VertexConstantRing, &HeldVertexConstants,
+		sizeof(HeldVertexConstants));
+}
+
 void DX11BackendClass::Upload_Pixel_Constants()
 {
+	// The held block is this one once the compare or the write below is done, or it is not held.
+	HeldPixelBlendKey = Pixel_Blend_Key();
 	PixelConstantBlock pixel_block;
 	memset(&pixel_block, 0, sizeof(pixel_block));
 	RenderStates.Get_Texture_Factor(pixel_block.TextureFactor);
@@ -3027,10 +3736,7 @@ void DX11BackendClass::Upload_Pixel_Constants()
 		// None for a particle: the smoke takes these lights on the CPU (BLAST_LIGHT_SAMPLING).  None
 		// for a pass that multiplies what is under it (ZERO, SRCCOLOR): the base pass took the light
 		// already, and gained again the surface came out lit twice.
-		const bool multiplies = RenderStates.Get_Render_State(D3DRS_ALPHABLENDENABLE) != FALSE
-			&& (RenderStates.Get_Render_State(D3DRS_SRCBLEND) == D3DBLEND_ZERO
-				|| RenderStates.Get_Render_State(D3DRS_DESTBLEND) == D3DBLEND_SRCCOLOR);
-		const unsigned blasts = (camera_space || multiplies) ? 0 : BlastLightCount;
+		const unsigned blasts = (camera_space || Multiplies_Below()) ? 0 : BlastLightCount;
 		pixel_block.BlastLightParameters[0] = static_cast<float>(blasts);
 		for (unsigned slot = 0; slot < blasts; ++slot) {
 			memcpy(pixel_block.BlastLightPosition[slot], &BlastLights[slot][0], sizeof(float) * 4);
@@ -3051,12 +3757,41 @@ void DX11BackendClass::Upload_Pixel_Constants()
 
 	if (!PixelConstantsHeld
 			|| memcmp(&HeldPixelConstants, &pixel_block, sizeof(pixel_block)) != 0) {
+		if (Rebind_Recent_Pixel_Constants(pixel_block)) {
+			return;
+		}
 		PixelConstantsHeld = false;
 		if (Write_Constants(PixelConstantRing, &pixel_block, sizeof(pixel_block))) {
 			HeldPixelConstants = pixel_block;
 			PixelConstantsHeld = true;
+			RecentPixelConstants[NextRecentPixel] = pixel_block;
+			RecentPixelOffset[NextRecentPixel] = PixelConstantRing.Current;
+			RecentPixelDiscards[NextRecentPixel] = PixelConstantRing.Discards;
+			NextRecentPixel = (NextRecentPixel + 1) % RECENT_PIXEL_BLOCKS;
 		}
 	}
+}
+
+// A block one of the last few writes left in the ring, in the buffer as it is now, bound again where
+// it lies: the draws read the same bytes from an older entry.  The tail first, where a billboard
+// run's block and a streak's differ, so a block that is not there costs a short compare.
+bool DX11BackendClass::Rebind_Recent_Pixel_Constants(const PixelConstantBlock & block)
+{
+	const size_t tail = offsetof(PixelConstantBlock, SoftParticleDepth);
+	const unsigned char * const wanted = reinterpret_cast<const unsigned char *>(&block);
+	for (unsigned index = 0; index < RECENT_PIXEL_BLOCKS; ++index) {
+		const unsigned char * const recent =
+			reinterpret_cast<const unsigned char *>(&RecentPixelConstants[index]);
+		if (RecentPixelDiscards[index] == PixelConstantRing.Discards
+			&& memcmp(recent + tail, wanted + tail, sizeof(block) - tail) == 0
+			&& memcmp(recent, wanted, tail) == 0) {
+			PixelConstantRing.Current = RecentPixelOffset[index];
+			HeldPixelConstants = block;
+			PixelConstantsHeld = true;
+			return true;
+		}
+	}
+	return false;
 }
 
 void DX11BackendClass::Forget_Last_State_Objects()
@@ -3067,6 +3802,7 @@ void DX11BackendClass::Forget_Last_State_Objects()
 	memset(LastSamplerDescriptions, 0, sizeof(LastSamplerDescriptions));
 	LastBlendState = NULL;
 	LastBlendGlow = false;
+	LastBlendCoverage = false;
 	LastDepthStencilState = NULL;
 	LastRasterizerState = NULL;
 	memset(LastSamplerStates, 0, sizeof(LastSamplerStates));
@@ -3074,10 +3810,20 @@ void DX11BackendClass::Forget_Last_State_Objects()
 	Forget_Bindings();
 }
 
-ID3D11BlendState * DX11BackendClass::Blend_State(bool glow)
+bool DX11BackendClass::Alpha_To_Coverage() const
+{
+	const unsigned function = RenderStates.Get_Render_State(D3DRS_ALPHAFUNC);
+	return Device->Scene_Is_Multisampled() && Draws_Into_Scene() && SoftParticlesAllowed
+		&& RenderStates.Get_Render_State(D3DRS_ALPHATESTENABLE) != FALSE
+		&& RenderStates.Get_Render_State(D3DRS_ALPHABLENDENABLE) == FALSE
+		&& (function == D3DCMP_GREATER || function == D3DCMP_GREATEREQUAL);
+}
+
+ID3D11BlendState * DX11BackendClass::Blend_State(bool glow, bool coverage)
 {
 	D3D11_BLEND_DESC description;
 	RenderStates.Build_Blend_Description(description);
+	description.AlphaToCoverageEnable = coverage ? TRUE : FALSE;
 	if (glow) {
 		// The source term becomes the blend factor, which Bind_State_Objects passes as the gain.
 		// A float target takes a factor past one unclamped; that is the whole of the boost.
@@ -3227,10 +3973,12 @@ void DX11BackendClass::Bind_State_Objects()
 	// Whether the glow applies hangs on the target and the vertex format as well as the render
 	// states, and neither of those raises StateObjectsChanged, so it is asked every draw.
 	const bool glow = Additive_Glow();
-	if (StateObjectsChanged || glow != LastBlendGlow || blend == NULL || depth_stencil == NULL
-			|| rasterizer == NULL) {
-		blend = Blend_State(glow);
+	const bool coverage = Alpha_To_Coverage();
+	if (StateObjectsChanged || glow != LastBlendGlow || coverage != LastBlendCoverage || blend == NULL
+			|| depth_stencil == NULL || rasterizer == NULL) {
+		blend = Blend_State(glow, coverage);
 		LastBlendGlow = glow;
+		LastBlendCoverage = coverage;
 		depth_stencil = Depth_Stencil_State();
 		rasterizer = Rasterizer_State();
 		StateObjectsChanged = blend == NULL || depth_stencil == NULL || rasterizer == NULL;
@@ -3440,6 +4188,9 @@ ID3D11ShaderResourceView * DX11BackendClass::Readable_Texture(unsigned stage,
 	if (TargetCopy == NULL) {
 		description.BindFlags = D3D11_BIND_SHADER_RESOURCE;
 		description.MiscFlags = 0;
+		// The multisampled scene is resolved into it.
+		description.SampleDesc.Count = 1;
+		description.SampleDesc.Quality = 0;
 		if (FAILED(Device->Get_Device()->CreateTexture2D(&description, NULL, &TargetCopy))) {
 			Note_Refusal("the device refused a copy of the render target a draw samples");
 			TargetCopy = NULL;
@@ -3453,7 +4204,7 @@ ID3D11ShaderResourceView * DX11BackendClass::Readable_Texture(unsigned stage,
 		}
 	}
 
-	Device->Get_Context()->CopyResource(TargetCopy, resource);
+	DX11Resource_Copy_Readable(Device->Get_Context(), TargetCopy, resource);
 	return TargetCopyView;
 }
 
@@ -3521,6 +4272,7 @@ bool DX11BackendClass::Draw_Indexed(unsigned index_count, unsigned start_index,
 	if (RenderStates.Get_Render_State(D3DRS_ZWRITEENABLE) != FALSE
 		&& (CurrentTarget == NULL || CurrentDepth == Device->Get_Depth_Stencil_View())) {
 		SceneDepthStale = true;
+		DepthResolveStale = DepthResolveStale || CurrentTarget == NULL;
 	}
 	if (CurrentTarget != NULL) {
 		++DrawsIntoTargets;
@@ -3578,6 +4330,7 @@ bool DX11BackendClass::Draw_Triangles(unsigned vertex_count, unsigned start_vert
 	if (RenderStates.Get_Render_State(D3DRS_ZWRITEENABLE) != FALSE
 		&& (CurrentTarget == NULL || CurrentDepth == Device->Get_Depth_Stencil_View())) {
 		SceneDepthStale = true;
+		DepthResolveStale = DepthResolveStale || CurrentTarget == NULL;
 	}
 	if (CurrentTarget != NULL) {
 		++DrawsIntoTargets;
@@ -3746,6 +4499,7 @@ bool DX11BackendClass::Draw_User_Strip(const void * vertices, unsigned primitive
 	if (RenderStates.Get_Render_State(D3DRS_ZWRITEENABLE) != FALSE
 		&& (CurrentTarget == NULL || CurrentDepth == Device->Get_Depth_Stencil_View())) {
 		SceneDepthStale = true;
+		DepthResolveStale = DepthResolveStale || CurrentTarget == NULL;
 	}
 	if (CurrentTarget != NULL) {
 		++DrawsIntoTargets;

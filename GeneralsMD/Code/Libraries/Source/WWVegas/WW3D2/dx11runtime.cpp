@@ -37,6 +37,7 @@ static bool PresentRequested = false;
 static HRESULT PresentFailure = S_OK;
 static bool PresentFailureReported = false;
 static bool VSyncRequested = false;
+static unsigned SamplesRequested = 1;
 static bool Active = false;
 static DX11DeviceClass Device;
 static DX11BackendClass Backend;
@@ -360,6 +361,7 @@ bool Direct3D11_Create(HWND window, unsigned width, unsigned height)
 		return Active;
 	}
 
+	Device.Request_Sample_Count(SamplesRequested);
 	if (!Device.Create(window, width, height)) {
 		return false;
 	}
@@ -377,6 +379,9 @@ bool Direct3D11_Create(HWND window, unsigned width, unsigned height)
 	Backend.Set_Shader_Cache_Path(cache_path.c_str());
 	Backend.Load_Shipped_Programs(SHIPPED_SHADER_FILE);
 	Backend.Set_Compile_Off_Frame(true);
+	if (Device.Get_Sample_Count() > 1 && !Backend.Make_Depth_Resolve()) {
+		Device.Drop_Multisampling();
+	}
 
 	// The chain is the one thing here that is allowed to fail without taking the backend with it:
 	// a machine whose compiler refuses the passes still gets the frame, just not the effect.
@@ -401,6 +406,16 @@ void Direct3D11_Release()
 	Direct3D11_Release_Frame_Copies();
 	Device.Release();
 	Active = false;
+}
+
+void Direct3D11_Set_Sample_Count(unsigned samples)
+{
+	SamplesRequested = samples;
+}
+
+unsigned Direct3D11_Sample_Count()
+{
+	return (Active && Device.Get_Sample_Count() > 1) ? Device.Get_Sample_Count() : 0;
 }
 
 bool Direct3D11_Resize(unsigned width, unsigned height)
@@ -620,6 +635,51 @@ bool Direct3D11_Fill_Smoke_Map(const float * casters, unsigned count, float stre
 	return Active ? Backend.Fill_Smoke_Map(casters, count, strength) : false;
 }
 
+bool Direct3D11_Upload_Shadow_Casters(const float * const * worlds, const unsigned * first_bones,
+	unsigned instance_count, const float * const * bones, unsigned bone_count)
+{
+	return Active && Backend.Upload_Shadow_Casters(worlds, first_bones, instance_count, bones, bone_count);
+}
+
+bool Direct3D11_Upload_Shadow_Skin(const DX11ShadowSkinVertex * vertices, unsigned count,
+	unsigned & first_vertex)
+{
+	return Active && Backend.Upload_Shadow_Skin(
+		reinterpret_cast<const DX11BackendClass::ShadowSkinVertex *>(vertices), count, first_vertex);
+}
+
+unsigned Direct3D11_Shadow_Skin_Generation()
+{
+	return Backend.Shadow_Skin_Generation();
+}
+
+bool Direct3D11_Draw_Shadow_Casters(const DX11ShadowCasterRun * runs, unsigned run_count)
+{
+	if (!Active) {
+		return false;
+	}
+	static std::vector<DX11BackendClass::ShadowCasterRun> backend_runs;
+	backend_runs.resize(run_count);
+	for (unsigned index = 0; index < run_count; ++index) {
+		const DX11ShadowCasterRun & run = runs[index];
+		DX11BackendClass::ShadowCasterRun & backend_run = backend_runs[index];
+		backend_run.Kind = static_cast<DX11BackendClass::ShadowCasterKind>(run.Kind);
+		backend_run.Vertices = (run.Vertices != NULL) ? run.Vertices->Buffer() : NULL;
+		backend_run.Stride = run.Stride;
+		backend_run.TextureOffset = run.TextureOffset;
+		backend_run.Indices = run.Indices->Buffer();
+		backend_run.StartIndex = run.StartIndex;
+		backend_run.IndexCount = run.IndexCount;
+		backend_run.BaseVertex = run.BaseVertex;
+		backend_run.Strip = run.Strip;
+		backend_run.CullMode = run.CullMode;
+		backend_run.DepthFunction = run.DepthFunction;
+		backend_run.FirstInstance = run.FirstInstance;
+		backend_run.InstanceCount = run.InstanceCount;
+	}
+	return Backend.Draw_Shadow_Casters(run_count ? &backend_runs[0] : NULL, run_count);
+}
+
 void Direct3D11_Set_Scene_View(const float view[16])
 {
 	if (Active) {
@@ -688,6 +748,7 @@ void Direct3D11_Occlude_Scene()
 	if (!Active || !Backend.Draws_Into_Scene()) {
 		return;
 	}
+	Backend.Resolve_Scene_Depth();
 	bool drew = Post.Occlude_Scene(Device.Get_Depth_Texture());
 	// The prototype ground haze goes on at the same moment, over the occlusion and under the fire.
 	if (Post.Wants_Haze_Program()) {
@@ -857,6 +918,9 @@ void Direct3D11_Finish_Scene()
 {
 	if (Active) {
 		stamp_gpu_frame(GPU_SCENE_END);
+		// The chain's occlusion and whatever tests against the depth over the interface read it
+		// single-sampled.
+		Backend.Resolve_Scene_Depth();
 	}
 	if (Active && Post.Run_Chain()) {
 		take_the_frame_to_the_screen();
@@ -1065,6 +1129,14 @@ bool Direct3D11_Take_Present_Failure(long & result)
 	PresentFailureReported = true;
 	result = PresentFailure;
 	return true;
+}
+
+long Direct3D11_Device_Removed_Reason()
+{
+	if (!Active || SUCCEEDED(Device.Last_Present_Result())) {
+		return S_OK;
+	}
+	return Device.Device_Removed_Reason();
 }
 
 void Direct3D11_Mirror_Stream_Source(DX11BufferTwinClass * twin, unsigned stride, unsigned offset)

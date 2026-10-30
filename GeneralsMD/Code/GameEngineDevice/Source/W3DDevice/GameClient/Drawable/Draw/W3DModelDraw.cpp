@@ -822,7 +822,10 @@ void ModelConditionInfo::validateWeaponBarrelInfo() const
 					snprintf(buffer, ARRAY_SIZE(buffer), "%s%02d",plbName.str(), i);
 					const Matrix3D* mtx = findPristineBone(NAMEKEY(buffer), &plbBoneIndex);
 					if (mtx != NULL)
+					{
 						info.m_projectileOffsetMtx = *mtx;
+						info.m_hasProjectileLaunchBone = true;
+					}
 				}
 
 				if (info.m_fxBone == 0 && info.m_recoilBone == 0 && info.m_muzzleFlashBone == 0 && plbBoneIndex == 0)
@@ -857,7 +860,10 @@ void ModelConditionInfo::validateWeaponBarrelInfo() const
 
 				const Matrix3D* plbMtx = plbName.isEmpty() ? NULL : findPristineBone(NAMEKEY(plbName), NULL);
 				if (plbMtx != NULL)
+				{
 					info.m_projectileOffsetMtx = *plbMtx;
+					info.m_hasProjectileLaunchBone = true;
+				}
 				else
 					info.m_projectileOffsetMtx.Make_Identity();
 
@@ -1054,6 +1060,8 @@ W3DModelDrawModuleData::W3DModelDrawModuleData() :
 	m_okToChangeModelColor(false),
   m_particlesAttachedToAnimatedBones(false),
 	m_animationsRequirePower(true),
+	m_stabilizedTurretPitch(false),
+	m_barrelArtPitch(0.0f),
 #ifdef CACHE_ATTACH_BONE
 	m_attachToDrawableBoneOffsetValid(false),
 #endif
@@ -1249,6 +1257,8 @@ void W3DModelDrawModuleData::buildFieldParse(MultiIniFieldParse& p)
 		{ "RecoilSettleSpeed",	INI::parseVelocityReal, NULL, offsetof(W3DModelDrawModuleData, m_recoilSettle) },
 		{ "OkToChangeModelColor",	INI::parseBool, NULL, offsetof(W3DModelDrawModuleData, m_okToChangeModelColor) },
 		{ "AnimationsRequirePower",	INI::parseBool, NULL, offsetof(W3DModelDrawModuleData, m_animationsRequirePower) },
+		{ "StabilizedTurretPitch",	INI::parseBool, NULL, offsetof(W3DModelDrawModuleData, m_stabilizedTurretPitch) },
+		{ "BarrelArtPitch",	INI::parseAngleReal, NULL, offsetof(W3DModelDrawModuleData, m_barrelArtPitch) },
 		{ "ParticlesAttachedToAnimatedBones",	INI::parseBool, NULL, offsetof(W3DModelDrawModuleData, m_particlesAttachedToAnimatedBones) },
 		{ "MinLODRequired",		INI::parseStaticGameLODLevel,	NULL,	offsetof(W3DModelDrawModuleData, m_minLODRequired) },
 		{ "ProjectileBoneFeedbackEnabledSlots", INI::parseBitString32, TheWeaponSlotTypeNames, offsetof(W3DModelDrawModuleData, m_projectileBoneFeedbackEnabledSlots) },
@@ -1788,6 +1798,8 @@ W3DModelDraw::W3DModelDraw(Thing *thing, const ModuleData* moduleData) : DrawMod
 	{
 		m_weaponRecoilInfoVec[i].clear();
 	}
+	for (i = 0; i < MAX_TURRETS; ++i)
+		m_drawnTurretPitch[i] = 0.0f;
 	m_needRecalcBoneParticleSystems = false;
 	m_fullyObscuredByShroud = false;
 	m_groundMotionPos.zero();
@@ -2326,6 +2338,12 @@ void W3DModelDraw::adjustAnimSpeedToMovementSpeed()
 			}
 		}
 	}
+}
+
+//-------------------------------------------------------------------------------------------------
+Real W3DModelDraw::getHullHeadingLag() const
+{
+	return getDrawable()->getDrawnHeadingLag();
 }
 
 //-------------------------------------------------------------------------------------------------
@@ -2900,8 +2918,9 @@ void W3DModelDraw::handleClientTurretPositioning()
 			if (obj)
 			{
 				const AIUpdateInterface* ai = obj->getAIUpdateInterface();
-				if (ai)
-					ai->getTurretRotAndPitch((WhichTurretType)tslot, &turretAngle, &turretPitch);
+				// a turret aims from the logic heading, which the drawn hull of a tank or car trails
+				if (ai && ai->getTurretRotAndPitch((WhichTurretType)tslot, &turretAngle, &turretPitch))
+					turretAngle -= getHullHeadingLag();
 			}
 
 			// do turret, if any
@@ -2923,6 +2942,21 @@ void W3DModelDraw::handleClientTurretPositioning()
 			{
 				if (m_curState)
 					turretPitch += tur.m_turretArtPitch;
+				// The logic aims from a hull that never tilts; the drawn one lies on the ground and rocks when
+				// it fires. A stabilized gun takes that tilt along its own heading off, and the angle the barrel
+				// is modelled at (BarrelArtPitch: a Crusader's mesh rises 4.4 degrees from its bone), so the
+				// drawn barrel stands at the logic's pitch against level ground, down the line its shell flies.
+				const W3DModelDrawModuleData* md = getW3DModelDrawModuleData();
+				if (md->m_stabilizedTurretPitch && m_renderObject && obj)
+				{
+					Vector3 heading(cosf(turretAngle), sinf(turretAngle), 0.0f);
+					Vector3 drawn = m_renderObject->Get_Transform().Rotate_Vector(heading);
+					Vector3 logic = obj->getTransformMatrix()->Rotate_Vector(heading);
+					turretPitch -= atan2f(drawn.Z, sqrtf(drawn.X * drawn.X + drawn.Y * drawn.Y))
+						- atan2f(logic.Z, sqrtf(logic.X * logic.X + logic.Y * logic.Y));
+					turretPitch -= md->m_barrelArtPitch;
+				}
+				m_drawnTurretPitch[tslot] = turretPitch;
 				Matrix3D turretPitchXfrm(1);
 				turretPitchXfrm.Rotate_Y(-turretPitch);
 				if (m_renderObject)
@@ -3026,6 +3060,17 @@ void W3DModelDraw::handleClientRecoil()
 
 				Matrix3D gunXfrm;
 				gunXfrm.Make_Identity();
+				// A barrel that is also its turret's pitch bone (a Crusader's, a Battlemaster's: the art has
+				// no other bone to pitch) keeps the pitch while it recoils, back along the pitched barrel.
+				// This matrix replaces the bone's whole control, so without it every shot snapped it level.
+				for (Int tslot = 0; tslot < MAX_TURRETS; ++tslot)
+				{
+					if (m_curState->m_turrets[tslot].m_turretPitchBone == barrels[i].m_recoilBone)
+					{
+						gunXfrm.Rotate_Y( -m_drawnTurretPitch[tslot] );
+						break;
+					}
+				}
 				gunXfrm.Translate_X( -recoils[i].m_shift );
 				//DEBUG_ASSERTLOG(recoils[i].m_shift==0.0f,("adjust bone %d by %f\n",recoils[i].m_recoilBone,recoils[i].m_shift));
 
@@ -3663,7 +3708,10 @@ void W3DModelDraw::setModelState(const ModelConditionInfo* newState)
 		//BONEPOS_LOG(("validateStuff() from within W3DModelDraw::setModelState()\n"));
 		//BONEPOS_DUMPREAL(draw->getScale());
 
-		newState->validateStuff(m_renderObject, draw->getScale(), getW3DModelDrawModuleData()->m_extraPublicBones);
+		// inside a tick never the live model, as getPristineBonePositionsForConditionState asks: the render
+		// may be posing it beside the tick, and its captured turret bones would go into the shared cache
+		newState->validateStuff(TheGameLogic->isInGameLogicUpdate() ? NULL : m_renderObject, draw->getScale(),
+			getW3DModelDrawModuleData()->m_extraPublicBones);
 		// ensure that any muzzle flashes from the *new* state, start out hidden...
 //		hideAllMuzzleFlashes(newState, m_renderObject);//moved to above
 		rebuildWeaponRecoilInfo(newState);
@@ -3795,7 +3843,8 @@ void W3DModelDraw::setModelState(const ModelConditionInfo* newState)
 		//BONEPOS_LOG(("validateStuff() from within W3DModelDraw::setModelState()\n"));
 		//BONEPOS_DUMPREAL(getDrawable()->getScale());
 
-		newState->validateStuff(m_renderObject, getDrawable()->getScale(), getW3DModelDrawModuleData()->m_extraPublicBones);
+		newState->validateStuff(TheGameLogic->isInGameLogicUpdate() ? NULL : m_renderObject, getDrawable()->getScale(),
+			getW3DModelDrawModuleData()->m_extraPublicBones);	// the live model only outside a tick, as above
 		rebuildWeaponRecoilInfo(newState);
 
 		// ensure that any muzzle flashes from the *previous* state, are hidden...
@@ -3972,10 +4021,23 @@ Bool W3DModelDraw::getProjectileLaunchOffset(
 			CRCDEBUG_LOG(("specificBarrelToUse = %d\n", specificBarrelToUse));
 			*launchPos = wbvec[specificBarrelToUse].m_projectileOffsetMtx;
 
-			if (tur != TURRET_INVALID)
+			// The art angle turns a launch bone, posed the way the turret's art faces, to the front. With
+			// no launch bone the matrix is the object's own, facing the front already, and turned by the
+			// art it faced backward, so the turret's pitch tipped it down: the battleship's front guns
+			// fired 12 degrees under barrels drawn 12 degrees up. The bone turns about the turret's pivot,
+			// as the drawn turret does; turned about the model's origin, a turret off the centre threw it
+			// across: a technical's cannon shell left 17 in front of its gun.
+			if (tur != TURRET_INVALID && wbvec[specificBarrelToUse].m_hasProjectileLaunchBone)
 			{
-				launchPos->Pre_Rotate_Z(stateToUse->m_turrets[tur].m_turretArtAngle);
-				launchPos->Pre_Rotate_Y(-stateToUse->m_turrets[tur].m_turretArtPitch);
+				const ModelConditionInfo::TurretInfo& artTurret = stateToUse->m_turrets[tur];
+				Coord3D artPivot;
+				artPivot.zero();
+				if (artTurret.m_turretAngleNameKey != NAMEKEY_INVALID)
+					stateToUse->findPristineBonePos(artTurret.m_turretAngleNameKey, artPivot);
+				launchPos->Adjust_Translation(Vector3(-artPivot.x, -artPivot.y, 0.0f));
+				launchPos->Pre_Rotate_Z(artTurret.m_turretArtAngle);
+				launchPos->Adjust_Translation(Vector3(artPivot.x, artPivot.y, 0.0f));
+				launchPos->Pre_Rotate_Y(-artTurret.m_turretArtPitch);
 			}
 #ifdef CACHE_ATTACH_BONE
 #else
@@ -4338,9 +4400,18 @@ void W3DModelDraw::smoothMotionApply(Real alpha)
 {
 	if (m_renderObject == NULL || m_smoothMotion.Model != m_renderObject || m_smoothMotion.Snap != SMOOTH_BLENDED)
 		return;
-	Matrix3D shown;
-	if (SmoothMotion_Blend(m_smoothMotion.Prev, m_smoothMotion.Cur, alpha, shown) != SMOOTH_BLENDED)
+	// an unmoved model already holds its one transform: shown as blended, nothing set
+	if (m_smoothMotion.Still)
+	{
+		m_smoothMotion.Applied = true;
 		return;
+	}
+	// a whole tick on (a paused game, a pass that fell behind) is the current transform, which it holds
+	if (alpha >= 1.0f)
+		return;
+	// the parts were taken at capture, so a picture only mixes them
+	Matrix3D shown;
+	SmoothMotion_Pose(m_smoothMotion.Prev, m_smoothMotion.Cur, m_smoothMotion.Parts, alpha, shown);
 	m_renderObject->Set_Transform(shown);
 	m_smoothMotion.Applied = true;
 }
@@ -4353,7 +4424,7 @@ void W3DModelDraw::smoothMotionRestore()
 	if (!m_smoothMotion.Applied)
 		return;
 	m_smoothMotion.Applied = false;
-	if (m_renderObject != NULL && m_smoothMotion.Model == m_renderObject)
+	if (m_renderObject != NULL && m_smoothMotion.Model == m_renderObject && !m_smoothMotion.Still)
 		m_renderObject->Set_Transform(m_smoothMotion.Cur);
 }
 
