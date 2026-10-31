@@ -109,6 +109,13 @@ UnsignedInt GameEngine_pictureMilliseconds( void );
 /** Whether the catch-up loop may start another logic tick this pass. */
 Bool GameEngine_mayStartAnotherCatchupTick( Int ticksSoFar, Int maxTicks, Real elapsedMsInLoop );
 
+/** Whether one more tick, about as long as the last, leaves this pass's picture inside a 60 Hz frame.
+	A pass already past it is late whatever runs next, so it pays its debt under the budget above. */
+Bool GameEngine_catchupTickFitsPicture( Real passSoFarMS, Real lastTickMS );
+
+/** Milliseconds since this pass, or its last extra picture, began. */
+Real GameEngine_msSincePassStart( void );
+
 /** A rate sampled every half second, averaged, and the whole number written on screen for it. */
 struct RateReading
 {
@@ -185,6 +192,9 @@ public:
 		* first tick runs beside the render: the draw shows another picture while it waits only if one fits.
 		* 0 outside a paced single-player pass that planOverlappedTick planned (fast mode, a network game). */
 	Real msUntilNextTickDue( void );
+
+	/// That same pass: true when the clock paces it, so a picture beside a late tick costs no network turn.
+	Bool isPassPacedByClock( void );
 
 	/** What the pacer decided for one pass, see planLogicPass. */
 	struct LogicPassPlan

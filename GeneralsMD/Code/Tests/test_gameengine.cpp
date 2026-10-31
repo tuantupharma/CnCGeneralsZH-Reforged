@@ -1606,6 +1606,12 @@ TEST(logic_tick_is_wall_clock_paced_not_render_paced)
 	CHECK_EQ( GameEngine_logicCatchupMaxFrames( 15 ), 2 );
 	CHECK_EQ( GameEngine_logicCatchupMaxFrames( 0 ), 1 );
 
+	/* A tick that fits leaves the picture on time, one that does not waits for the next pass, and a
+	   picture already late pays the debt, or a 25 ms render would slow the match to its own rate. */
+	CHECK( GameEngine_catchupTickFitsPicture( 8.0f, 4.0f ) );
+	CHECK( !GameEngine_catchupTickFitsPicture( 10.0f, 7.0f ) );
+	CHECK( GameEngine_catchupTickFitsPicture( 25.0f, 7.0f ) );
+
 	/* A 300fps renderer (3.33ms/frame) at 30fps logic: 900 render frames span
 	   3 seconds, which must yield 90 logic frames, not 900. */
 	Real accum = 0.0f;

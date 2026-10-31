@@ -1666,6 +1666,14 @@ Bool GameEngine_mayStartAnotherCatchupTick( Int ticksSoFar, Int maxTicks, Real e
 	return elapsedMsInLoop < LOGIC_CATCHUP_BUDGET_MS;
 }
 
+/* The debt survives on the accumulator and a pass under 16.7 ms earns less than a tick, so frames that
+	 fit drain it on their own; only a pass over the line can build it, and that one is still paid. */
+Bool GameEngine_catchupTickFitsPicture( Real passSoFarMS, Real lastTickMS )
+{
+	const Real PICTURE_MS = 16.7f;
+	return passSoFarMS >= PICTURE_MS || passSoFarMS + lastTickMS * 1.25f < PICTURE_MS;
+}
+
 /* R1, smooth motion: when the last logic tick was due and how long a tick lasts, so the renderer can
 	 show models between their last two logic states (W3DSmoothMotion.h).  Read, never written, by the
 	 client; nothing here reaches the logic.  Set by noteLogicTickDue after each pass's ticks. */
@@ -3090,6 +3098,17 @@ Real GameEngine::msUntilNextTickDue( void )
 	return 1000.0f / m_maxFPS - s_logicAccumMs - (Real)( Clock_Milliseconds() - s_planTimeMs );
 }
 
+Bool GameEngine::isPassPacedByClock( void )
+{
+	return s_passPlanned && !s_passPlan.fastMode && !s_passPlan.networkPaced && m_maxFPS > 0;
+}
+
+Real GameEngine_msSincePassStart( void )
+{
+	const Int64 now = Clock_Ticks();
+	return engineElapsedMS( thePassStart, now );
+}
+
 void GameEngine::update( void )
 {
 	USE_PERF_TIMER(GameEngine_update)
@@ -3223,12 +3242,19 @@ void GameEngine::update( void )
 			if (overlapped)
 				LogicThread::takeOverlapTimes( tickBesideRenderMS, waitForTickMS );
 			const UnsignedInt frameBeforeTicks = overlapped ? s_frameBeforeOverlap : TheGameLogic->getFrame();
+			Real lastTickMS = tickBesideRenderMS;
 			for( ;; )
 			{
 				// TheGameLogic->UPDATE(), on the logic thread at -logicthread 1; the first of an overlapped
 				// pass has run already, beside the render
 				if (logicTicksThisPass > 0 || !overlapped)
+				{
+					Int64 tTickStart, tTickEnd;
+					tTickStart = Clock_Ticks();
 					LogicThread::runTick();
+					tTickEnd = Clock_Ticks();
+					lastTickMS = engineElapsedMS( tTickStart, tTickEnd );
+				}
 				++logicTicksThisPass;
 
 				// -maxframes' frame ends the burst, its CRC logged as it finishes (noteFrameLimit)
@@ -3246,6 +3272,11 @@ void GameEngine::update( void )
 				tCatchupNow = Clock_Ticks();
 				if (!GameEngine_mayStartAnotherCatchupTick( logicTicksThisPass, maxTicksThisPass,
 																									 tickBesideRenderMS + engineElapsedMS( tCatchupStart, tCatchupNow ) ))
+					break;
+				/* A match that frames fine and is only a little behind held a frame over 16.7 ms for a tick the
+					 next pass could run as well: 43% of the passes on Twilight Flame's minute 20.  A network
+					 game runs ahead by what it can, or the room falls to this machine's rate. */
+				if (!networkPaced && !GameEngine_catchupTickFitsPicture( engineElapsedMS( thePassStart, tCatchupNow ), lastTickMS ))
 					break;
 				if (networkPaced)
 				{
