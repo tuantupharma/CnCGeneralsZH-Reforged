@@ -17334,6 +17334,27 @@ TEST(no_options_file_is_the_classic_game_with_every_added_row_off)
 	TheWritableGlobalData = saved;
 }
 
+/* The menu's Defaults puts a row on what it held before the file reached it, whatever the file says. */
+TEST(an_options_row_remembers_its_value_from_before_the_file)
+{
+	GlobalData *saved = TheWritableGlobalData;
+	TheWritableGlobalData = NEW GlobalData;
+
+	UserPreferences pref;
+	pref[ "TeamGlow" ] = "yes";
+	pref[ "ClassicGraphics" ] = "no";
+	loadOptionsFromPreferences( pref );
+	loadOptionsFromPreferences( pref );
+
+	CHECK_EQ( findOptionDef( "TeamGlow" )->get(), 1 );
+	CHECK_EQ( optionDefaultValue( *findOptionDef( "TeamGlow" ) ), 0 );
+	CHECK_EQ( optionDefaultValue( *findOptionDef( "ClassicGraphics" ) ), 1 );
+	CHECK_EQ( optionDefaultValue( *findOptionDef( "LegacySound" ) ), 1 );
+
+	delete TheWritableGlobalData;
+	TheWritableGlobalData = saved;
+}
+
 /* While Classic Graphics is ticked the slider moves EA's rows alone, and the menu reads this to say which. */
 TEST(the_quality_table_knows_the_forks_rows_from_eas)
 {

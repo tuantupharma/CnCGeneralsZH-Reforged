@@ -195,6 +195,9 @@ extern Bool graphicsQualityRowIsReforged( const GraphicsQualityRow &row );
 	* its column reaches a row through the menu, which saves what it shows. */
 extern void loadOptionsFromPreferences( UserPreferences& pref );
 
+/** What this row holds with no line in Options.ini, the value a first run has.  The menu's Defaults. */
+extern Int optionDefaultValue( const OptionDef& def );
+
 /** One log line with every row's value as it stands, for a run's log to say which setup it drew. */
 extern void logOptionCatalog( void );
 

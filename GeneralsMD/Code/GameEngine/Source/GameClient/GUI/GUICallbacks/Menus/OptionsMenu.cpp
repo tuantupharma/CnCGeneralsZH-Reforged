@@ -233,6 +233,7 @@ extern void DoResolutionDialog();
 // the options layout has been taken down and nothing is reading a window out of it any more.
 //
 static Bool pendingShellRebuild = FALSE;
+static Bool defaultsPressed = FALSE;
 //
 
 static Bool ignoreSelected = FALSE;
@@ -1211,7 +1212,15 @@ static void readCatalogWidgets( OptionPreferences &out )
 		const OptionDef& def = TheOptionCatalog[ i ];
 		GameWindow *widget = findOptionWidget( def );
 		if( widget == NULL )
+		{
+			// no control for Defaults to have moved, and the file is all that remembers the row
+			if( defaultsPressed && def.get() != optionDefaultValue( def ) )
+			{
+				def.set( optionDefaultValue( def ) );
+				out[ AsciiString( def.iniKey ) ] = formatOptionValue( def, optionDefaultValue( def ) );
+			}
 			continue;
+		}
 
 		// A hidden, unfilled combo must not overwrite the player's opt-in.
 		if (strcmp(def.iniKey, "CloudStyle") == 0 && !HazardCloud::Supported())
@@ -2479,6 +2488,44 @@ static void showClassicGraphicsChoice( void )
 	updateSliderReadouts();
 }
 
+/** The row Defaults leaves: the words and how the window sits on this monitor are the player's, for
+	* the reason setDefaults leaves the resolution.  The slider's row follows the preset. */
+static Bool defaultsKeepsRow( const OptionDef& def )
+{
+	static const char *const kept[] = { "TextLanguage", "WindowMode", "FullscreenScaling", "VSync", "GraphicsQuality" };
+	for( Int i = 0; i < ARRAY_SIZE( kept ); ++i )
+		if( strcmp( def.iniKey, kept[ i ] ) == 0 )
+			return TRUE;
+
+	return FALSE;
+}
+
+/** Defaults is the Classic game, as a first run has it: the box ticked and every catalog row on its
+	* default, the preset the machine was rated for.  Accept saves what moved, so a Reforged player is one
+	* untick away from High again.  A control hidden or greyed here (-d3d9, a match) keeps what it shows. */
+static void showClassicDefaults( void )
+{
+	if( comboBoxDetail->winGetEnabled() )
+	{
+		GadgetCheckBoxSetChecked( classicGraphicsCheckBox(), TRUE );
+		showDetailPreset( STATIC_GAME_LOD_ULTRA - TheGameLODManager->findStaticLODLevel() );
+	}
+
+	ignoreSelected = TRUE;
+	for( Int i = 0; i < TheOptionCatalogCount; ++i )
+	{
+		const OptionDef& def = TheOptionCatalog[ i ];
+		GameWindow *control = findOptionWidget( def );
+		if( control != NULL && !defaultsKeepsRow( def ) && !control->winIsHidden() && control->winGetEnabled() )
+			setGraphicsQualityControl( control, optionDefaultValue( def ) );
+	}
+	GadgetCheckBoxSetChecked( checkCloudShadows, optionDefaultValue( *findOptionDef( "UseCloudMap" ) ) != 0 );
+	ignoreSelected = FALSE;
+
+	defaultsPressed = TRUE;
+	updateSliderReadouts();
+}
+
 /** The grey line under the detail box: what the picked preset turns on, and that picking one only
 	* fills in the boxes until Accept.  GUI:DetailNote0..4 follow the box's own order, Ultra to Custom. */
 static void updateDetailNote( void )
@@ -2520,6 +2567,7 @@ static void markDetailCustom( void )
 void OptionsMenuInit( WindowLayout *layout, void *userData )
 {
 	ignoreSelected = TRUE;
+	defaultsPressed = FALSE;
 	if (TheGameEngine->getQuitting())
 		return;
 	OptionsLayout = layout;
@@ -3336,7 +3384,7 @@ WindowMsgHandledType OptionsMenuSystem( GameWindow *window, UnsignedInt msg,
 			else if (controlID == buttonDefaults )
 			{
 				setDefaults();
-				updateSliderReadouts();
+				showClassicDefaults();
 			}
 			else if( control == classicGraphicsCheckBox() )
 			{

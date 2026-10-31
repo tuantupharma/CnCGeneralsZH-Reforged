@@ -913,8 +913,26 @@ Bool graphicsQualityRowIsReforged( const GraphicsQualityRow &row )
 }
 
 //-----------------------------------------------------------------------------
+// What each row held before Options.ini reached it: GlobalData's constructor and GameData.ini, the
+// values a first run plays with.  Taken once per GlobalData, because GameData blocks parse again later
+// and by then a row holds the player's value.
+static Int TheOptionDefaults[ sizeof( TheOptionCatalog ) / sizeof( TheOptionCatalog[ 0 ] ) ];
+static const GlobalData *TheOptionDefaultsOwner = NULL;
+
+Int optionDefaultValue( const OptionDef& def )
+{
+	return TheOptionDefaults[ &def - TheOptionCatalog ];
+}
+
 void loadOptionsFromPreferences( UserPreferences& pref )
 {
+	if( TheOptionDefaultsOwner != TheGlobalData )
+	{
+		TheOptionDefaultsOwner = TheGlobalData;
+		for( Int i = 0; i < TheOptionCatalogCount; ++i )
+			TheOptionDefaults[ i ] = TheOptionCatalog[ i ].get();
+	}
+
 	for( Int i = 0; i < TheOptionCatalogCount; ++i )
 	{
 		const OptionDef& def = TheOptionCatalog[ i ];
