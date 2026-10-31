@@ -1922,6 +1922,14 @@ void GlobalData::computeExeCRC( void )
 			const UnsignedInt modScriptsMark = 0x4D4F4453;	// "MODS"
 			exeCRC.computeCRC( &modScriptsMark, sizeof( modScriptsMark ) );
 		}
+
+		// A mod's CommandSet.ini keeps its sets from the fork's corrections (CommandStore), and a copy
+		// byte for byte of EA's would hash the same as no copy at all.
+		if( TheFileSystem->modLooseFile( AsciiString( "Data\\INI\\CommandSet.ini" ), &inModArchive ).isNotEmpty() || inModArchive )
+		{
+			const UnsignedInt modSetsMark = 0x4D4F4443;	// "MODC"
+			exeCRC.computeCRC( &modSetsMark, sizeof( modSetsMark ) );
+		}
 	}
 
 	m_exeCRC = exeCRC.get();
