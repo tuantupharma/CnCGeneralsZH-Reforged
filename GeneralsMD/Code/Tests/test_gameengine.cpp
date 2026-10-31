@@ -6766,7 +6766,7 @@ TEST(particlesys_debris_trails_option_destroys_only_marked_systems)
 
 	GlobalData *savedData = TheWritableGlobalData;
 	TheWritableGlobalData = NEW GlobalData;
-	CHECK( TheGlobalData->m_explosionDebrisTrails );
+	CHECK( !TheGlobalData->m_explosionDebrisTrails );
 
 	UserPreferences pref;
 	TheWritableGlobalData->m_explosionDebrisTrails = FALSE;
@@ -6810,7 +6810,7 @@ TEST(particlesys_debris_trails_option_destroys_only_marked_systems)
 
 /* BuildWithoutWorker, on by default, is a live bool row with a check box on Options > Controls,
 	 and it round-trips through Options.ini. */
-TEST(options_build_without_worker_row_defaults_on_and_round_trips)
+TEST(options_build_without_worker_row_defaults_off_and_round_trips)
 {
 	const OptionDef *def = findOptionDef( "BuildWithoutWorker" );
 	CHECK( def != NULL );
@@ -6820,8 +6820,8 @@ TEST(options_build_without_worker_row_defaults_on_and_round_trips)
 
 	GlobalData *savedData = TheWritableGlobalData;
 	TheWritableGlobalData = NEW GlobalData;
-	CHECK( TheGlobalData->m_buildWithoutWorker );
-	CHECK_EQ( def->get(), 1 );
+	CHECK( !TheGlobalData->m_buildWithoutWorker );
+	CHECK_EQ( def->get(), 0 );
 
 	UserPreferences pref;
 	TheWritableGlobalData->m_buildWithoutWorker = FALSE;
@@ -9563,7 +9563,7 @@ TEST(health_bar_mode_round_trips_through_options_ini)
 	GlobalData *saved = TheWritableGlobalData;
 	TheWritableGlobalData = NEW GlobalData;
 
-	CHECK_EQ( TheGlobalData->m_healthBarMode, (Int)HEALTH_BAR_ALWAYS );
+	CHECK_EQ( TheGlobalData->m_healthBarMode, (Int)HEALTH_BAR_SELECTION );
 
 	TheWritableGlobalData->m_healthBarMode = HEALTH_BAR_SMART;
 
@@ -16621,7 +16621,7 @@ TEST(gameplay_conveniences_are_forced_on_and_left_the_catalog)
 	CHECK( bars != NULL );
 	CHECK( bars->widgetName != NULL && bars->widgetName[ 0 ] != '\0' );
 
-	/* The two mouse habits are Controls check boxes again, on by default. */
+	/* The two mouse habits are Controls check boxes again, off by default. */
 	static const char *const habits[] =
 	{
 		"FormationDrag", "EdgeScrollInWindowedMode", NULL
@@ -16631,7 +16631,7 @@ TEST(gameplay_conveniences_are_forced_on_and_left_the_catalog)
 		const OptionDef *def = findOptionDef( habits[ i ] );
 		CHECK( def != NULL );
 		CHECK( def->widgetName != NULL && def->widgetName[ 0 ] != '\0' );
-		CHECK_EQ( def->get(), 1 );
+		CHECK_EQ( def->get(), 0 );
 	}
 
 	/* The snaps, grid placement and the opening zoom are Controls check boxes, off by default, under
@@ -16700,10 +16700,10 @@ TEST(an_options_ini_naming_the_removed_input_scheme_and_wasd_keys_still_loads)
 	TheWritableGlobalData = saved;
 }
 
-TEST(order_lines_are_a_live_check_box_that_starts_on)
+TEST(order_lines_are_a_live_check_box_that_starts_off)
 {
 	/* The lines are rebuilt from the units every frame, so the box takes effect at Accept, and a player
-		 who never opens the menu keeps the lines the game has drawn since they were added. */
+		 who never opens the menu sees no line, as retail drew none. */
 	const OptionDef *def = findOptionDef( "OrderLines" );
 	CHECK( def != NULL );
 	if( def == NULL )
@@ -16716,10 +16716,10 @@ TEST(order_lines_are_a_live_check_box_that_starts_on)
 	GlobalData *scratch = NEW GlobalData;
 	TheWritableGlobalData = scratch;
 
-	CHECK( scratch->m_showOrderLines );
-	def->set( 0 );
 	CHECK( !scratch->m_showOrderLines );
-	CHECK_EQ( def->get(), 0 );
+	def->set( 1 );
+	CHECK( scratch->m_showOrderLines );
+	CHECK_EQ( def->get(), 1 );
 
 	delete scratch;					// while it is the current one: a Debug build's ~GlobalData reads TheWritableGlobalData
 	TheWritableGlobalData = saved;
@@ -16912,7 +16912,7 @@ TEST(bloom_levels_carry_the_percentages_the_shader_reads)
 
 	// what GlobalData's constructor put there, before anything below scribbles on it
 	const Int shippedIntensity = TheGlobalData->m_bloomIntensity;
-	CHECK_EQ( bloom->get(), 2 );		// a fresh install starts on Medium, not Off
+	CHECK_EQ( bloom->get(), 0 );		// a fresh install starts on Off, the Classic picture
 
 	// off is off, and nothing else is: a level that mapped to 0 would be a silent second Off entry
 	bloom->set( 0 );
@@ -17008,7 +17008,7 @@ TEST(vsync_is_off_until_the_player_asks)
 	TheWritableGlobalData = saved;
 }
 
-TEST(texture_filter_defaults_to_anisotropic)
+TEST(texture_filter_defaults_to_bilinear)
 {
 	const OptionDef *filter = findOptionDef( "TextureFilter" );
 	CHECK( filter != NULL );
@@ -17028,8 +17028,8 @@ TEST(texture_filter_defaults_to_anisotropic)
 	GlobalData *scratch = NEW GlobalData;
 	TheWritableGlobalData = scratch;
 
-	// 2 is anisotropic. 0 anisotropy is "whatever the card offers", not a downgrade to off.
-	CHECK_EQ( scratch->m_textureFilterMode, 2 );
+	// 0 is retail's bilinear. 0 anisotropy is "whatever the card offers", read once the filter is 2.
+	CHECK_EQ( scratch->m_textureFilterMode, 0 );
 	CHECK_EQ( scratch->m_anisotropyLevel, 0 );
 	CHECK_EQ( scratch->m_vsync, FALSE );
 
@@ -17074,7 +17074,7 @@ TEST(start_zoom_and_drag_threshold_are_rows_that_change_nothing_until_asked)
 /* The corner box is the player's to switch off, under a key of its own.  ShowHudOverlay left the
 	 catalog with a "no" still sitting in old Options.ini files, and a row under that name would
 	 read it back and take the box away from people who never asked. */
-TEST(net_box_is_a_check_box_that_starts_on_under_its_own_key)
+TEST(net_box_is_a_check_box_that_starts_off_under_its_own_key)
 {
 	const OptionDef *def = findOptionDef( "ShowNetBox" );
 	CHECK( def != NULL );
@@ -17089,9 +17089,9 @@ TEST(net_box_is_a_check_box_that_starts_on_under_its_own_key)
 	GlobalData *scratch = NEW GlobalData;
 	TheWritableGlobalData = scratch;
 
-	CHECK( scratch->m_showNetBox );
-	def->set( 0 );
 	CHECK( !scratch->m_showNetBox );
+	def->set( 1 );
+	CHECK( scratch->m_showNetBox );
 
 	TheWritableGlobalData = saved;
 	delete scratch;
@@ -17282,41 +17282,65 @@ TEST(graphics_quality_slider_only_ever_turns_settings_up)
 /* A preset is its column at startup, catalog rows included, while Options.ini has no quality step:
 	 the file's own keys win over the column, a file the slider has saved is left alone, and with no
 	 preset named the first preset applied fills only the rows nothing set after the load. */
-TEST(a_preset_brings_its_column_until_the_slider_has_saved_a_step)
+/* A preset named in Options.ini is EA's detail settings.  A row the fork added comes on only from a
+	 line of its own, which the menu writes when it shows the preset and the player accepts. */
+TEST(a_preset_in_the_file_turns_on_no_row_without_a_line)
 {
 	GlobalData *saved = TheWritableGlobalData;
 	TheWritableGlobalData = NEW GlobalData;
-	CHECK( !TheGlobalData->m_teamGlow );
 
 	UserPreferences pref;
 	pref[ AsciiString( "StaticGameLOD" ) ] = AsciiString( "Ultra" );
-	pref[ AsciiString( "MapLight" ) ] = AsciiString( "no" );
-	loadOptionsFromPreferences( pref );
-	CHECK( TheGlobalData->m_teamGlow );
-	CHECK( !TheGlobalData->m_mapLight );
-	CHECK_EQ( findOptionDef( "Smoke" )->get(), 1 );
-
-	TheWritableGlobalData->m_teamGlow = FALSE;
-	pref[ AsciiString( "GraphicsQuality" ) ] = AsciiString( "4" );
+	pref[ AsciiString( "MapLight" ) ] = AsciiString( "yes" );
 	loadOptionsFromPreferences( pref );
 	CHECK( !TheGlobalData->m_teamGlow );
-	applyGraphicsQualityColumnAtStartup( STATIC_GAME_LOD_ULTRA );
-	CHECK( !TheGlobalData->m_teamGlow );
-
-	UserPreferences none;
-	loadOptionsFromPreferences( none );
-	CHECK( !TheGlobalData->m_teamGlow );
-	TheWritableGlobalData->m_lightingStyle = LIGHTING_STYLE_CLASSIC;	// a switch after the load
-	applyGraphicsQualityColumnAtStartup( STATIC_GAME_LOD_MEDIUM );
-	CHECK( TheGlobalData->m_teamGlow );
-	CHECK_EQ( TheGlobalData->m_lightingStyle, (Int)LIGHTING_STYLE_CLASSIC );
-	// once only
-	TheWritableGlobalData->m_teamGlow = FALSE;
-	applyGraphicsQualityColumnAtStartup( STATIC_GAME_LOD_MEDIUM );
-	CHECK( !TheGlobalData->m_teamGlow );
+	CHECK( !TheGlobalData->m_waterFoam );
+	CHECK_EQ( findOptionDef( "Smoke" )->get(), 0 );
+	CHECK_EQ( findOptionDef( "MSAA" )->get(), 0 );
+	CHECK( TheGlobalData->m_mapLight );
 
 	delete TheWritableGlobalData;
 	TheWritableGlobalData = saved;
+}
+
+/* The owner's rule of 2026-10-31: no Options.ini is the Classic game with everything the fork added
+	 off.  These rows are the ones whose first run value differs from an on/off reading of the name:
+	 LegacySound's on is retail, and the volumes and levels sit at retail's number. */
+TEST(no_options_file_is_the_classic_game_with_every_added_row_off)
+{
+	GlobalData *saved = TheWritableGlobalData;
+	TheWritableGlobalData = NEW GlobalData;
+
+	static const char *const off[] =
+	{
+		"CameraBoundaryMargin", "EdgeScrollInWindowedMode", "CameraSnapTo45", "BuildGrid", "BuildSnapTo45",
+		"BuildSnapToNeighbour", "BuildNudge", "WheelZoomToCursor", "IsometricCamera", "OpenAtMaxZoom", "TurboMode",
+		"DynamicMusic", "FormationDrag", "BuildWithoutWorker", "ChromaLighting", "TextureFilter", "Bloom", "MSAA",
+		"VSync", "WaterStyle", "CloudStyle", "LightingStyle", "OrderLines", "ShowNetBox", "UseShadowVolumesForSkins",
+		"ShadowsForProjectiles", "ShadowsForProps", "ShadowsForParticles", "VolumetricSmokeShadows", "SmokeFireLighting",
+		"DebrisTrails", "MapLight", "TeamGlow", "WaterFoam", "GroundMarks", "Firelight", "HemiAmbient", "AmbientOcclusion",
+		"Weather", "WaterSplashes", "Atmosphere", "StructureCollapse", "SmoothMotion", "InternalHdr", "Smoke", "ParticleBounce",
+		NULL
+	};
+	for( Int i = 0; off[ i ] != NULL; ++i )
+		CHECK_EQ( findOptionDef( off[ i ] )->get(), 0 );
+
+	CHECK_EQ( findOptionDef( "ClassicGraphics" )->get(), 1 );
+	CHECK_EQ( findOptionDef( "LegacySound" )->get(), 1 );
+	CHECK_EQ( findOptionDef( "HealthBars" )->get(), (Int)HEALTH_BAR_SELECTION );
+	CHECK_EQ( findOptionDef( "AmbientVolume" )->get(), 80 );
+
+	delete TheWritableGlobalData;
+	TheWritableGlobalData = saved;
+}
+
+/* While Classic Graphics is ticked the slider moves EA's rows alone, and the menu reads this to say which. */
+TEST(the_quality_table_knows_the_forks_rows_from_eas)
+{
+	CHECK( graphicsQualityRowIsReforged( *findGraphicsQualityRow( "CheckTeamGlow" ) ) );
+	CHECK( graphicsQualityRowIsReforged( *findGraphicsQualityRow( "ComboBoxBloom" ) ) );
+	CHECK( !graphicsQualityRowIsReforged( *findGraphicsQualityRow( "Check3DShadows" ) ) );
+	CHECK( !graphicsQualityRowIsReforged( *findGraphicsQualityRow( "CheckCloudShadows" ) ) );
 }
 
 /* The particle ring has no control on the options pages, so a Custom mix between two presets takes
@@ -17354,12 +17378,12 @@ TEST(effects_page_rows_reach_the_fields_the_command_line_switches_set)
 		const OptionDef *def = findOptionDef( shadows[ i ] );
 		CHECK( def != NULL );
 		CHECK_EQ( (Int)def->kind, (Int)OPTION_BOOL );
-		// on until the player says otherwise, as GameData.ini had them
-		CHECK_EQ( def->get(), 1 );
-		def->set( 0 );
+		// off until the player says otherwise; EA's shadows are the detail preset's
 		CHECK_EQ( def->get(), 0 );
+		def->set( 1 );
+		CHECK_EQ( def->get(), 1 );
 	}
-	CHECK_EQ( (Int)scratch->m_shadowsForProps, 0 );
+	CHECK_EQ( (Int)scratch->m_shadowsForProps, 1 );
 
 	const OptionDef *smoke = findOptionDef( "Smoke" );
 	CHECK( smoke != NULL );
@@ -18316,9 +18340,9 @@ TEST(build_placement_preview_defaults_are_the_ones_the_game_always_used)
 	// and the income trickle is off unless somebody asks for it
 	CHECK_EQ( scratch->m_moneyPerMinute, 0 );
 
-	// a left drag with the move, attack move or guard key armed draws a formation line; that is on
-	// unless somebody turns it off
-	CHECK( scratch->m_formationDrag );
+	// a left drag with the move, attack move or guard key armed draws a formation line once somebody
+	// turns that on
+	CHECK( !scratch->m_formationDrag );
 
 	delete scratch;					// while it is the current one: a Debug build's ~GlobalData reads TheWritableGlobalData
 	TheWritableGlobalData = saved;
@@ -19616,14 +19640,14 @@ TEST(camera_scroll_clocks_are_independent_and_handle_timer_wrap)
 	CHECK_NEAR(second.sample(9000, 33), 3.0f, 0.00001f);
 }
 
-TEST(camera_preferences_default_to_a_finite_map_margin)
+TEST(camera_preferences_default_to_retails_map_limit)
 {
 	CHECK(bootOnce());
 	GlobalData *saved = TheWritableGlobalData;
 	GlobalData *scratch = NEW GlobalData;
 	TheWritableGlobalData = scratch;
 	CHECK(scratch->m_useCameraConstraints);
-	CHECK_EQ(scratch->m_cameraBoundaryMargin, 200);
+	CHECK_EQ(scratch->m_cameraBoundaryMargin, 0);
 	// -noViewLimit is the only way off, EA's switch; Options.ini has no row for it
 	CHECK(findOptionDef("UseCameraConstraints") == NULL);
 	delete scratch;					// while it is the current one: a Debug build's ~GlobalData reads TheWritableGlobalData

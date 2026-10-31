@@ -1105,7 +1105,7 @@ void RTS3DScene::Flush(RenderInfoClass & rinfo)
 
 	// The Ambient Occlusion option goes on under the water and every translucent draw, none of which
 	// writes depth: the water takes no corner's shade from its bed and only the bed's shows through it.
-	if (TheGlobalData->m_ambientOcclusion && m_customPassMode == SCENE_PASS_DEFAULT && Get_Extra_Pass_Polygon_Mode() == EXTRA_PASS_DISABLE)
+	if (TheGlobalData->m_ambientOcclusion && !TheGlobalData->m_classicGraphics && m_customPassMode == SCENE_PASS_DEFAULT && Get_Extra_Pass_Polygon_Mode() == EXTRA_PASS_DISABLE)
 		Direct3D11_Ambient_Occlusion();
 
 	WW3D::Render_And_Clear_Static_Sort_Lists(rinfo);	//draws things like water

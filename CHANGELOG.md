@@ -8,6 +8,14 @@ found and fixed, EA's own, not port damage.**
 
 ---
 
+## Classic first, Reforged when you ask
+
+- A first start now opens the game EA shipped: its own textures and ground, the hard stencil shadows, the flat 2003 light, no glow, bilinear filtering, the original sound mix, health bars only on what you select or point at. The HD art stays on your disk, unmounted. Every setting this build added to the picture, the sound and the controls starts off, and each one is a box in Options.
+- One click brings the other game back. Options, Graphics, untick Classic Graphics: the High preset fills in every Reforged box on the page, you can move the quality slider from there, and Accept saves it for the next start. Tick it again and the same boxes go off.
+- A detail preset now means EA's detail settings. Before this, a preset in your settings file switched on team glow, water foam and 4x multisampling behind any box you could see, and not on the very first start, so the first start and the second drew different pictures. Now a Reforged setting comes on from its own line, which the menu writes when you accept.
+- Smooth Motion, the blending that made units glide on a fast monitor, had no switch at all. It is a box in Options, Display, off until ticked, and a 60 Hz screen shows no difference either way.
+- Already playing? Nothing in your settings file gets rewritten and every line in it still wins. A setting you never touched has no line, so it takes the new default, which for most of you means Classic on your next start. Untick Classic Graphics once and you are back. The settings can differ between players in one match: none of them reaches the game's logic.
+
 ## Buildings go down
 
 - Collapsing Buildings, under Options, Display, is a new setting, off by default until it has been played. EA's building stands until the frame it dies, then it is gone or it is a pile of rubble, with a cloud thrown over the moment. With this on it holds for a beat, shudders, leans about seven degrees and goes into the ground, a second for a small one and up to two and a half for a tall one. Most of the fall happens inside EA's cloud, so the part you see is the first half second, the roof dropping as the smoke comes up. It blocks nothing and nothing in the game reads it, so two players in one match can have it set differently. Direct3D 11 only.

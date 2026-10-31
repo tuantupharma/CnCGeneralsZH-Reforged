@@ -65,9 +65,9 @@ yet. [CHANGELOG.md](CHANGELOG.md) has the measurements behind every line.
 
 | What | Since |
 |:--|:--|
-| Direct3D 11 draws by default, with glow and edge smoothing over the battlefield only; `-d3d9` brings back the old renderer | 1.0.0 |
+| Direct3D 11 draws by default, `-d3d9` brings back the old renderer; with Classic Graphics off, glow and edge smoothing over the battlefield only | 1.0.0 |
 | Shadows soften and pale as the caster leaves the ground, so a helicopter's spreads as it climbs and a tank's stays hard | 2.0.0 |
-| Classic Graphics puts the 2003 look back in one click | 2.0.0 |
+| Classic Graphics is the 2003 look and what a first start opens; untick it and the High preset fills in the Reforged picture | 2.0.0, first start `main` |
 | Fullscreen Fit picks stretch or bands when the resolution is not the monitor's shape | 2.6.0 |
 | The whole options screen is in the game again, every page the launcher sets | 3.1.0 |
 | The options screen restyled to match the other menus | 3.2.0 |

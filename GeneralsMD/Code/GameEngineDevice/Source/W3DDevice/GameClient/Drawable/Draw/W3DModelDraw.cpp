@@ -2155,7 +2155,7 @@ void W3DModelDraw::allocateContactShadow(void)
 	// shadow and a contact patch would follow it around looking like a stain.
 	const ThingTemplate *tmplate = getDrawable() ? getDrawable()->getTemplate() : NULL;
 	if (m_contactShadow != NULL || m_renderObject == NULL || tmplate == NULL
-			|| TheW3DShadowManager == NULL || !TheGlobalData->m_contactShadows
+			|| TheW3DShadowManager == NULL || !TheGlobalData->m_contactShadows || TheGlobalData->m_classicGraphics
 			|| !tmplate->isKindOf( KINDOF_STRUCTURE ))
 		return;
 

@@ -14990,7 +14990,7 @@ GUI:ClassicGraphics
 END
 
 TOOLTIP:ClassicGraphics
-"Oyunun 2003'teki görünümü: kendi kaplamaları ve zemini, eski keskin gölgeler, kabartma ayrıntısı yok, parlama ve keskinleştirme yok. Kapalıyken Reforged. Oyun bir sonraki açılışında geçerli olur."
+"Oyunun 2003'teki görünümü: kendi kaplamaları ve zemini, eski keskin gölgeler, kabartma ayrıntısı yok, parlama ve keskinleştirme yok. Oyun böyle açılır. Reforged görüntüsü için işareti kaldırın: Yüksek hazır ayarı kutuları doldurur, oradan kaydırıcıyı oynatabilirsiniz. Oyun bir sonraki açılışında geçerli olur."
 END
 
 GUI:InfantryShadows
@@ -15955,6 +15955,14 @@ END
 
 TOOLTIP:Atmosphere
 "Kameradan uzak zemin gökyüzünün rengine doğru solar; haritanın bittiği yerde ya da kamera yatık durduğunda siyah yerine haritanın saatine uygun bir gökyüzü görünür. Kameraya yakın zemin temiz kalır, savaş sisi karanlığını korur. Değişen sadece sizin görüntünüzdür: oyunda hiçbir şey bunu okumaz, diğer oyuncular kendi ayarını görür. Yalnızca Direct3D 11 ile, Klasik Grafikler açıkken kapalıdır."
+END
+
+GUI:SmoothMotion
+"Akıcı Hareket"
+END
+
+TOOLTIP:SmoothMotion
+"60 Hz'den hızlı ekranda birimler, her konumu bir sonrakine kadar tutmak yerine son iki konumlarının arasında çizilir. 60 Hz ekranda fark görünmez. Yalnızca sizin görüntünüz değişir: oyundaki hiçbir şey bunu okumaz, diğer oyuncular kendi ayarını görür. Kabul'e basınca geçerli olur."
 END
 
 GUI:StructureCollapse

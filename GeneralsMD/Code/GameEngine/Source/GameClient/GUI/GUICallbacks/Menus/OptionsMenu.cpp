@@ -41,6 +41,7 @@
 #include "Common/UserPreferences.h"
 #include "Common/GameLOD.h"
 #include "Common/Monitors.h"
+#include "Common/EarlyOptions.h"
 #include "Common/OptionsCatalog.h"
 #include "Common/Registry.h"
 #include "Common/version.h"
@@ -1180,6 +1181,19 @@ static void fillCatalogWidgets( void )
 				break;
 		}
 	}
+
+	// the choice for the next start, which is the file's: GlobalData holds what this run started with
+	const Bool classicNextStart = getEarlyOptionBool( "ClassicGraphics", true );
+	GadgetCheckBoxSetChecked( findOptionWidget( *findOptionDef( "ClassicGraphics" ) ), classicNextStart );
+
+	// A Classic run holds these two forced in memory, and a Reforged next start reads them from the
+	// file.  Shown as forced they read Custom beside the High the player just saved, and Accept saves that.
+	if( TheGlobalData->m_classicGraphics && !classicNextStart )
+	{
+		GadgetComboBoxSetSelectedPos( findOptionWidget( *findOptionDef( "LightingStyle" ) ),
+			getEarlyOptionInt( "LightingStyle", LIGHTING_STYLE_CLASSIC, LIGHTING_STYLE_CLASSIC, LIGHTING_STYLE_REFORGED ) );
+		GadgetCheckBoxSetChecked( findOptionWidget( *findOptionDef( "VolumetricSmokeShadows" ) ), getEarlyOptionBool( "VolumetricSmokeShadows", false ) );
+	}
 }
 
 //-------------------------------------------------------------------------------------------------
@@ -1228,6 +1242,15 @@ static void readCatalogWidgets( OptionPreferences &out )
 				break;
 		}
 
+		// Only the file moves.  This run keeps the archives, the tile and the shadow pass it started with,
+		// and everything that asks GlobalData has to go on agreeing with them until the next start.
+		if( strcmp( def.iniKey, "ClassicGraphics" ) == 0 )
+		{
+			if( ( value != 0 ) != getEarlyOptionBool( def.iniKey, true ) )
+				out[ AsciiString( def.iniKey ) ] = formatOptionValue( def, value );
+			continue;
+		}
+
 		if( value == def.get() )
 			continue;
 
@@ -1236,6 +1259,13 @@ static void readCatalogWidgets( OptionPreferences &out )
 			pendingShellRebuild = TRUE;
 		def.set( value );
 		out[ AsciiString( def.iniKey ) ] = formatOptionValue( def, value );
+	}
+
+	// saved for the next start, and still forced in this Classic run (GlobalData::parseGameDataDefinition)
+	if( TheGlobalData->m_classicGraphics )
+	{
+		TheWritableGlobalData->m_lightingStyle = LIGHTING_STYLE_CLASSIC;
+		TheWritableGlobalData->m_volumetricSmokeShadows = FALSE;
 	}
 }
 
@@ -2234,17 +2264,22 @@ static Bool isGraphicsQualityControl( const GameWindow *control )
 	return FALSE;
 }
 
+static GameWindow *classicGraphicsCheckBox( void )
+{
+	return findOptionWidget( *findOptionDef( "ClassicGraphics" ) );
+}
+
 /** The row's control when the quality slider sets it, otherwise NULL.  It leaves a control the player
-	* cannot change - greyed in a match or under Direct3D 9, hidden where the device lacks it - and the
-	* two ClassicGraphics forces, whose forced value Accept would otherwise save over the player's own. */
+	* cannot change - greyed in a match or under Direct3D 9, hidden where the device lacks it - and,
+	* while Classic Graphics is ticked, every row the fork added: under it a preset is EA's detail
+	* settings alone, so the box can read High with the Reforged boxes off, which is what a first run is. */
 static GameWindow *graphicsQualityDrivenWidget( const GraphicsQualityRow &row )
 {
 	GameWindow *control = graphicsQualityWidget( row );
 	if( control->winIsHidden() || !control->winGetEnabled() )
 		return NULL;
 
-	if( TheGlobalData->m_classicGraphics
-		&& ( strcmp( row.control, "ComboBoxLightingStyle" ) == 0 || strcmp( row.control, "CheckVolumetricSmoke" ) == 0 ) )
+	if( GadgetCheckBoxIsChecked( classicGraphicsCheckBox() ) && graphicsQualityRowIsReforged( row ) )
 		return NULL;
 
 	return control;
@@ -2372,6 +2407,17 @@ static void updateSliderReadouts( void )
 
 static void updateDetailNote( void );
 
+/** One quality table value in its control. */
+static void setGraphicsQualityControl( GameWindow *control, Int value )
+{
+	if( BitTest( control->winGetStyle(), GWS_CHECK_BOX ) )
+		GadgetCheckBoxSetChecked( control, value != 0 );
+	else if( BitTest( control->winGetStyle(), GWS_COMBO_BOX ) )
+		GadgetComboBoxSetSelectedPos( control, value );
+	else
+		GadgetSliderSetPosition( control, value );
+}
+
 /** Put one step of the quality slider in every control TheGraphicsQualityTable names, and the detail
 	* box on the preset that step is, or on Custom between two of them.  A control the slider leaves
 	* (graphicsQualityDrivenWidget) keeps what it shows, and so Accept leaves its setting alone. */
@@ -2381,16 +2427,8 @@ static void showGraphicsQualityStep( Int step )
 	for( Int row = 0; row < TheGraphicsQualityTableCount; ++row )
 	{
 		GameWindow *control = graphicsQualityDrivenWidget( TheGraphicsQualityTable[ row ] );
-		if( control == NULL )
-			continue;
-
-		const Int value = TheGraphicsQualityTable[ row ].values[ step ];
-		if( BitTest( control->winGetStyle(), GWS_CHECK_BOX ) )
-			GadgetCheckBoxSetChecked( control, value != 0 );
-		else if( BitTest( control->winGetStyle(), GWS_COMBO_BOX ) )
-			GadgetComboBoxSetSelectedPos( control, value );
-		else
-			GadgetSliderSetPosition( control, value );
+		if( control != NULL )
+			setGraphicsQualityControl( control, TheGraphicsQualityTable[ row ].values[ step ] );
 	}
 	// trees are no step's: a preset gives them whenever the memory test passed, as applyStaticLODLevel does
 	if( detailIndexAtStep( step ) != CUSTOMDETAIL && checkProps->winGetEnabled() )
@@ -2414,6 +2452,31 @@ static void showDetailPreset( Int index )
 	GadgetSliderSetPosition( graphicsQualitySlider(), step );
 	ignoreSelected = FALSE;
 	showGraphicsQualityStep( step );
+}
+
+/** The Classic Graphics box clicked, outside a match.  Unticked, the page shows the High preset, which
+	* is the Reforged picture in one click, and Accept saves it.  Ticked, the fork's rows go back to the
+	* slider's first step, where every one of them is off, so no glow or filter stays behind under Classic. */
+static void showClassicGraphicsChoice( void )
+{
+	if( !comboBoxDetail->winGetEnabled() )
+		return;
+
+	if( !GadgetCheckBoxIsChecked( classicGraphicsCheckBox() ) )
+	{
+		showDetailPreset( HIGHDETAIL );
+		return;
+	}
+
+	ignoreSelected = TRUE;
+	for( Int row = 0; row < TheGraphicsQualityTableCount; ++row )
+	{
+		GameWindow *control = graphicsQualityWidget( TheGraphicsQualityTable[ row ] );
+		if( graphicsQualityRowIsReforged( TheGraphicsQualityTable[ row ] ) && !control->winIsHidden() && control->winGetEnabled() )
+			setGraphicsQualityControl( control, TheGraphicsQualityTable[ row ].values[ 0 ] );
+	}
+	ignoreSelected = FALSE;
+	updateSliderReadouts();
 }
 
 /** The grey line under the detail box: what the picked preset turns on, and that picking one only
@@ -3274,6 +3337,10 @@ WindowMsgHandledType OptionsMenuSystem( GameWindow *window, UnsignedInt msg,
 			{
 				setDefaults();
 				updateSliderReadouts();
+			}
+			else if( control == classicGraphicsCheckBox() )
+			{
+				showClassicGraphicsChoice();
 			}
 			else if( isGraphicsDetailControl( control ) || isGraphicsQualityControl( control ) )
 			{

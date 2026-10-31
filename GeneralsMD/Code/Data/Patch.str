@@ -498,7 +498,7 @@ GUI:ClassicGraphics
 END
 
 TOOLTIP:ClassicGraphics
-"The game as it looked in 2003: its own textures and ground, the old hard shadows, no bump detail and no glow or sharpening. Off is Reforged. Takes effect the next time the game starts."
+"The game as it looked in 2003: its own textures and ground, the old hard shadows, no bump detail and no glow or sharpening. The game opens this way. Untick it for the Reforged picture: the High preset fills in the boxes, and you can move the slider from there. Takes effect the next time the game starts."
 END
 
 GUI:InfantryShadows
@@ -1562,6 +1562,14 @@ END
 
 TOOLTIP:Atmosphere
 "The ground far from the camera fades toward the sky's colour, and where the map ends or the camera lies flat you see a sky by the map's time of day instead of black. The ground near the camera stays clear and fog of war keeps its dark. Only your picture changes: nothing in the game reads it, and other players see their own setting. Direct3D 11 only, and off under Classic Graphics."
+END
+
+GUI:SmoothMotion
+"Smooth Motion"
+END
+
+TOOLTIP:SmoothMotion
+"On a screen faster than 60 Hz, units are drawn between their last two positions instead of holding each one until the next. A 60 Hz screen shows no change. Only your picture changes: nothing in the game reads it, and other players see their own setting. Applies when you press Accept."
 END
 
 GUI:StructureCollapse

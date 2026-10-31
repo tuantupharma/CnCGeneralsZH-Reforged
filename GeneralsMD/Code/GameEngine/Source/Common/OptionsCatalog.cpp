@@ -150,6 +150,7 @@ OPTION_BOOL_ACCESSORS( m_weatherEffects )
 OPTION_BOOL_ACCESSORS( m_waterSplashes )
 OPTION_BOOL_ACCESSORS( m_atmosphere )
 OPTION_BOOL_ACCESSORS( m_structureCollapse )
+OPTION_BOOL_ACCESSORS( m_smoothMotion )
 OPTION_BOOL_ACCESSORS( m_internalHdr )
 OPTION_INT_ACCESSORS( m_shadowQuality )
 OPTION_INT_ACCESSORS( m_graphicsQuality )
@@ -368,9 +369,10 @@ const OptionDef TheOptionCatalog[] =
 		get_m_dynamicMusic, set_m_dynamicMusic },
 
 	// Retail's mix: no sound travel delay, air, doppler, room, occlusion, duck, limiter, battle voice
-	// budget, shot folding, reply limits, zoom mix, ambience bed or music following the fight.  The
-	// audio manager takes it up on its next pass (MilesAudioManager::applyLegacySound), the room and
-	// the bed included.  Master volume, the device and the speakers stay as they are.  On Options > Audio.
+	// budget, shot folding, reply limits, zoom mix, ambience bed or music following the fight.  On by
+	// default, since off is what the fork added.  The audio manager takes it up on its next pass
+	// (MilesAudioManager::applyLegacySound), the room and the bed included.  Master volume, the device
+	// and the speakers stay as they are.  On Options > Audio.
 	{ "LegacySound",							OPT_WND( "CheckLegacySound" ), "GUI:LegacySound",
 		OPTION_BOOL, APPLY_LIVE, 0, 1,
 		get_m_legacySound, set_m_legacySound },
@@ -382,8 +384,7 @@ const OptionDef TheOptionCatalog[] =
 		get_m_muteInBackground, set_m_muteInBackground },
 
 	// With the move, attack move or guard key armed, a left drag over the ground spreads the
-	// selection along the line drawn instead of sending everyone to one point.  On by default, and
-	// here for anyone who would rather that drag did nothing at all.  On Options > Controls.
+	// selection along the line drawn instead of sending everyone to one point.  On Options > Controls.
 	{ "FormationDrag",						OPT_WND( "CheckFormationDrag" ), "GUI:FormationDrag",
 		OPTION_BOOL, APPLY_LIVE, 0, 1,
 		get_m_formationDrag, set_m_formationDrag },
@@ -411,8 +412,8 @@ const OptionDef TheOptionCatalog[] =
 		get_m_menuTransitionSpeed, set_m_menuTransitionSpeed },
 
 	// 0 bilinear, 1 trilinear, 2 anisotropic. Retail shipped bilinear with point mip selection,
-	// which is a 2003 fill-rate budget and is why distant ground used to shimmer; 2 is the default
-	// here. The filter table is built when the device is made, and W3DDisplay::init is the only place
+	// which is a 2003 fill-rate budget and is why distant ground shimmers; 0 is the default, and 2 is
+	// what the presets from Medium up fill in. The filter table is built when the device is made, and W3DDisplay::init is the only place
 	// that hands this value to WW3D2 - a reset from the display page does not push it again - so it
 	// waits for the next launch.  A combo box on the Graphics page; stored as the same decimal the
 	// hand-edited key always was.
@@ -433,7 +434,7 @@ const OptionDef TheOptionCatalog[] =
 	// Grid placement, snap-to-45 building rotation and the nudge left with them and came back to
 	// Options > Controls, above, off until ticked.
 
-	// Glow: off, low, medium, high, ultra.  Medium (50) is the default, set in GlobalData's
+	// Glow: off, low, medium, high, ultra.  Off is the default, set in GlobalData's
 	// constructor.  The key is "Bloom", not "Glow" or "BloomLevel" - it predates the levels and an
 	// Options.ini in the wild already spells it this way.  The "What Glows" threshold row that sat
 	// under it is gone: a lower threshold only ever bloomed the buildings and the sand, so the
@@ -485,9 +486,11 @@ const OptionDef TheOptionCatalog[] =
 		get_m_cloudStyle, set_m_cloudStyle },
 
 	// Classic or Reforged.  Classic is the picture the game shipped with: its own textures, EA's
-	// ground tile, no normal maps, the stencil shadows and no post effects.  The upscaled archives
-	// are mounted before GlobalData exists, so Win32BIGFileSystem reads this key out of Options.ini
-	// itself, and everything else takes it once while the device starts.
+	// ground tile, no normal maps, the stencil shadows and no post effects, and it is what a key-less
+	// file gets.  The upscaled archives are mounted before GlobalData exists, so Win32BIGFileSystem
+	// reads this key out of Options.ini itself, with the same default, and everything else takes it
+	// once while the device starts.  Unticking the box in the menu fills in the High preset, which is
+	// the Reforged look in one click; ticking it takes the fork's rows of the slider back to their first step.
 	{ "ClassicGraphics",					OPT_WND( "CheckClassicGraphics" ), "GUI:ClassicGraphics",
 		OPTION_BOOL, APPLY_RESTART, 0, 1,
 		get_m_classicGraphics, set_m_classicGraphics },
@@ -545,7 +548,7 @@ const OptionDef TheOptionCatalog[] =
 		OPTION_ENUM, APPLY_RESTART, 0, TEXT_LANGUAGE_COUNT - 1,
 		get_m_textLanguage, set_m_textLanguage },
 
-	// The Effects page.  These four sat in GameData.ini with no control, all on.  Each is read when the
+	// The Effects page.  These four sat in GameData.ini with no control, all off.  Each is read when the
 	// thing that casts the shadow is made (fillShadowInfoFromTemplate, promoteSkinShadowToVolume), so a
 	// change shows on the next map rather than on the units already standing there - except smoke
 	// clouds, which ask every frame.
@@ -677,6 +680,14 @@ const OptionDef TheOptionCatalog[] =
 		OPTION_BOOL, APPLY_LIVE, 0, 1,
 		get_m_structureCollapse, set_m_structureCollapse },
 
+	// Models drawn between their last two logic ticks on a display faster than the logic; a 60 Hz screen
+	// shows no change.  Read every picture by W3DDisplay's smoothMotionBegin, and no sim reads it.  The
+	// key is the one the launcher offered once; a line it left behind is the player's choice.
+	// -nosmoothmotion and -smoothmotion beat it for a run.  On Options > Display, under Picture.
+	{ "SmoothMotion",							OPT_WND( "CheckSmoothMotion" ), "GUI:SmoothMotion",
+		OPTION_BOOL, APPLY_LIVE, 0, 1,
+		get_m_smoothMotion, set_m_smoothMotion },
+
 	// What passes white keeps its colour on the way to the eight bit screen; no HDR monitor output.  The
 	// post chain is told every frame.  Classic graphics has no half float scene and -d3d9 no chain, and
 	// no row in the quality table: an opt-in until it has been seen.  On Options > Effects.
@@ -719,7 +730,9 @@ const Int TheOptionCatalogCount = (sizeof( TheOptionCatalog ) / sizeof( TheOptio
 // The Performance / Quality slider, described in OptionsCatalog.h.
 //
 // Rows run from the cheapest setting to the dearest, and a row's values climb from step 0 to step
-// 10: the column a row first rises in is where the slider starts paying for it.  costMs is the one
+// 10: the column a row first rises in is where the slider starts paying for it.  A column is what the
+// menu fills in, and saves: a preset named in Options.ini or picked for a first run sets only the
+// GameLOD fields (applyGraphicsQualityStep), so a row with no line stays at GlobalData's off.  costMs is the one
 // place the price is written down: Direct3D 11 GPU milliseconds a frame saved by turning that one
 // setting from its best to its cheapest with everything else at its best, in a 900 unit four-army
 // fight at 1920x1080 on a GeForce RTX 2060 (2026-10-25).  Anything under the 0.15 ms the baselines
@@ -875,17 +888,6 @@ AsciiString formatOptionValue( const OptionDef& def, Int value )
 }
 
 //-----------------------------------------------------------------------------
-// A detail preset is its column on the quality slider, catalog rows included.  An Options.ini with
-// no GraphicsQuality never had the slider save its rows, so they start from the preset's column;
-// the keys the file does carry and the switches still win, the keys by being read after it and the
-// switches by being parsed later.
-//-----------------------------------------------------------------------------
-enum { OPTION_CATALOG_ROWS = sizeof( TheOptionCatalog ) / sizeof( TheOptionCatalog[ 0 ] ) };
-
-static Bool TheGraphicsQualityColumnWanted = FALSE;				///< the loaded Options.ini held no GraphicsQuality
-static Bool TheOptionNamedInFile[ OPTION_CATALOG_ROWS ];		///< the row's key was in it
-static Int TheOptionValueAsLoaded[ OPTION_CATALOG_ROWS ];		///< what the load left, before any switch
-
 /** The catalog row a quality table row sets, or -1 for a GameLOD field, which the preset sets itself. */
 static Int graphicsQualityOptionIndex( const GraphicsQualityRow &row )
 {
@@ -904,67 +906,38 @@ static Int graphicsQualityOptionIndex( const GraphicsQualityRow &row )
 	return -1;
 }
 
-/** Put a quality table value in a catalog row: the table holds a combo box's entry, the catalog its value. */
-static void setGraphicsQualityOption( Int option, Int value )
+//-----------------------------------------------------------------------------
+Bool graphicsQualityRowIsReforged( const GraphicsQualityRow &row )
 {
-	const OptionDef &def = TheOptionCatalog[ option ];
-	def.set( def.kind == OPTION_ENUM ? def.lo + value : value );
+	return graphicsQualityOptionIndex( row ) >= 0 && strcmp( row.control, "CheckCloudShadows" ) != 0;
 }
 
 //-----------------------------------------------------------------------------
 void loadOptionsFromPreferences( UserPreferences& pref )
 {
-	TheGraphicsQualityColumnWanted = pref.find( "GraphicsQuality" ) == pref.end();
-	UserPreferences::const_iterator detail = pref.find( "StaticGameLOD" );
-	if( TheGraphicsQualityColumnWanted && detail != pref.end() )
-	{
-		const Int level = GameLODManager::getStaticGameLODIndex( detail->second );
-		if( level >= STATIC_GAME_LOD_LOW && level <= STATIC_GAME_LOD_ULTRA )
-		{
-			for( Int row = 0; row < TheGraphicsQualityTableCount; ++row )
-			{
-				const Int option = graphicsQualityOptionIndex( TheGraphicsQualityTable[ row ] );
-				if( option >= 0 )
-					setGraphicsQualityOption( option, TheGraphicsQualityTable[ row ].values[ TheGraphicsQualityAnchors[ level ] ] );
-			}
-		}
-	}
-
 	for( Int i = 0; i < TheOptionCatalogCount; ++i )
 	{
 		const OptionDef& def = TheOptionCatalog[ i ];
 
 		UserPreferences::const_iterator it = pref.find( AsciiString( def.iniKey ) );
-		TheOptionNamedInFile[ i ] = it != pref.end();
 		if( it == pref.end() )
 			continue;	// no key, so keep whatever GameData.ini's default put in GlobalData
 
 		def.set( parseOptionValue( def, it->second ) );
 	}
-
-	for( Int i = 0; i < TheOptionCatalogCount; ++i )
-		TheOptionValueAsLoaded[ i ] = TheOptionCatalog[ i ].get();
 }
 
 //-----------------------------------------------------------------------------
-void applyGraphicsQualityColumnAtStartup( Int staticGameLODLevel )
+void logOptionCatalog( void )
 {
-	if( !TheGraphicsQualityColumnWanted )
-		return;
-
-	TheGraphicsQualityColumnWanted = FALSE;
-	if( staticGameLODLevel < STATIC_GAME_LOD_LOW || staticGameLODLevel > STATIC_GAME_LOD_ULTRA )
-		return;
-
-	for( Int row = 0; row < TheGraphicsQualityTableCount; ++row )
+	AsciiString line;
+	for( Int i = 0; i < TheOptionCatalogCount; ++i )
 	{
-		const Int option = graphicsQualityOptionIndex( TheGraphicsQualityTable[ row ] );
-		// the file's own key, or a value a switch or ClassicGraphics put there after the load
-		if( option < 0 || TheOptionNamedInFile[ option ] || TheOptionCatalog[ option ].get() != TheOptionValueAsLoaded[ option ] )
-			continue;
-
-		setGraphicsQualityOption( option, TheGraphicsQualityTable[ row ].values[ TheGraphicsQualityAnchors[ staticGameLODLevel ] ] );
+		AsciiString entry;
+		entry.format( " %s=%d", TheOptionCatalog[ i ].iniKey, TheOptionCatalog[ i ].get() );
+		line.concat( entry );
 	}
+	DEBUG_LOG(( "OPTIONS%s\n", line.str() ));
 }
 
 //-----------------------------------------------------------------------------
