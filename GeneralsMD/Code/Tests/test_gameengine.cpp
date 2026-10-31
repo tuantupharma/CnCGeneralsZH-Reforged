@@ -20504,6 +20504,15 @@ TEST(modfactions_ai_side_lookups_take_the_mods_own_first)
 	CHECK( data.findBuildList( AsciiString( "Russia" ), -1 ) == NULL );
 }
 
+// A plain Random stays with retail's armies under any mod: a mod's faction plays only when it is picked
+TEST(modfactions_stay_out_of_a_plain_random)
+{
+	PlayerTemplate faction;
+	CHECK( !faction.isRandomExcluded() );
+	faction.setModIndex( 0 );
+	CHECK( faction.isRandomExcluded() );
+}
+
 // -modfactions: which skirmish player's scripts a computer player runs.  Its own mod's of its side
 // beats retail's, retail's stands in for a mod without any, and another mod's never fits
 TEST(modfactions_skirmish_side_fit)

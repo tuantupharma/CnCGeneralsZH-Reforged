@@ -207,7 +207,7 @@ void initSubsystem(SUBSYSTEM*& sysref, AsciiString name, SUBSYSTEM* sys, Xfer *p
 //-------------------------------------------------------------------------------------------------
 /** A store a faction is made of.  With -modfactions the plain load sees retail's files only, and
 	* then each mod's load under that mod's names (INI::loadModPasses); a mod's Default\ file never
-	* loads.  Without it this is initSubsystem. */
+	* loads.  With no full -mod this is initSubsystem. */
 //-------------------------------------------------------------------------------------------------
 template<class SUBSYSTEM>
 void initFactionSubsystem(SUBSYSTEM*& sysref, AsciiString name, SUBSYSTEM* sys, Xfer *pXfer, const char* path1,

@@ -170,7 +170,7 @@ own date-and-time name.
 
 | What | Since |
 |:--|:--|
-| `-mod <folder>` loads a mod's archives and its loose `Data` and `Art` files; give it once per mod, and the one named later wins | 3.0.0 |
+| `-mod <folder>` loads a mod's archives and its loose `Data` and `Art` files; give it once per mod, and each mod's armies stand beside Zero Hour's | 3.0.0 |
 | `-modfactions` puts two total conversions in one match, each army building from its own mod's units | 3.0.0 |
 | `-modpatch <folder>` after a mod changes that mod and leaves the others alone | 3.0.0 |
 | A `mod.json` names the mod and its version, and the names go into every replay | 3.0.0 |
@@ -259,7 +259,7 @@ Discs carry 1.00 and the engine is 1.04's, so files from a 1.04 install (Steam, 
 | `-xres <w>` `-yres <h>` | the resolution for this run |
 | `-msaa [N]` | multisampling; bare is 4x, a number asks for N from 2 to 16 |
 | `-language english\|turkish\|german` | the language for this run, over the one Options saved |
-| `-mod <folder>` | loads a mod; repeat it for several, the later one wins |
+| `-mod <folder>` | loads a mod's armies beside Zero Hour's as their own lobby entries; repeat it for several |
 | `-modpatch <folder>` | a patch for the mod given before it, or for Zero Hour's files when it comes first |
 | `-modfactions` | each mod's armies join Zero Hour's instead of replacing them |
 | `-replay <name>` | opens a replay from the replay folder, extension optional |

@@ -2828,13 +2828,13 @@ Int parseMod(char *args[], Int num)
 }
 
 /** -modpatch <folder>: a mod that changes the one given before it file by file rather than bringing
-	* armies of its own, or retail's files when it comes first.  Without -modfactions it is a plain -mod. */
+	* armies of its own, or retail's files when it comes first.  With no full -mod at all it is a plain -mod. */
 Int parseModPatch(char *args[], Int num)
 {
 	return addMod( args, num, TRUE );
 }
 
-/** -modfactions keeps each full mod's files apart, so a patch joins the full mod before it (retail's
+/** A mod's factions load beside retail's, each full mod's files apart, so a patch joins the full mod before it (retail's
 	* files when none is) and the full mods alone are the faction sets, M1, M2 and so on. */
 static void foldModPatches()
 {
@@ -2860,15 +2860,6 @@ static void foldModPatches()
 	data->m_modNames = names;
 }
 
-Int parseModFactions(char *args[], Int)
-{
-	if (TheWritableGlobalData)
-	{
-		TheWritableGlobalData->m_modFactions = TRUE;
-	}
-	return 1;
-}
-
 static CommandLineParam params[] =
 {
 	{ "-noshellmap", parseNoShellMap },
@@ -2882,7 +2873,6 @@ static CommandLineParam params[] =
 	{ "-scriptDebug", parseScriptDebug },
 	{ "-playStats", parsePlayStats },
 	{ "-mod", parseMod },
-	{ "-modfactions", parseModFactions },
 	{ "-modpatch", parseModPatch },
 	{ "-noshaders", parseNoShaders },
 	{ "-particlebounce", parseParticleBounce },
@@ -3118,11 +3108,11 @@ void parseCommandLine(int argc, char *argv[])
 		}
 	}
 
-	// with no full -mod there is nothing to keep apart, and the retail focus would have no tree to read;
-	// patches alone then stack as plain mods
+	// Any full -mod's factions stand beside retail's, one mod or five; never merged over them.  With no
+	// full -mod there is nothing to keep apart, and the retail focus would have no tree to read; patches
+	// alone then stack as plain mods.
 	const std::vector<Bool> &isPatch = TheGlobalData->m_modIsPatch;
-	if (std::find( isPatch.begin(), isPatch.end(), FALSE ) == isPatch.end())
-		TheWritableGlobalData->m_modFactions = FALSE;
+	TheWritableGlobalData->m_modFactions = std::find( isPatch.begin(), isPatch.end(), FALSE ) != isPatch.end();
 	if (TheGlobalData->m_modFactions)
 		foldModPatches();
 	TheArchiveFileSystem->loadMods();

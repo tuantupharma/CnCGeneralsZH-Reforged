@@ -100,6 +100,7 @@ struct PickerCell
 struct PickerGroup
 {
 	AsciiString leadSide;
+	AsciiString baseSide;	///< a mod's groups only
 	Int mod;
 	UnicodeString name;
 	DisplayString *heading;
@@ -299,6 +300,30 @@ static Bool canConfirm( void )
 	return s_focus >= 0 || !s_custom || tickedCount() > 0;
 }
 
+/// "Contra - USA": EA's own word for a country where there is one, the mod's BaseSide as written otherwise
+static UnicodeString modGroupName( Int mod, const AsciiString &baseSide )
+{
+	WideChar modName[ 128 ];
+	WideCharFromUtf8( TheGlobalData->m_modNames[ mod ].str(), modName, ARRAY_SIZE( modName ) );
+	UnicodeString name( modName );
+	name.concat( u" - " );
+	AsciiString label;
+	label.format( "SIDE:%s", baseSide == "USA" ? "America" : baseSide.str() );
+	Bool exists = FALSE;
+	const UnicodeString country = TheGameText->fetch( label, &exists );
+	if( exists )
+	{
+		name.concat( country );
+	}
+	else
+	{
+		UnicodeString written;
+		written.translate( baseSide );
+		name.concat( written );
+	}
+	return name;
+}
+
 //-------------------------------------------------------------------------------------------------
 /** The armies in the box, each under the first army of its side: a general's Side begins with his
 	* side's ("AmericaLaserGeneral" under "America"), so Turkiye, on America's BaseSide but a side of its
@@ -325,6 +350,7 @@ static void buildCells( void )
 		cell.label = NULL;
 
 		AsciiString side = "Observer";
+		AsciiString baseSide;
 		Int mod = -1;
 		if( pick == PLAYERTEMPLATE_OBSERVER )
 		{
@@ -353,7 +379,9 @@ static void buildCells( void )
 				cell.strategy = TheGameText->fetch( pt->getTooltip() );
 			if( !pt->getGeneralFeatures().isEmpty() )
 				cell.features = TheGameText->fetch( pt->getGeneralFeatures() );
-			if( pt->isRandomExcluded() )
+			baseSide = pt->getBaseSide();
+			// every mod faction stays out of a plain Random, too many to name; the list of who it draws says so
+			if( pt->isRandomExcluded() && mod < 0 )
 			{
 				if( !s_leftOut.isEmpty() )
 					s_leftOut.concat( u", " );
@@ -366,19 +394,23 @@ static void buildCells( void )
 			cell.label->setWordWrapCentered( TRUE );
 		}
 
+		// A mod lists its generals in any order and its plain side last (Contra), so its groups go by
+		// BaseSide: one heading a country, and the screen fits however many generals it brings.
 		size_t group = 0;
 		for( ; group < s_groups.size(); group++ )
 		{
-			if( s_groups[ group ].mod == mod && side.startsWith( s_groups[ group ].leadSide ) )
+			const PickerGroup &g = s_groups[ group ];
+			if( g.mod == mod && ( mod >= 0 ? g.baseSide == baseSide : side.startsWith( g.leadSide ) ) )
 				break;
 		}
 		if( group == s_groups.size() )
 		{
 			PickerGroup lead;
 			lead.leadSide = side;
+			lead.baseSide = baseSide;
 			lead.mod = mod;
-			lead.name = cell.name;
-			lead.heading = newText( cell.name, UIStyle::font( UIStyle::TEXT_HEADING ) );
+			lead.name = mod >= 0 ? modGroupName( mod, baseSide ) : cell.name;
+			lead.heading = newText( lead.name, UIStyle::font( UIStyle::TEXT_HEADING ) );
 			lead.mask = 0;
 			s_groups.push_back( lead );
 		}
@@ -518,6 +550,16 @@ static void refresh( void )
 	UnicodeString confirm;
 	confirm.format( TheGameText->fetch( "GUI:FactionPickConfirm" ), name.str() );
 	s_confirmText->setText( UIStyle::capitals( confirm ) );
+	// "Contra - USA Air Force General" is wider than the button in the heading's letters
+	const UIStyle::TextSize sizes[] = { UIStyle::TEXT_HEADING, UIStyle::TEXT_STRONG, UIStyle::TEXT_BODY };
+	for( size_t each = 0; each < ARRAY_SIZE( sizes ); each++ )
+	{
+		s_confirmText->setFont( UIStyle::titleFont( sizes[ each ] ) );
+		Int width, height;
+		s_confirmText->getSize( &width, &height );
+		if( width <= boxWidth( s_confirmBox ) - UIStyle::px( PAD ) )
+			break;
+	}
 }
 
 //-------------------------------------------------------------------------------------------------

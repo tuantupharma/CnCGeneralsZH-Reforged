@@ -944,10 +944,10 @@ public:
 	std::vector<AsciiString> m_mods;	///< every -mod in command-line order, later wins: a folder ends in '\', anything else is a .big
 	AsciiString m_modName;	///< UTF-8, each mod's "<name> <version>" from its mod.json (else the folder or archive name), joined by ", " in m_mods order; empty without -mod
 	std::vector<AsciiString> m_modNames;	///< UTF-8, each mod's mod.json "name" (else the folder or archive name), in m_mods order
-	std::vector<Bool> m_modIsPatch;	///< -modpatch: TRUE for each m_mods entry given as a patch; without -modfactions a patch is a plain -mod
+	std::vector<Bool> m_modIsPatch;	///< -modpatch: TRUE for each m_mods entry given as a patch; with no full -mod the patches stack as plain mods
 	std::vector< std::vector<AsciiString> > m_modPatches;	///< -modfactions: the -modpatch folders over each m_mods[n], later wins
 	std::vector<AsciiString> m_retailPatches;	///< -modfactions: the -modpatch folders given before any -mod, over retail's files
-	Bool m_modFactions;	///< -modfactions: every mod's factions load beside retail's under "M<n>~" names (ModNamespace)
+	Bool m_modFactions;	///< any full -mod given: every mod's factions load beside retail's under "M<n>~" names (ModNamespace).  "-modfactions" in a comment is this; the switch is gone
 
 	//-allAdvice feature
 	//Bool m_allAdvice;

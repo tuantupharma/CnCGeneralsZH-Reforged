@@ -44,6 +44,8 @@
 #include "GameClient/GadgetPushButton.h"
 #include "GameClient/GameText.h"
 #include "GameClient/Display.h"
+#include "GameClient/DisplayStringManager.h"
+#include "GameClient/GameFont.h"
 #include "GameClient/Image.h"
 #include "GameClient/Mouse.h"
 #include "GameClient/UIStyle.h"
@@ -311,6 +313,34 @@ void PopulateColorComboBox(Int comboBox, GameWindow *comboArray[], GameInfo *myG
 
 // -----------------------------------------------------------------------------
 
+// a seat's Army field was cut for "China Tank General"; a mod's name in front of that runs into the arrow
+static void shrinkComboToFit(GameWindow *combo, const UnicodeString &label)
+{
+	static const Int FIELD_MARGIN = 6;
+	static const Int SMALLEST_POINT_SIZE = 8;
+
+	GameWindow *field = GadgetComboBoxGetEditBox(combo);
+	Int fieldWidth, fieldHeight;
+	field->winGetSize(&fieldWidth, &fieldHeight);
+
+	GameFont *fieldFont = field->winGetFont();
+	GameFont *font = fieldFont;
+	DisplayString *measured = TheDisplayStringManager->newDisplayString();
+	measured->setFont(font);
+	measured->setText(label);
+	while (measured->getWidth() > fieldWidth - FIELD_MARGIN && font->pointSize > SMALLEST_POINT_SIZE)
+	{
+		font = TheFontLibrary->getFont(font->nameString, font->pointSize - 1, font->bold);
+		measured->setFont(font);
+	}
+	TheDisplayStringManager->freeDisplayString(measured);
+
+	if (font != fieldFont)
+		GadgetComboBoxSetFont(combo, font);
+}
+
+// -----------------------------------------------------------------------------
+
 void PopulatePlayerTemplateComboBox(Int comboBox, GameWindow *comboArray[], GameInfo *myGame, Bool allowObservers)
 {
 	Int numPlayerTemplates = ThePlayerTemplateStore->getPlayerTemplateCount();
@@ -324,8 +354,18 @@ void PopulatePlayerTemplateComboBox(Int comboBox, GameWindow *comboArray[], Game
 
 	std::set<AsciiString> seenSides;
 
+	// retail's armies, then each mod's own block; the fork's own factions load after the mods' and still
+	// belong with retail's
+	std::vector<Int> order(numPlayerTemplates);
 	for (Int c=0; c<numPlayerTemplates; ++c)
+		order[c] = c;
+	std::stable_sort(order.begin(), order.end(), [](Int a, Int b) {
+		return ThePlayerTemplateStore->getNthPlayerTemplate(a)->getModIndex() < ThePlayerTemplateStore->getNthPlayerTemplate(b)->getModIndex();
+	});
+
+	for (Int n=0; n<numPlayerTemplates; ++n)
 	{
+		const Int c = order[n];
 		const PlayerTemplate *fac = ThePlayerTemplateStore->getNthPlayerTemplate(c);
 		if (!fac)
 			continue;
@@ -348,7 +388,7 @@ void PopulatePlayerTemplateComboBox(Int comboBox, GameWindow *comboArray[], Game
 
 		AsciiString side;
 		side.format("SIDE:%s", fac->getSide().str());
-		// -modfactions: each mod's America is a side of its own, "<mod name> - USA"
+		// each mod's America is a side of its own, "<mod name> - USA"
 		AsciiString seenKey;
 		seenKey.format("%d:%s", fac->getModIndex(), side.str());
 		if (seenSides.find(seenKey) != seenSides.end())
@@ -375,6 +415,7 @@ void PopulatePlayerTemplateComboBox(Int comboBox, GameWindow *comboArray[], Game
 			label = UnicodeString(modName);
 			label.concat(UnicodeString(u" - "));
 			label.concat(sideLabel);
+			shrinkComboToFit(comboArray[comboBox], label);
 		}
 		newIndex = GadgetComboBoxAddEntry(comboArray[comboBox], label, def->getColor());
 		GadgetComboBoxSetItemData(comboArray[comboBox], newIndex, (void *)(intptr_t)c);
