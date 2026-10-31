@@ -1064,7 +1064,7 @@ void W3DProjectedShadowManager::queueDecal(W3DProjectedShadow *shadow, Bool sunC
 			 same fraction, so a capped streak still starts at the shadow of the tail rather than
 			 floating off it. */
 		Real stretch = 1.0f;
-		if (sunCasts && heightAboveGround > DECAL_AIRBORNE_HEIGHT)
+		if (sunCasts && heightAboveGround > DECAL_AIRBORNE_HEIGHT && !TheGlobalData->m_classicGraphics)
 		{
 			const Real lift = __min((heightAboveGround - DECAL_AIRBORNE_HEIGHT) / DECAL_AIRBORNE_BLEND, 1.0f);
 			const Real axisLength = uVector.Length();

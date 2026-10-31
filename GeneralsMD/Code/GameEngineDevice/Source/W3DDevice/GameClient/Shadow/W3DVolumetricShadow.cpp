@@ -2130,11 +2130,8 @@ void W3DVolumetricShadow::Update()
 		//buggies from being flagged as "flying".  We minimize the number of flying units because their shadow
 		//volumes are extruded longer to reach the lowest point on the map.  Regular shadows only extend far
 		//enough to reach the base of the model (presumes base is already touching the ground).
-		Real groundHeight; 
-		if (TheTerrainLogic)
-			groundHeight=TheTerrainLogic->getGroundHeight(pos.X,pos.Y);	//logic knows about bridges so use if available.
-		else
-			groundHeight=TheTerrainRenderObject->getHeightMapHeight(pos.X,pos.Y, NULL);
+		// the drawn map's copy, since this runs beside a tick; only a seismic effect moves it apart from the logic's
+		const Real groundHeight = TheTerrainRenderObject->getDrawHeight(pos.X,pos.Y);
    		if (fabs(pos.Z - groundHeight) >= AIRBORNE_UNIT_GROUND_DELTA)
    		{	
  			Real extent = MAX_SHADOW_LENGTH_EXTRA_AIRBORNE_SCALE_FACTOR * m_robjExtent;

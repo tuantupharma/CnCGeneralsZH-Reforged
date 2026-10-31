@@ -828,7 +828,7 @@ Bool Particle::update( const ParticleUpdateContext &context )
 		else if (fadeFrames == 0)
 			fadeFrames = 1;
 
-		if (m_lifetimeLeft <= fadeFrames)
+		if (m_lifetimeLeft <= fadeFrames && !TheGlobalData->m_classicGraphics)
 		{
 			// zero on the last frame, so isInvisible below retires it on the frame it would die anyway
 			const Real envelope = (Real)(m_lifetimeLeft - 1) / (Real)fadeFrames;
@@ -3898,7 +3898,9 @@ void ParticleSystemManager::init( void )
 	// -modfactions: each mod's systems after retail's, under its names
 	INI::loadModPasses( "Data\\INI\\ParticleSystem.ini", NULL );
 	// The fork's own systems, beside EA's 1088 rather than in a loose copy of all of them
+	m_classicReadingForkSystems = TheGlobalData && TheGlobalData->m_classicGraphics;
 	ini.load( AsciiString( "Data\\INI\\ParticleSystemReforged.ini" ), INI_LOAD_OVERWRITE, NULL );
+	m_classicReadingForkSystems = FALSE;
 
 	// "-particlebounce" on the command line: every system hits the terrain, using the built-in
 	// defaults.  Without it nothing changes unless a system's INI sets GroundCollision itself.

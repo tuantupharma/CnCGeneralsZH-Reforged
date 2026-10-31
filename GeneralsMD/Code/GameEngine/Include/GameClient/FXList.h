@@ -256,6 +256,10 @@ public:
 	
 	static void parseFXListDefinition(INI* ini);
 
+	/** FXListReforged.ini under Classic Graphics: the file is read, and so checksummed, like anyone's, and
+		* its blocks go nowhere. */
+	void setClassicDropsBlocks( Bool drops ) { m_classicDropsBlocks = drops; }
+
 private:
 
 	// use the hashing function for Ints. 
@@ -265,6 +269,8 @@ private:
 
 	FXListMap m_beforeMapOverrides;					///< a map.ini's edited lists, as they were before it
 	std::vector<NameKeyType> m_addedByMap;	///< names a map.ini brought
+	Bool m_classicDropsBlocks = FALSE;
+	Bool m_classicDroppedGeneralCopies = FALSE;	///< SupW_ names now answer with EA's plain list
 
 };
 

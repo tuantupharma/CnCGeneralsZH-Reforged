@@ -17353,6 +17353,31 @@ TEST(no_options_file_is_the_classic_game_with_every_added_row_off)
 	TheWritableGlobalData = saved;
 }
 
+/* Classic Graphics reads FXListReforged.ini, which is what keeps the INI checksum one for both looks, and
+	 keeps none of it: EA's list stands, a name only the fork has plays nothing. */
+TEST(classic_keeps_eas_fx_list_while_reading_the_forks_file)
+{
+	CHECK( bootOnce() );
+	if( TheFXListStore == NULL )
+		TheFXListStore = NEW FXListStore;
+
+	writeFile( TEST_INI, "FXList ClassicTest_Ea\r\n  TerrainScorch\r\n    Type = RANDOM\r\n    Radius = 120\r\n  End\r\nEnd\r\n" );
+	CHECK( loadIni( TEST_INI ) );
+	writeFile( TEST_INI,
+		"FXList ClassicTest_Ea\r\n  TerrainScorch\r\n    Type = RANDOM\r\n    Radius = 30\r\n  End\r\nEnd\r\n"
+		"FXList ClassicTest_Fork\r\n  TerrainScorch\r\n    Type = RANDOM\r\n    Radius = 30\r\n  End\r\nEnd\r\n"
+		"FXList SupW_ClassicTest_Ea\r\n  TerrainScorch\r\n    Type = RANDOM\r\n    Radius = 30\r\n  End\r\nEnd\r\n" );
+	TheFXListStore->setClassicDropsBlocks( TRUE );
+	CHECK( loadIni( TEST_INI ) );
+	TheFXListStore->setClassicDropsBlocks( FALSE );
+	remove( TEST_INI );
+
+	CHECK_NEAR( TheFXListStore->findFXList( "ClassicTest_Ea" )->getSplashRadius(), 120.0f, 0.01f );
+	CHECK( TheFXListStore->findFXList( "ClassicTest_Fork" ) != NULL );
+	CHECK_NEAR( TheFXListStore->findFXList( "ClassicTest_Fork" )->getSplashRadius(), 0.0f, 0.01f );
+	CHECK( TheFXListStore->findFXList( "SupW_ClassicTest_Ea" ) == TheFXListStore->findFXList( "ClassicTest_Ea" ) );
+}
+
 /* The menu's Defaults puts a row on what it held before the file reached it, whatever the file says. */
 TEST(an_options_row_remembers_its_value_from_before_the_file)
 {

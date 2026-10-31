@@ -1105,6 +1105,9 @@ const FXList *FXListStore::findFXList(const char* name) const
 	{
 		return &(*it).second;
 	}
+	// a Superweapon General's copy the fork's data names, which Classic dropped: EA's plain list is what he had
+	if (m_classicDroppedGeneralCopies && strncmp(name, "SupW_", 5) == 0)
+		return findFXList(name + 5);
 	AsciiString retailName;
 	return TheModNamespace.findRetailName(AsciiString(name), MODNAME_FXLIST, &retailName) ? findFXList(retailName.str()) : NULL;
 }
@@ -1116,6 +1119,18 @@ const FXList *FXListStore::findFXList(const char* name) const
 	const char *c = ini->getNextToken();
 	const AsciiString name = c;	// the token's buffer goes on to the next line
 	NameKeyType key = TheNameKeyGenerator->nameToKey(c);
+	if (TheFXListStore->m_classicDropsBlocks)
+	{
+		// EA's list stands and a name only the fork has plays nothing.  An FXList is the client's
+		// business, so a Classic and a Reforged player can share a match over it.
+		if (strncmp(name.str(), "SupW_", 5) == 0)
+			TheFXListStore->m_classicDroppedGeneralCopies = TRUE;
+		else
+			TheFXListStore->m_fxmap[key];
+		FXList dropped;
+		ini->initFromINI(&dropped, TheFXListFieldParse);
+		return;
+	}
 	if (ini->getLoadType() == INI_LOAD_CREATE_OVERRIDES)
 	{
 		FXListStore *store = TheFXListStore;

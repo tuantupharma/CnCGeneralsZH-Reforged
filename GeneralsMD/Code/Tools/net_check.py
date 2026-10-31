@@ -54,6 +54,8 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--each", default="", help="extra switches for every copy")
     parser.add_argument("--slot-args", nargs=2, action="append", default=[], metavar=("SLOT", "SWITCHES"),
                         help="extra switches for one copy, repeatable")
+    parser.add_argument("--slot-options", nargs=2, action="append", default=[], metavar=("SLOT", "FOLDER"),
+                        help="one copy's ZH_USER_DATA_DIR, for a match between two setups, repeatable")
     parser.add_argument("--tag", default="net", help="log prefix; copy n logs to Run/<tag><n>_DebugLogFile.txt")
     parser.add_argument("--prove", action="store_true", help="spawn on copy 0 alone at frame %d" % PROVE_FRAME)
     parser.add_argument("--prove-at", default="2192 3537", help="map position for --prove")
@@ -147,7 +149,9 @@ def main() -> int:
     if not 2 <= arguments.copies <= MAXIMUM_COPIES:
         raise SystemExit("--copies is 2 to %d, got %d" % (MAXIMUM_COPIES, arguments.copies))
 
-    processes = [subprocess.Popen(command_line(arguments, slot), cwd=RUN_DIRECTORY)
+    folders = {int(slot): folder for slot, folder in arguments.slot_options}
+    processes = [subprocess.Popen(command_line(arguments, slot), cwd=RUN_DIRECTORY,
+                                  env=dict(os.environ, ZH_USER_DATA_DIR=folders[slot]) if slot in folders else None)
                  for slot in range(arguments.copies)]
     games = []
     try:

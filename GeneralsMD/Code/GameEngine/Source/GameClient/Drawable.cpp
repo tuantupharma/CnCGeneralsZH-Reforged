@@ -2275,7 +2275,7 @@ void Drawable::calcPhysicsXformGround( const Locomotor *locomotor, PhysicsXformI
 	UnsignedInt logicFrame = TheGameLogic->getFrame();
 	Real logicAngle = getOrientation();
 	UnsignedInt gap = logicFrame - m_locoInfo->m_headingFrame;
-	if (!m_locoInfo->m_headingSeeded || gap > HEADING_CATCH_UP_FRAMES || owner->isKindOf(KINDOF_AIRCRAFT))
+	if (!m_locoInfo->m_headingSeeded || gap > HEADING_CATCH_UP_FRAMES || owner->isKindOf(KINDOF_AIRCRAFT) || TheGlobalData->m_classicGraphics)
 	{
 		// first drawn, long unseen, or a taxiing jet or landed helicopter, which eases its own turn in the logic
 		m_locoInfo->m_headingLag = 0.0f;
@@ -4812,7 +4812,7 @@ void Drawable::drawVeterancy( const IRegion2D *healthBarRegion )
 	// EA's chevron for the level
 	const RankLadder *ladder = TheGlobalData->getRankLadder( obj->getTemplate() );
 	VeterancyLevel level = obj->getVeterancyLevel();
-	const Image* image = ladder ? getRankInsignia( obj ) : s_veterancyImage[level];
+	const Image* image = ( ladder && !TheGlobalData->m_classicGraphics ) ? getRankInsignia( obj ) : s_veterancyImage[level];
 	if (!image)
 		return;
 
@@ -4846,7 +4846,7 @@ void Drawable::drawVeterancy( const IRegion2D *healthBarRegion )
 
 	// the insignia in line with the bar, just past its right end and centred on it: the ammo and
 	// passenger pips start from the left end, and hanging under the bar it read as part of the unit
-	if( ladder )
+	if( ladder && !TheGlobalData->m_classicGraphics )
 	{
 		Int left = screenCenter.x + 2;
 		Int middle = screenCenter.y;
