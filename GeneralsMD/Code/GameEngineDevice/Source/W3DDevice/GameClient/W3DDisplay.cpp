@@ -2668,6 +2668,15 @@ AGAIN:
 		const UnsignedInt MAX_SYNC_STEP_MS = TheW3DFrameLengthInMsec * 4 * LOGICFRAMES_PER_RETAIL_FRAME;
 		if (deltaMs > MAX_SYNC_STEP_MS)
 			deltaMs = MAX_SYNC_STEP_MS;
+		// a cinematic that slowed the game slows the animations with it, or soldiers march on the spot
+		const Real missionRate = GameEngine_missionTimeRate();
+		if (missionRate < 1.0f)
+		{
+			static Real slowedMs = 0.0f;
+			slowedMs += deltaMs * missionRate;
+			deltaMs = (UnsignedInt)slowedMs;
+			slowedMs -= deltaMs;
+		}
 		// a recorded picture is its share of a logic frame however long it took to draw and save, so the
 		// clock moves that much too, or the footage plays every animation fast.  Read off the pictures'
 		// own clock rather than added up: a 60 Hz frame is not a whole number of milliseconds, and

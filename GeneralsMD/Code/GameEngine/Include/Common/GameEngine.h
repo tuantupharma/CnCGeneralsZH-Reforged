@@ -58,6 +58,16 @@ Int GameEngine_logicCatchupMaxFrames( Int logicFps );
 	replay plays back at the speed its match had. */
 Int GameEngine_matchFramesPerSecond( Bool turbo );
 
+/** The logic frames a second a mission runs at after its script's SET_FPS_LIMIT.  EA's cinematics ask
+	for 20 to 28 of retail's 30 and time their voices against that; 0 or 30 and up ask for the game back,
+	which is the match's speed, turbo mode included. */
+Int GameEngine_missionFramesPerSecond( Int askedRetailFps, Int matchFps );
+
+/** How fast a mission's logic runs against the wall clock: 0.77 in a cinematic that asked for 23, 2
+	in turbo mode, 1 everywhere else.  Whatever a cinematic times against its script's frames and draws
+	on the wall clock (the scripted camera, W3D's animation clock) multiplies by this. */
+Real GameEngine_missionTimeRate( void );
+
 /** R1, smooth motion: the renderer's blend reads how far into the next logic tick the wall clock is
 	(0 when the last tick was due, 1 a whole tick later or more; always 1 in fast mode or before the first
 	tick).  GameEngine_tickFraction is the arithmetic, on the fine clock's ticks: 1 for a tick length of

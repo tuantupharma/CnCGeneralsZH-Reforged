@@ -1659,6 +1659,20 @@ Int GameEngine_matchFramesPerSecond( Bool turbo )
 	return fps > 1000 ? 1000 : fps;
 }
 
+Int GameEngine_missionFramesPerSecond( Int askedRetailFps, Int matchFps )
+{
+	if (askedRetailFps <= 0 || askedRetailFps >= RETAIL_LOGICFRAMES_PER_SECOND)
+		return matchFps;
+	return ConvertRetailFrames( askedRetailFps );
+}
+
+Real GameEngine_missionTimeRate( void )
+{
+	if (TheGameLogic == NULL || !TheGameLogic->isInSinglePlayerGame() || TheGameLogic->isInReplayGame())
+		return 1.0f;
+	return (Real)TheGameEngine->getFramesPerSecondLimit() / (Real)LOGICFRAMES_PER_SECOND;
+}
+
 Bool GameEngine_mayStartAnotherCatchupTick( Int ticksSoFar, Int maxTicks, Real elapsedMsInLoop )
 {
 	if (ticksSoFar >= maxTicks)

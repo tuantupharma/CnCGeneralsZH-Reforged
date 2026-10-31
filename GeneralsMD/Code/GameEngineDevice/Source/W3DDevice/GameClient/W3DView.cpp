@@ -1773,6 +1773,25 @@ void W3DView::update(void)
 	if (waypointElapsedMs > 100)
 		waypointElapsedMs = 100;	// a hitch should not teleport the camera down the path
 
+	/* EA stepped a scripted move once an engine frame, so a move kept time with the script's timers at
+		 whatever speed the map ran.  On the wall clock it arrives early in a cinematic that slowed the game
+		 and late in turbo mode, and the timer that starts the next shot cuts it off.  A pan that froze the
+		 logic has no other clock, and a recorded picture is a logic frame already. */
+	const Real scriptedRate = pictureClock || (isTimeFrozen() && !isCameraMovementFinished()) ? 1.0f : GameEngine_missionTimeRate();
+	static Real scriptedWaypointMs = 0.0f;
+	scriptedWaypointMs += waypointElapsedMs * scriptedRate;
+	const Int scriptedElapsedMs = (Int)scriptedWaypointMs;
+	scriptedWaypointMs -= scriptedElapsedMs;
+	Bool scriptedStepTime = stepTime;
+	if (scriptedRate != 1.0f)
+	{
+		static Real scriptedStepMs = 0.0f;
+		scriptedStepMs += waypointElapsedMs * scriptedRate;
+		scriptedStepTime = scriptedStepMs >= (Real)CAMERA_STEP_MSEC;
+		if (scriptedStepTime)
+			scriptedStepMs -= (Real)CAMERA_STEP_MSEC;
+	}
+
 	IRegion2D dirtyTerrain;
 	if (TheTerrainRenderObject->doesNeedFullUpdate()) {
 		RefRenderObjListIterator *it = W3DDisplay::m_3DScene->createLightsIterator();
@@ -2014,12 +2033,12 @@ void W3DView::update(void)
 	// when both are scripted, as before)
 	if (scriptMovesAllowed && m_doingMoveCameraOnWaypointPath && !m_doingRotateCamera) {
 		m_previousLookAtPosition = *getPosition();
-		moveAlongWaypointPath(waypointElapsedMs);
+		moveAlongWaypointPath(scriptedElapsedMs);
 		didScriptedMovement = true;
 		recalcCamera = true;
 	}
 
-	if (stepTime && scriptMovesAllowed) {
+	if (scriptedStepTime && scriptMovesAllowed) {
 		// If we aren't frozen for debug, allow the camera to follow scripted movements.
 		if (updateCameraMovements()) {
 			didScriptedMovement = true;

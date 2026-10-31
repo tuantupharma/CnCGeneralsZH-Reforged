@@ -5679,6 +5679,19 @@ TEST(player_game_speed_is_normal_or_turbo)
 	CHECK_EQ( ClampPlayerGameSpeed( ConvertRetailFrames( 5 ) ), LOGICFRAMES_PER_SECOND );
 }
 
+TEST(mission_cinematic_runs_at_the_speed_its_script_asks_for)
+{
+	/* CHI01's opening asks for 23 of retail's 30 and for 0 when it hands the game back; USA06 hands it
+	   back with 30.  Below 30 is the cinematic's pace, turbo mode or not; the rest is the match's speed. */
+	const Int normal = LOGICFRAMES_PER_SECOND;
+	const Int turbo = LOGICFRAMES_PER_SECOND * 2;
+	CHECK_EQ( GameEngine_missionFramesPerSecond( 23, normal ), 46 );
+	CHECK_EQ( GameEngine_missionFramesPerSecond( 23, turbo ), 46 );
+	CHECK_EQ( GameEngine_missionFramesPerSecond( 0, normal ), normal );
+	CHECK_EQ( GameEngine_missionFramesPerSecond( 0, turbo ), turbo );
+	CHECK_EQ( GameEngine_missionFramesPerSecond( RETAIL_LOGICFRAMES_PER_SECOND, turbo ), turbo );
+}
+
 TEST(match_speed_is_frames_per_second_limit_doubled_by_turbo)
 {
 	/* Every MSG_NEW_GAME a player starts passes this: GameData.ini's normal speed, or -fps for a test,

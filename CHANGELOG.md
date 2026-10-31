@@ -8,6 +8,12 @@ found and fixed, EA's own, not port damage.**
 
 ---
 
+## Missions keep the time their script wrote
+
+- EA's cinematics slow the game on purpose, so the radio lines fit and the camera lands where the next shot starts. This build had stopped honouring that on 18 October. Every mission's cutscenes now run at the pace their script asks for. China's parade had 16 seconds of radio talking over itself, and has 11 now: what is left is EA's own script, which starts the tank crews' lines two thirds of a second apart.
+- Parade tanks drive the road. A mission's waypoint route had been handing out a lane per vehicle, which put China's column up to 82 feet off its line. The furthest any tank strays now is under a foot.
+- China's first mission could hang in its opening shot. Your own idle tanks opened fire on the bomb truck during the cutscene and killed it before it reached the crowd, and the scene waited for a blast that never came. Nothing you own starts a fight on its own until the script hands you control, as in EA's game.
+
 ## Classic first, Reforged when you ask
 
 - A first start now opens the game EA shipped: its own textures and ground, the hard stencil shadows, the flat 2003 light, no glow, bilinear filtering, the original sound mix, health bars only on what you select or point at. The HD art stays on your disk, unmounted. Every setting this build added to the picture, the sound and the controls starts off, and each one is a box in Options.
