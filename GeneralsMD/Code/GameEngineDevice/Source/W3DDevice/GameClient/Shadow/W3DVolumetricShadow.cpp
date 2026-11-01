@@ -1685,8 +1685,6 @@ void W3DVolumetricShadow::RenderDynamicMeshVolume(Int meshIndex, Int lightIndex,
 {
 	Geometry *geometry;
 	Int numVerts, numPolys, numIndex;
-	SHADOW_DYNAMIC_VOLUME_VERTEX* pvVertices;
-	UnsignedShort *pvIndices;
 
 	//Get D3D Device used by W3D for quicker access.
 	LPDIRECT3DDEVICE9 m_pDev=DX8Wrapper::_Get_D3D_Device();
@@ -1713,104 +1711,48 @@ void W3DVolumetricShadow::RenderDynamicMeshVolume(Int meshIndex, Int lightIndex,
 		return;
 
 
-	DX11BufferLockClass vertexLock;
+	/* Classic's stencil shadows hand over a volume per mesh, twice a picture, and these were a Direct3D 9
+		 lock, a copy into a block, a copy into the D3D9 buffer and a copy into the D3D11 one for each of
+		 them, with Direct3D 9 drawing nothing: a quarter of the shadow pass went in d3d9.dll alone. */
 	const UnsignedInt vertexStride = sizeof(SHADOW_DYNAMIC_VOLUME_VERTEX);
-	UnsignedInt vertexOffset;
-	UnsignedInt vertexFlags;
-	if (nShadowVertsInBuf > (SHADOW_VERTEX_SIZE-numVerts))	//check if room for model verts
-	{	//flush the buffer by drawing the contents and re-locking again
-		vertexOffset=0;
-		vertexFlags=D3DLOCK_DISCARD;
-		if (shadowVertexBufferD3D->Lock(0,numVerts*vertexStride,(void**)&pvVertices,D3DLOCK_DISCARD) != D3D_OK)
-			return;
+	const Bool vertexDiscard = nShadowVertsInBuf > (SHADOW_VERTEX_SIZE-numVerts);	//check if room for model verts
+	if (!uploadStreamingRange(shadowVertexBufferD3D, shadowVertexTwin, geometry->GetVertex(0),
+			vertexDiscard ? 0 : nShadowVertsInBuf*vertexStride, numVerts*vertexStride,
+			vertexDiscard ? D3DLOCK_DISCARD : D3DLOCK_NOOVERWRITE))
+		return;
+	if (vertexDiscard)
+	{
 		nShadowVertsInBuf=0;
 		nShadowStartBatchVertex=0;
 	}
-	else
-	{	vertexOffset=nShadowVertsInBuf*vertexStride;
-		vertexFlags=D3DLOCK_NOOVERWRITE;
-		if (shadowVertexBufferD3D->Lock(vertexOffset,numVerts*vertexStride, (void**)&pvVertices,D3DLOCK_NOOVERWRITE) != D3D_OK)
-			return;
-	}
 
-	// From here the fill writes into the twin's own block instead of the D3D9 pointer, and the
-	// unlock below copies that range into both.  Without a twin Begin answers null and the fill
-	// carries on writing where it always did.
-	void *vertexTarget = vertexLock.Begin(shadowVertexTwin, pvVertices, vertexOffset,
-		numVerts*vertexStride, vertexFlags);
-	if (vertexTarget != NULL)
-		pvVertices = (SHADOW_DYNAMIC_VOLUME_VERTEX *)vertexTarget;
-#ifdef SV_DEBUG
-	srand(0x1345465);
-#endif
-	if(pvVertices)
+	short firstPolygonIndices[3];
+	const Bool indexDiscard = nShadowIndicesInBuf > (SHADOW_INDEX_SIZE-numIndex);	//check if room for model verts
+	if (!uploadStreamingRange(shadowIndexBufferD3D, shadowIndexTwin, geometry->GetPolygonIndex(0,firstPolygonIndices),
+			indexDiscard ? 0 : nShadowIndicesInBuf*sizeof(short), numIndex*sizeof(short),
+			indexDiscard ? D3DLOCK_DISCARD : D3DLOCK_NOOVERWRITE))
+		return;
+	if (indexDiscard)
 	{
-#ifdef SV_DEBUG
-		for (Int i=0; i<numVerts; i++)
-		{
-			(*((Vector3 *)pvVertices))=*geometry->GetVertex(i);	//cast is valid since both start with xyz
-			pvVertices->diffuse=(rand()%255) | ((rand()%255)<<8) | ((rand()%255)<<16);
-			pvVertices++;
-		}
-#else
-		memcpy(pvVertices,geometry->GetVertex(0),numVerts*sizeof(SHADOW_DYNAMIC_VOLUME_VERTEX));
-#endif
-	}
-
-	vertexLock.End();
-	shadowVertexBufferD3D->Unlock();
-
-	DX11BufferLockClass indexLock;
-	UnsignedInt indexOffset;
-	UnsignedInt indexFlags;
-	if (nShadowIndicesInBuf > (SHADOW_INDEX_SIZE-numIndex))	//check if room for model verts
-	{	//flush the buffer by drawing the contents and re-locking again
-		indexOffset=0;
-		indexFlags=D3DLOCK_DISCARD;
-		if (shadowIndexBufferD3D->Lock(0,numIndex*sizeof(short),(void**)&pvIndices,D3DLOCK_DISCARD) != D3D_OK)
-			return;
 		nShadowIndicesInBuf=0;
 		nShadowStartBatchIndex=0;
 	}
-	else
-	{	indexOffset=nShadowIndicesInBuf*sizeof(short);
-		indexFlags=D3DLOCK_NOOVERWRITE;
-		if (shadowIndexBufferD3D->Lock(indexOffset,numIndex*sizeof(short), (void**)&pvIndices,D3DLOCK_NOOVERWRITE) != D3D_OK)
-			return;
-	}
-
-	void *indexTarget = indexLock.Begin(shadowIndexTwin, pvIndices, indexOffset,
-		numIndex*sizeof(short), indexFlags);
-	if (indexTarget != NULL)
-		pvIndices = (UnsignedShort *)indexTarget;
-
-	try {
-	if(pvIndices)
-	{
-		memcpy(pvIndices,geometry->GetPolygonIndex(0,(short *)pvIndices),numPolys*3*sizeof(short));
-	}
-	IndexBufferExceptionFunc();
-	} catch(...) {
-		IndexBufferExceptionFunc();
-	}
-
-	indexLock.End();
-	shadowIndexBufferD3D->Unlock();
-
-	// D3D9 takes the base vertex index on the draw call, not here.
-	m_pDev->SetIndices(shadowIndexBufferD3D);
-	Direct3D11_Mirror_Indices(shadowIndexTwin);
 
 	Matrix4x4 mWorld(*meshXform);
 	Matrix4x4 mWorldTransposed = mWorld.Transpose();
 
-	m_pDev->SetTransform(D3DTS_WORLD,(D3DMATRIX *)&mWorldTransposed);
-	Direct3D11_Mirror_Transform(D3DTS_WORLD,(const float *)&mWorldTransposed);
-
-	if (shadowVertexBufferD3D != lastActiveVertexBuffer)
-	{	m_pDev->SetStreamSource(0,shadowVertexBufferD3D,0,vertexStride);
-		lastActiveVertexBuffer = shadowVertexBufferD3D;
+	// D3D9 takes the base vertex index on the draw call, not here.
+	if (!Direct3D11_Present_Is_Enabled())
+	{
+		m_pDev->SetIndices(shadowIndexBufferD3D);
+		m_pDev->SetTransform(D3DTS_WORLD,(D3DMATRIX *)&mWorldTransposed);
+		if (shadowVertexBufferD3D != lastActiveVertexBuffer)
+		{	m_pDev->SetStreamSource(0,shadowVertexBufferD3D,0,vertexStride);
+			lastActiveVertexBuffer = shadowVertexBufferD3D;
+		}
 	}
+	Direct3D11_Mirror_Indices(shadowIndexTwin);
+	Direct3D11_Mirror_Transform(D3DTS_WORLD,(const float *)&mWorldTransposed);
 	Direct3D11_Mirror_Stream_Source(shadowVertexTwin, vertexStride, 0);
 
 	if (DX8Wrapper::_Is_Triangle_Draw_Enabled())
