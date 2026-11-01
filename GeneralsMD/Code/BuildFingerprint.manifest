@@ -263,6 +263,10 @@ Data/Scenarios/artillery.txt
 Data/Scenarios/aurorablast.txt
 Data/Scenarios/aurorafog.txt
 Data/Scenarios/avengerlasers.txt
+Data/Scenarios/baseintruder_barracks.txt
+Data/Scenarios/baseintruder_patriot.txt
+Data/Scenarios/baseintruder_tunnel.txt
+Data/Scenarios/baseintruder_worker.txt
 Data/Scenarios/beambase.txt
 Data/Scenarios/beamsteer.txt
 Data/Scenarios/blastcheck.txt
