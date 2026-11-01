@@ -7620,6 +7620,21 @@ TEST(gameslot_restores_the_pre_randomization_setup_on_a_restart)
 	CHECK_EQ( fixed.getOriginalColor(), -1 );
 }
 
+/* The army list's bar: the thumb's ends are the list's ends, and a thumb pulled past them stops. */
+TEST(faction_picker_bar_reaches_both_ends_of_the_list)
+{
+	const Int scrollMax = 2500, track = 684, thumb = 145;
+	CHECK_EQ( FactionPickerThumbTop( 0, scrollMax, track, thumb ), 0 );
+	CHECK_EQ( FactionPickerThumbTop( scrollMax, scrollMax, track, thumb ), track - thumb );
+	CHECK_EQ( FactionPickerThumbTop( 0, 0, track, track ), 0 );
+	CHECK_EQ( FactionPickerScrollAtThumb( 0, scrollMax, track, thumb ), 0 );
+	CHECK_EQ( FactionPickerScrollAtThumb( track - thumb, scrollMax, track, thumb ), scrollMax );
+	CHECK_EQ( FactionPickerScrollAtThumb( -30, scrollMax, track, thumb ), 0 );
+	CHECK_EQ( FactionPickerScrollAtThumb( track, scrollMax, track, thumb ), scrollMax );
+	const Int there = FactionPickerScrollAtThumb( FactionPickerThumbTop( 1000, scrollMax, track, thumb ), scrollMax, track, thumb );
+	CHECK( there > 990 && there <= 1000 );
+}
+
 /* A front-end title is set in capitals, and towupper in the C locale stops at ASCII: the army
 	 screen's Turkish title came out "ORDU SEç".  Turkish's i takes its dot along only in Turkish. */
 TEST(capitals_reach_turkish_and_cyrillic_letters)
