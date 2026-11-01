@@ -1542,8 +1542,6 @@ if(ZH_PLATFORM_POSIX)
   list(FILTER W3DDEVICE_SOURCES EXCLUDE REGEX "/(HazardCloudUnsupported|DX11HazardCloud)\\.cpp$")
   # The GPU particles have only a Direct3D 11 backend; GpuParticlesUnsupported answers for SDL3.
   list(FILTER W3DDEVICE_SOURCES EXCLUDE REGEX "/DX11GpuParticles\\.cpp$")
-  # The -volsmoke smoke volumes are Direct3D 11's alone; W3DParticleSys calls them only on Windows.
-  list(FILTER W3DDEVICE_SOURCES EXCLUDE REGEX "/DX11VolumeSmoke\\.cpp$")
   # The reach overlay's Direct3D 11 pass; W3DReachOverlay.cpp calls it only on Windows and draws the
   # fixed-function sheet without it.
   list(FILTER W3DDEVICE_SOURCES EXCLUDE REGEX "/DX11ReachOverlay\\.cpp$")
@@ -2221,9 +2219,15 @@ endfunction()
 add_lib_test(test_msvc_float_casts)
 target_include_directories(test_msvc_float_casts PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/Libraries/Include)
 
-# MilesAudioDevice/AudioMixPolicy.h: the battle mix's budget, folding and occlusion arithmetic.
+# MilesAudioDevice/AudioMixPolicy.h: the battle mix's budget and folding arithmetic.
 add_lib_test(test_audio_mix_policy)
 target_include_directories(test_audio_mix_policy PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/GameEngineDevice/Include)
+
+# W3DDevice/GameClient/GroundMarks.h: the Battle Marks option's cap and fade.
+add_lib_test(test_ground_marks)
+target_include_directories(test_ground_marks PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/GameEngineDevice/Include)
+add_lib_test(test_fire_lights)
+target_include_directories(test_fire_lights PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/GameEngineDevice/Include)
 
 add_lib_test(test_hazard_cloud_policy)
 set_target_properties(test_hazard_cloud_policy PROPERTIES CXX_STANDARD 17)
@@ -2236,13 +2240,6 @@ target_sources(test_hazard_cloud_policy PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/GameEngineDevice/Source/W3DDevice/GameClient/HazardCloudShader.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/GameEngineDevice/Source/W3DDevice/GameClient/HazardCloudFlow.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/GameEngineDevice/Source/W3DDevice/GameClient/HazardCloudUnsupported.cpp)
-
-# W3DDevice/GameClient/VolumeFireCore.h: the -volsmoke fires' template table, heat release, black
-# body and sites, device-free.
-add_lib_test(test_volume_fire_policy)
-target_include_directories(test_volume_fire_policy PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/GameEngineDevice/Include)
-target_sources(test_volume_fire_policy PRIVATE
-  ${CMAKE_CURRENT_SOURCE_DIR}/GameEngineDevice/Source/W3DDevice/GameClient/VolumeFireCore.cpp)
 
 add_lib_test(test_wwmath wwmath wwlib wwsaveload wwdebug)
 target_include_directories(test_wwmath PRIVATE ${WW}/WWLib ${WW}/WWSaveLoad ${WW}/Wwutil)

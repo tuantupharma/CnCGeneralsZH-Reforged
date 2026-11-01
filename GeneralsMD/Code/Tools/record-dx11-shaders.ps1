@@ -25,7 +25,9 @@
   programs recorded here are never compiled on a player's machine.
 
   This plays AI-against-AI skirmishes with the picture drawn by Direct3D 11, on a Windows machine whose
-  d3dcompiler_47 is Microsoft's. It does so at the default post chain and with it off, on a few seeds,
+  d3dcompiler_47 is Microsoft's. Each run names its setup in a user data folder of this script's own:
+  reforged-look.ini as Options.ini for the Reforged picture, none for a run marked Classic, which is what a
+  first start draws. It does so at the default post chain and with it off, on a few seeds,
   plus the two scenarios that stage the per-object looks, plus the shell map. It starts each run from an empty cache: the player's cache is moved aside and put
   back afterwards, and the farm's shipped file is unlinked. What the runs compiled is then the shipped
   file. The bytecode is exactly what run-time D3DCompile gives on this machine, because it is that output.
@@ -50,9 +52,9 @@ param(
 	[string] $RunDir = (Join-Path $PSScriptRoot "..\..\Run"),
 	# where the recording goes (default: Data\dx11shaders.shipped)
 	[string] $Out = "",
-	# the game's user data folder, where the backend keeps the player's cache
-	[string] $UserData = (Join-Path ([Environment]::GetFolderPath('MyDocuments')) "Command and Conquer Generals Zero Hour Data"),
 	[string] $WorkDir = (Join-Path $env:TEMP "zh-record-dx11-shaders"),
+	# the game's user data folder, where the backend keeps the cache this reads back
+	[string] $UserData = (Join-Path $env:TEMP "zh-record-dx11-shaders-userdata"),
 	[int[]] $Seeds = @(0, 1, 2),
 	# named skirmish maps played the same way, for the lighting the random maps do not have (night, snow)
 	[string[]] $Maps = @(),
@@ -112,12 +114,22 @@ foreach ($look in @(
 # The main menu's shell map, the first thing a player sees: the intro movies, then the menu, which runs until
 # it is killed.  The cache is written while the game runs, so the kill loses nothing.
 $runs += , @{ Name = "shellmap"; Args = @("-multiInstance", "-noFPSLimit"); Minutes = 5 }
+# What a first start draws: the Classic game, no Options.ini, on the menu and in a match.
+$runs += , @{ Name = "shellmap-classic"; Args = @("-multiInstance", "-noFPSLimit"); Minutes = 5; Classic = $true }
+$runs += , @{ Name = "seed0-classic"; Args = @("-quickstart", "-noshellmap", "-multiInstance", "-noFPSLimit", "-randommap", 0, 2,
+	"-autoskirmish", 2, "-aidiff", "brutal", "-seed", 0, "-observer"); Minutes = $TimeoutMinutes; Classic = $true }
+
+New-Item -ItemType Directory -Force $UserData | Out-Null
+$env:ZH_USER_DATA_DIR = (Resolve-Path $UserData).Path
 
 if (Test-Path $cache) { Move-Item -Force $cache $aside }
 try {
 	foreach ($run in $runs) {
 		$farm = Join-Path $WorkDir "farm-$($run.Name)"	# one a run, so every run's log is kept
 		New-Farm $zh $farm
+		$options = Join-Path $UserData "Options.ini"
+		if ($run.Classic) { Remove-Item -LiteralPath $options -Force -ErrorAction SilentlyContinue }
+		else { Copy-Item (Join-Path $repoRoot "reforged-look.ini") $options -Force }
 		$shipped = Join-Path $farm "dx11shaders.shipped"
 		if (-not $KeepShipped -and (Test-Path -LiteralPath $shipped)) { Remove-Item -LiteralPath $shipped -Force }	# the link, never its target
 		# -win as well: Windows has no hidden window, and a full screen game minimizes when someone clicks

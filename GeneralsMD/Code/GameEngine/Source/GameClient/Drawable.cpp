@@ -590,6 +590,7 @@ void Drawable::takeLookForDraw( void )
 	look.hasSelectionColor = selection != NULL;
 	if( selection )
 		look.selectionColor = *selection;
+	look.position = *getPosition();
 }
 
 //-------------------------------------------------------------------------------------------------
@@ -756,6 +757,14 @@ Drawable::Drawable( const ThingTemplate *thingTemplate, DrawableStatus statusBit
 		*m++ = TheModuleFactory->newModule(this, drawMI.getNthName(modIdx), newModData, MODULETYPE_DRAW);
 	}
 	*m = NULL;
+
+	m_clipFeedbackSlots = 0;
+	for (DrawModule** dm = getDrawModulesNonDirty(); *dm; ++dm)
+	{
+		ObjectDrawInterface* di = (*dm)->getObjectDrawInterface();
+		if (di)
+			m_clipFeedbackSlots |= di->getProjectileClipFeedbackSlots();
+	}
 
 	const ModuleInfo& cuMI = thingTemplate->getClientUpdateModuleInfo();
 	if (cuMI.getCount())
@@ -1456,10 +1465,34 @@ const Real Drawable::getScale (void) const
 }
 
 //-------------------------------------------------------------------------------------------------
+/** The Collapse option: a building that is about to vanish or swap to rubble in one frame hands over
+	its model as it stands, which is why this comes before the rubble state.  What stages its own end
+	keeps it: EA's high rises, towers that topple, a slow death and a landmark bridge's animation. */
+//-------------------------------------------------------------------------------------------------
+void Drawable::startCollapse()
+{
+	const Object *obj = getObject();
+	if (obj == NULL || !isKindOf(KINDOF_STRUCTURE) || isKindOf(KINDOF_BRIDGE) || isKindOf(KINDOF_BRIDGE_TOWER)
+		|| obj->testStatus(OBJECT_STATUS_UNDER_CONSTRUCTION) || obj->testStatus(OBJECT_STATUS_SOLD))
+		return;
+	static const NameKeyType collapseKey = NAMEKEY("StructureCollapseUpdate");
+	static const NameKeyType toppleKey = NAMEKEY("StructureToppleUpdate");
+	static const NameKeyType slowDeathKey = NAMEKEY("SlowDeathBehavior");
+	if (obj->findUpdateModule(collapseKey) || obj->findUpdateModule(toppleKey) || obj->findUpdateModule(slowDeathKey))
+		return;
+	// the template's: by now the body has put the object's own geometry at rubble height
+	const Real height = obj->getTemplate()->getTemplateGeometryInfo().getMaxHeightAbovePosition();
+	doClientWork( [this, height]() { TheGameClient->structureCollapsing( this, height ); }, WORK_AFTER_FLUSH );
+}
+
+//-------------------------------------------------------------------------------------------------
 //-------------------------------------------------------------------------------------------------
 void Drawable::reactToBodyDamageStateChange(BodyDamageType newState)
 {
-	static const ModelConditionFlagType TheDamageMap[BODYDAMAGETYPE_COUNT] = 
+	if (newState == BODY_RUBBLE && TheGlobalData->m_structureCollapse && !TheGameLogic->isLoadingMap())
+		startCollapse();
+
+	static const ModelConditionFlagType TheDamageMap[BODYDAMAGETYPE_COUNT] =
 	{
 		MODELCONDITION_INVALID,
 		MODELCONDITION_DAMAGED,
@@ -1479,6 +1512,9 @@ void Drawable::reactToBodyDamageStateChange(BodyDamageType newState)
   // correctly react to customizations
   if ( !TheGameLogic->isLoadingMap() )
  	  startAmbientSound(newState, TheGlobalData->m_timeOfDay);
+
+	if (newState == BODY_RUBBLE && !TheGameLogic->isLoadingMap() && getObject() && isKindOf(KINDOF_STRUCTURE) && !isKindOf(KINDOF_BRIDGE))
+		TheGameClient->structureFell(getPosition(), getObject()->getGeometryInfo().getBoundingCircleRadius());
 }
 
 //-------------------------------------------------------------------------------------------------
@@ -2239,7 +2275,7 @@ void Drawable::calcPhysicsXformGround( const Locomotor *locomotor, PhysicsXformI
 	UnsignedInt logicFrame = TheGameLogic->getFrame();
 	Real logicAngle = getOrientation();
 	UnsignedInt gap = logicFrame - m_locoInfo->m_headingFrame;
-	if (!m_locoInfo->m_headingSeeded || gap > HEADING_CATCH_UP_FRAMES || owner->isKindOf(KINDOF_AIRCRAFT))
+	if (!m_locoInfo->m_headingSeeded || gap > HEADING_CATCH_UP_FRAMES || owner->isKindOf(KINDOF_AIRCRAFT) || TheGlobalData->m_classicGraphics)
 	{
 		// first drawn, long unseen, or a taxiing jet or landed helicopter, which eases its own turn in the logic
 		m_locoInfo->m_headingLag = 0.0f;
@@ -4776,7 +4812,7 @@ void Drawable::drawVeterancy( const IRegion2D *healthBarRegion )
 	// EA's chevron for the level
 	const RankLadder *ladder = TheGlobalData->getRankLadder( obj->getTemplate() );
 	VeterancyLevel level = obj->getVeterancyLevel();
-	const Image* image = ladder ? getRankInsignia( obj ) : s_veterancyImage[level];
+	const Image* image = ( ladder && !TheGlobalData->m_classicGraphics ) ? getRankInsignia( obj ) : s_veterancyImage[level];
 	if (!image)
 		return;
 
@@ -4810,7 +4846,7 @@ void Drawable::drawVeterancy( const IRegion2D *healthBarRegion )
 
 	// the insignia in line with the bar, just past its right end and centred on it: the ammo and
 	// passenger pips start from the left end, and hanging under the bar it read as part of the unit
-	if( ladder )
+	if( ladder && !TheGlobalData->m_classicGraphics )
 	{
 		Int left = screenCenter.x + 2;
 		Int middle = screenCenter.y;
@@ -6443,6 +6479,11 @@ void Drawable::setDrawableHidden( Bool hidden )
 //-------------------------------------------------------------------------------------------------
 void Drawable::updateDrawableClipStatus( UnsignedInt shotsRemaining, UnsignedInt maxShots, WeaponSlotType slot )
 {
+	// every armed object asks every frame; only a model with projectile bones on this slot answers,
+	// so the rest queue nothing. Those that do still ask every frame, which is what shows the bones
+	// again after a model state change rebuilt the render object
+	if ((m_clipFeedbackSlots & (1 << slot)) == 0)
+		return;
 	doClientWork( [this, shotsRemaining, maxShots, slot]() {
 		for (DrawModule** dm = getDrawModulesNonDirty(); *dm; ++dm)
 		{
