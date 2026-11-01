@@ -288,6 +288,10 @@ struct AIDifficultyProfile
 	Real	m_fireWordRadius;								///< how far from a unit hit the rest of the group goes with it; 0 = each answers its own hit alone
 	Real	m_fireChargeOdds;								///< ours near the unit have to be worth this many times what covers the gun before they go for it
 	Real	m_fireMemorySeconds;						///< how long a gun that hit it stays on its map after it has lost sight of it
+
+	// Enemies in the base that have not hit anything yet (AIPlayer::baseSquatter)
+	Real	m_baseWatchSeconds;							///< how often it looks for them, and so how late it answers; 0 = only once something has been hit
+	Real	m_baseWatchOdds;								///< what it trains and sends at them, in times their price
 };
 
 //-------------------------------------------------------------------------------------------------

@@ -13448,6 +13448,10 @@ TEST(the_difficulty_ladder_climbs_in_every_direction_it_should)
 		CHECK( upper.m_fireChargeOdds > lower.m_fireChargeOdds );
 		CHECK( upper.m_fireMemorySeconds > lower.m_fireMemorySeconds );
 
+		// an enemy in the base that has not fired: looks sooner and sends more
+		CHECK( upper.m_baseWatchSeconds < lower.m_baseWatchSeconds );
+		CHECK( upper.m_baseWatchOdds > lower.m_baseWatchOdds );
+
 		// capabilities only ever switch on as you climb, never off again
 		CHECK( upper.m_massBeforeAttacking >= lower.m_massBeforeAttacking );
 		CHECK( upper.m_retreatIndividualUnits >= lower.m_retreatIndividualUnits );

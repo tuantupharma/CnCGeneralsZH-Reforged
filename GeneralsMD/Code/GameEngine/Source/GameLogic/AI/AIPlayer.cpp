@@ -8732,6 +8732,45 @@ Object *AIPlayer::homeIntruder( Int *count, std::vector<AIVisibleEnemy> *army ) 
 	return nearest;
 }
 
+/** A Tunnel Network put up behind the barracks shoots at nothing until something walks past, and a worker
+	* with a Patriot on his mind never shoots at all.  homeIntruder wants a hit and a gun, so on Easy such a
+	* tunnel stood for the rest of the match and on Hard for up to four minutes.  This asks for neither: anything
+	* that walks or stands, known to this AI, inside the base itself.  It stays out of isBaseUnderAttack: that has
+	* some 25 readers and one Patriot would stop the economy and the waves for as long as it stood.  Not an
+	* aircraft, which is gone before an answer arrives and is homeIntruder's when it fires. */
+Object *AIPlayer::baseSquatter( Int *count, std::vector<AIVisibleEnemy> *army ) const
+{
+	*count = 0;
+	if( !m_baseCenterSet )
+		return NULL;
+	PartitionFilterAlive filterAlive;
+	PartitionFilterOnMap filterOnMap;
+	PartitionFilter *filters[] = { &filterAlive, &filterOnMap, NULL };
+	// the base radius runs through the outer buildings: a tunnel just behind them is still in the base
+	ObjectIterator *iter = ThePartitionManager->iterateObjectsInRange( &m_baseCenter, 1.5f * m_baseRadius, FROM_CENTER_2D, filters );
+	MemoryPoolObjectHolder hold( iter );
+	Object *nearest = NULL;
+	Real nearestSqr = 0.0f;
+	for( Object *obj = iter->first(); obj; obj = iter->next() )
+	{
+		if( !(obj->isKindOf( KINDOF_STRUCTURE ) || obj->isKindOf( KINDOF_INFANTRY ) || obj->isKindOf( KINDOF_VEHICLE )) ||
+				obj->isKindOf( KINDOF_AIRCRAFT ) || obj->isKindOf( KINDOF_MINE ) || obj->isKindOf( KINDOF_DEMOTRAP ) || obj->isKindOf( KINDOF_DRONE ) )
+			continue;
+		if( m_player->getRelationship( obj->getTeam() ) != ENEMIES || !observerKnowsAbout( obj, m_player->getPlayerIndex() ) )
+			continue;
+		++*count;
+		addToVisibleArmy( army, obj->getTemplate(), obj->getControllingPlayer(),
+			INT_TO_REAL( obj->getTemplate()->calcCostToBuild( obj->getControllingPlayer() ) ) );
+		const Real distSqr = sqr( obj->getPosition()->x - m_baseCenter.x ) + sqr( obj->getPosition()->y - m_baseCenter.y );
+		if( nearest == NULL || distSqr < nearestSqr )
+		{
+			nearest = obj;
+			nearestSqr = distSqr;
+		}
+	}
+	return nearest;
+}
+
 /** Everything that can build a unit, finished and standing. */
 static void collectFactories( Object *obj, void *userData )
 {
@@ -8814,6 +8853,63 @@ static void creditAnswer( const ThingTemplate *tmpl, const Player *owner, const 
 	(*answered)[ best ] += cost;
 }
 
+/** A unit that could go at a squatter, and how far it has to go. */
+struct SquatterHunter
+{
+	Object *unit;
+	Real distSqr;
+};
+
+static Bool nearerHunter( const SquatterHunter &a, const SquatterHunter &b )
+{
+	return a.distSqr != b.distSqr ? a.distSqr < b.distSqr : a.unit->getID() < b.unit->getID();
+}
+
+/** The nearest idle fighters at home, up to worth counted in aiCombatPower with those already on it, by a
+	* direct order: an attack move walks past a building that shoots at nothing.  A worker draws one rifle
+	* and not the whole wave parked at home. */
+void AIPlayer::sendAtSquatter( Object *squatter, Real worth, const std::vector<Object *> &owned )
+{
+	std::vector<SquatterHunter> hunters;
+	for( std::vector<Object *>::const_iterator o = owned.begin(); o != owned.end(); ++o )
+	{
+		Object *obj = *o;
+		if( obj->isEffectivelyDead() || obj->isContained() || obj->getAI() == NULL || obj->isKindOf( KINDOF_IMMOBILE ) ||
+				!isAtHome( obj->getPosition() ) || !leavesToFinish( obj ) )
+			continue;
+		if( obj->getAI()->getGoalObject() == squatter || obj->getAI()->getCurrentVictim() == squatter )
+		{
+			worth -= aiCombatPower( obj );
+			continue;
+		}
+		const StateID state = obj->getAI()->getCurrentStateID();
+		if( state != AI_IDLE && state != AI_GUARD && state != AI_GUARD_RETALIATE && state != AI_MOVE_AND_TIGHTEN )
+			continue;
+		if( obj->getAbleToAttackSpecificObject( ATTACK_NEW_TARGET, squatter, CMD_FROM_AI ) < ATTACKRESULT_POSSIBLE_AFTER_MOVING )
+			continue;
+		SquatterHunter hunter;
+		hunter.unit = obj;
+		hunter.distSqr = sqr( obj->getPosition()->x - squatter->getPosition()->x ) + sqr( obj->getPosition()->y - squatter->getPosition()->y );
+		hunters.push_back( hunter );
+	}
+	std::sort( hunters.begin(), hunters.end(), nearerHunter );
+	// an attack order on a building out in the fog ends at once, for a computer player: walk there first
+	const Bool inView = ThePartitionManager->getShroudStatusForPlayer( m_player->getPlayerIndex(), squatter->getPosition() ) == CELLSHROUD_CLEAR;
+	Int sent = 0;
+	for( size_t h = 0; h < hunters.size() && worth > 0.0f; ++h )
+	{
+		if( inView )
+			hunters[ h ].unit->getAI()->aiAttackObject( squatter, NO_MAX_SHOTS_LIMIT, CMD_FROM_AI );
+		else
+			hunters[ h ].unit->getAI()->aiAttackMoveToPosition( squatter->getPosition(), NO_MAX_SHOTS_LIMIT, CMD_FROM_AI );
+		worth -= aiCombatPower( hunters[ h ].unit );
+		++sent;
+	}
+	if( sent > 0 )
+		DEBUG_LOG(("AI SQUATTER frame %d player %d sends %d idle units at '%s' at (%.0f,%.0f), base radius %.0f\n", TheGameLogic->getFrame(),
+			m_player->getPlayerIndex(), sent, squatter->getTemplate()->getName().str(), squatter->getPosition()->x, squatter->getPosition()->y, m_baseRadius));
+}
+
 //----------------------------------------------------------------------------------------------------------
 /** A base under attack spends its bank on the fight.  A Hard USA rushed a minute in had two fighting
 	* units and 8,000 in the bank, because the opening goes on buildings first and the team plan trains
@@ -8832,9 +8928,18 @@ void AIPlayer::defendHome( void )
 	Int intruders = 0;
 	std::vector<AIVisibleEnemy> army;
 	Object *intruder = homeIntruder( &intruders, &army );
-	if( intruder == NULL )
-		return;
-	if( m_persona != AIPERSONA_NORMAL )
+	// nobody has been hit: still look round the base on the rung's clock, this being a turn of doWaves' tick
+	const Bool squatter = intruder == NULL;
+	if( squatter )
+	{
+		const Real watch = getSkillProfile()->m_baseWatchSeconds;
+		if( watch <= 0.0f || (TheGameLogic->getFrame() + computeUpdatePhase( m_player->getPlayerIndex(), WAVE_CHECK_RATE )) % rungFrames( watch ) >= WAVE_CHECK_RATE )
+			return;
+		intruder = baseSquatter( &intruders, &army );
+		if( intruder == NULL )
+			return;
+	}
+	if( m_persona != AIPERSONA_NORMAL && !squatter )
 		personaChat( "Hit" );
 
 	// Two deep.  The queue this builds reads to doEconomy as a barracks that cannot keep up, and a rushed
@@ -8871,8 +8976,13 @@ void AIPlayer::defendHome( void )
 			for( size_t k = 1; k < army.size(); ++k )
 				if( army[ k ].m_weight - answered[ k ] > army[ kind ].m_weight - answered[ kind ] )
 					kind = k;
-			const ThingTemplate *unit = bestDefender( *f, m_player, army[ kind ] );
-			if( unit == NULL || !buyUnit( pu, unit, AIBUY_EMERGENCY ) )
+			// a squatter gets what it is worth and no more: the bank is for the match, which is still on
+			if( squatter && answered[ kind ] >= army[ kind ].m_weight * getSkillProfile()->m_baseWatchOdds )
+				break;
+			Real score = 0.0f;
+			const ThingTemplate *unit = bestDefender( *f, m_player, army[ kind ], FALSE, &score );
+			// and never an Ambulance bought because nothing here hurts it
+			if( unit == NULL || (squatter && score <= 0.0f) || !buyUnit( pu, unit, AIBUY_EMERGENCY ) )
 				break;
 			answered[ kind ] += INT_TO_REAL( unit->calcCostToBuild( m_player ) );
 			DEBUG_LOG(("AI DEFEND frame %d player %d trains '%s' at '%s' against %d intruders, %d in the bank\n",
@@ -8886,7 +8996,7 @@ void AIPlayer::defendHome( void )
 	// it over the minute its base was being hit
 	Object *dozer = NULL;
 	m_player->iterateObjects( findAnyDozer, &dozer );
-	if( dozer && m_player->getCanBuildBase() )
+	if( dozer && m_player->getCanBuildBase() && !squatter )
 	{
 		const ThingTemplate *defense = nextBaseDefense( dozer );
 		Bool going = FALSE;
@@ -8929,7 +9039,8 @@ void AIPlayer::defendHome( void )
 	// much again, and four Crusaders are not.  The advantage is the square law's, so its root scales power
 	if( getSkillProfile()->m_engageGate )
 		homePower *= (Real)sqrt( armyAdvantage( home, army ) );
-	if( homePower < 0.5f * intruderWorth )
+	// one that cannot shoot is worth going at with anything
+	if( homePower < 0.5f * intruderWorth && !(squatter && !intruder->isAbleToAttack()) )
 		return;
 	// A gun standing still outside the base itself is not coming in: on a small map the enemy's own towers
 	// and an expansion's Patriots sit within two base radii, and idle units sent at them one or two at a
@@ -8966,6 +9077,12 @@ void AIPlayer::defendHome( void )
 	}
 	if( covered && homePower < OUTSIDE_BASE_ODDS[ m_skillLevel ] * (intruderWorth + cover) )
 		return;
+
+	if( squatter )
+	{
+		sendAtSquatter( intruder, intruderWorth * getSkillProfile()->m_baseWatchOdds, owned );
+		return;
+	}
 
 	Int sent = 0;
 	for( std::vector<Object *>::const_iterator o = owned.begin(); o != owned.end(); ++o )
@@ -17439,6 +17556,7 @@ const AIDifficultyProfile *AIPlayer::getSkillProfile( void ) const
 		if( mask & AIKNOB_ENGAGE_GATE )	m_measuredProfile.m_engageGate = FALSE;
 		if( mask & AIKNOB_ANSWER_ARMY )	m_measuredProfile.m_answerArmy = FALSE;
 		if( mask & AIKNOB_MASS_UNIT )		m_measuredProfile.m_massUnit = FALSE;
+		if( mask & AIKNOB_BASE_WATCH )	m_measuredProfile.m_baseWatchSeconds = 0.0f;
 	}
 	if( m_persona == AIPERSONA_NORMAL )
 		return &m_measuredProfile;

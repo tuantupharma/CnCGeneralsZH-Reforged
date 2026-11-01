@@ -272,6 +272,7 @@ enum
 	AIKNOB_ENGAGE_GATE	= 1,
 	AIKNOB_ANSWER_ARMY	= 2,
 	AIKNOB_MASS_UNIT		= 4,
+	AIKNOB_BASE_WATCH		= 8,
 };
 
 //-------------------------------------------------------------------------------------------------
