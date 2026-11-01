@@ -624,58 +624,53 @@ const OptionDef TheOptionCatalog[] =
 		get_m_waterFoam, set_m_waterFoam },
 
 	// Craters and a building's stain on the terrain, fading over minutes, and darker treads.  The
-	// scorch buffer asks every draw.  Off under Classic graphics and -d3d9, and no row in the quality
-	// table: an opt-in until it has been seen.  On Options > Effects.
+	// scorch buffer asks every draw.  Off under Classic graphics and -d3d9.  On Options > Effects.
 	{ "GroundMarks",							OPT_WND( "CheckGroundMarks" ), "GUI:GroundMarks",
 		OPTION_BOOL, APPLY_LIVE, 0, 1,
 		get_m_groundMarks, set_m_groundMarks },
 
 	// Burning buildings, wrecks and blasts as flickering point lights on the ground, walls and units.
 	// The particle draw asks every frame.  Off under Classic graphics and -d3d9, which light nothing
-	// per pixel, and no row in the quality table: an opt-in until it has been seen.  On Options > Effects.
+	// per pixel.  On Options > Effects.
 	{ "Firelight",								OPT_WND( "CheckFirelight" ), "GUI:Firelight",
 		OPTION_BOOL, APPLY_LIVE, 0, 1,
 		get_m_firelight, set_m_firelight },
 
 	// Models take the map's ambient from the sky above and the ground below instead of evenly.  The
-	// scene hands it to the backend every frame.  Off under Classic graphics and -d3d9, and no row in
-	// the quality table: an opt-in until it has been seen.  On Options > Effects.
+	// scene hands it to the backend every frame.  Off under Classic graphics and -d3d9.  On Options > Effects.
 	{ "HemiAmbient",							OPT_WND( "CheckHemiAmbient" ), "GUI:HemiAmbient",
 		OPTION_BOOL, APPLY_LIVE, 0, 1,
 		get_m_hemiAmbient, set_m_hemiAmbient },
 
 	// Corners and the ground under what stands on it darken.  The scene reads it every frame.  Off under
-	// Classic graphics and -d3d9, and no row in the quality table: an opt-in until it has been seen.  On
-	// Options > Effects.
+	// Classic graphics and -d3d9.  On Options > Effects.
 	{ "AmbientOcclusion",					OPT_WND( "CheckAmbientOcclusion" ), "GUI:AmbientOcclusion",
 		OPTION_BOOL, APPLY_LIVE, 0, 1,
 		get_m_ambientOcclusion, set_m_ambientOcclusion },
 
 	// Rain, blowing sand or snow by the map's ground, and a wind on trees and smoke.  Read every frame, and
-	// no sim reads it, so two players may differ.  Off under Classic graphics and -d3d9, and no row in the
-	// quality table: an opt-in until it has been seen.  On Options > Effects.
+	// no sim reads it, so two players may differ.  Off under Classic graphics and -d3d9.  On Options > Effects.
 	{ "Weather",							OPT_WND( "CheckWeather" ), "GUI:Weather",
 		OPTION_BOOL, APPLY_LIVE, 0, 1,
 		get_m_weatherEffects, set_m_weatherEffects },
 
 	// A splash and rings where a blast or a falling body meets water: W3DGameClient::splashInWater makes
-	// particle systems, and no sim reads them.  Off under Classic graphics, -d3d9 and Modern water, and no
-	// row in the quality table: an opt-in until it has been seen.  On Options > Effects.
+	// particle systems, and no sim reads them.  Off under Classic graphics, -d3d9 and Modern water.  On
+	// Options > Effects.
 	{ "WaterSplashes",						OPT_WND( "CheckWaterSplashes" ), "GUI:WaterSplashes",
 		OPTION_BOOL, APPLY_LIVE, 0, 1,
 		get_m_waterSplashes, set_m_waterSplashes },
 
 	// The far ground fades toward the horizon and what the frame left empty takes a sky.  Read every frame,
-	// and no sim reads it.  Off under Classic graphics and -d3d9, and no row in the quality table: an opt-in
-	// until it has been seen.  On Options > Graphics, under Warm Light: Effects is full.
+	// and no sim reads it.  Off under Classic graphics and -d3d9.  On Options > Graphics, under Warm Light:
+	// Effects is full.
 	{ "Atmosphere",								OPT_WND( "CheckAtmosphere" ), "GUI:Atmosphere",
 		OPTION_BOOL, APPLY_LIVE, 0, 1,
 		get_m_atmosphere, set_m_atmosphere },
 
 	// A building's last model goes into the ground: StructureCollapse.cpp moves a copy no drawable owns,
-	// and no sim reads it.  Off under Classic graphics and -d3d9, and no row in
-	// the quality table: an opt-in until it has been seen.  On Options > Display, under Picture: every
-	// column of Graphics and Effects is full.
+	// and no sim reads it.  Off under Classic graphics and -d3d9.  On Options > Display, under Picture:
+	// every column of Graphics and Effects is full.
 	{ "StructureCollapse",				OPT_WND( "CheckStructureCollapse" ), "GUI:StructureCollapse",
 		OPTION_BOOL, APPLY_LIVE, 0, 1,
 		get_m_structureCollapse, set_m_structureCollapse },
@@ -689,8 +684,8 @@ const OptionDef TheOptionCatalog[] =
 		get_m_smoothMotion, set_m_smoothMotion },
 
 	// What passes white keeps its colour on the way to the eight bit screen; no HDR monitor output.  The
-	// post chain is told every frame.  Classic graphics has no half float scene and -d3d9 no chain, and
-	// no row in the quality table: an opt-in until it has been seen.  On Options > Effects.
+	// post chain is told every frame.  Classic graphics has no half float scene and -d3d9 no chain.  On
+	// Options > Effects.
 	{ "InternalHdr",							OPT_WND( "CheckInternalHdr" ), "GUI:InternalHdr",
 		OPTION_BOOL, APPLY_LIVE, 0, 1,
 		get_m_internalHdr, set_m_internalHdr },
@@ -747,6 +742,12 @@ const Int TheOptionCatalogCount = (sizeof( TheOptionCatalog ) / sizeof( TheOptio
 // MapLight, TeamGlow and WaterFoam are greyed and the slider leaves them; the shadow map and the
 // volumetric clouds are the other renderers' alone.
 //
+// The nine looks of 2026-10-31 all rise above High, so High stays the picture the Classic box's
+// untick has always given.  Their costs are GPU means past frame 600, on against off in two pairs on
+// trailer chaos (water splashes on constant shelling), rows under 0.15 ms again written 0.  Weather
+// and Atmosphere change a map's mood, and Atmosphere, Firelight and StructureCollapse still carry
+// faults listed in docs/plans/TODO.md, so those three wait for Ultra.
+//
 // Trees have no row: GameLogic reads the setting as a map loads, so it stays with the memory test
 // as EA had it and a preset never turns them off.  The behind-buildings marker has none either; it
 // is there to read the battlefield, not to cost frame time.  Water style has none: the fight above
@@ -779,14 +780,24 @@ const GraphicsQualityRow TheGraphicsQualityTable[] =
 	{ "CheckVolumetricSmoke",		0.0f,  {    0,    0,    0,    0,    0,    1,    1,    1,    1,    1,    1 } },
 	{ "ComboBoxMSAA",						0.0f,  {    0,    0,    0,    0,    0,    1,    1,    2,    2,    3,    3 } },
 	{ "CheckNoDynamicLOD",			0.0f,  {    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    1 } },
+	{ "CheckInternalHdr",				0.0f,  {    0,    0,    0,    0,    0,    0,    0,    0,    1,    1,    1 } },
+	{ "CheckHemiAmbient",				0.0f,  {    0,    0,    0,    0,    0,    0,    0,    0,    1,    1,    1 } },
+	{ "CheckStructureCollapse",	0.0f,  {    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    1 } },
 	{ "ComboBoxTextureFilter",	0.1f,  {    0,    1,    2,    2,    2,    2,    2,    2,    2,    2,    2 } },
 	{ "ComboBoxBloom",					0.1f,  {    0,    1,    2,    2,    2,    2,    2,    2,    2,    2,    2 } },
 	{ "SliderAnisotropy",				0.1f,  {    2,    4,    8,   16,   16,   16,   16,   16,   16,   16,   16 } },
 	{ "CheckParticleShadows",		0.15f, {    0,    0,    0,    0,    0,    0,    0,    1,    1,    1,    1 } },
 	{ "LowResSlider",						0.2f,  {    1,    2,    2,    2,    2,    2,    2,    2,    2,    2,    2 } },
 	{ "CheckPropShadows",				0.2f,  {    0,    0,    0,    0,    0,    0,    1,    1,    1,    1,    1 } },
+	{ "CheckWaterSplashes",			0.2f,  {    0,    0,    0,    0,    0,    0,    0,    0,    1,    1,    1 } },
+	{ "CheckAtmosphere",				0.2f,  {    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    1 } },
 	{ "ComboBoxShadowQuality",	0.25f, {    0,    0,    0,    0,    0,    0,    1,    1,    1,    2,    2 } },
+	{ "CheckAmbientOcclusion",	0.3f,  {    0,    0,    0,    0,    0,    0,    0,    0,    1,    1,    1 } },
 	{ "CheckMapLight",					0.35f, {    0,    0,    0,    0,    0,    0,    0,    0,    1,    1,    1 } },
+	{ "CheckFirelight",					0.4f,  {    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    1 } },
+	// 0.79 and 0.33 ms in the two pairs on 2026-11-01, the widest spread in the table
+	{ "CheckGroundMarks",				0.55f, {    0,    0,    0,    0,    0,    0,    0,    0,    0,    1,    1 } },
+	{ "CheckWeather",						0.65f, {    0,    0,    0,    0,    0,    0,    0,    0,    0,    1,    1 } },
 	{ "ComboBoxSmoke",					0.75f, {    0,    0,    0,    0,    0,    0,    0,    0,    0,    1,    1 } },
 	// measured 5000 against the slider's floor of 100 (1.6 ms) and against 1000 (0.5 ms)
 	{ "ParticleCapSlider",			1.6f,  {  500, 1000, 1500, 1500, 1500, 2000, 2500, 3000, 3500, 4000, 5000 } },

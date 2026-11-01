@@ -17287,6 +17287,19 @@ TEST(graphics_quality_slider_only_ever_turns_settings_up)
 	// Modern water is opt-in: a preset gave it to the sea of the main menu's shell map at 11 to 45 ms a pass
 	CHECK( findGraphicsQualityRow( "ComboBoxWaterStyle" ) == NULL );
 
+	// the looks of 2026-10-31 rise above High, which stays the picture the Classic box's untick gives,
+	// and every one is on at Ultra and a fork's row, so a Classic page keeps them off
+	static const char *const aboveHigh[] = { "CheckInternalHdr", "CheckHemiAmbient", "CheckGroundMarks", "CheckStructureCollapse",
+		"CheckWaterSplashes", "CheckAtmosphere", "CheckAmbientOcclusion", "CheckFirelight", "CheckWeather" };
+	for( Int i = 0; i < (Int)( sizeof( aboveHigh ) / sizeof( aboveHigh[ 0 ] ) ); ++i )
+	{
+		const GraphicsQualityRow *look = findGraphicsQualityRow( aboveHigh[ i ] );
+		CHECK( look != NULL );
+		CHECK_EQ( look->values[ TheGraphicsQualityAnchors[ STATIC_GAME_LOD_HIGH ] ], 0 );
+		CHECK_EQ( look->values[ TheGraphicsQualityAnchors[ STATIC_GAME_LOD_ULTRA ] ], 1 );
+		CHECK( graphicsQualityRowIsReforged( *look ) );
+	}
+
 	// the slider's own position is a catalog row with exactly the table's steps
 	const OptionDef *slider = findOptionDef( "GraphicsQuality" );
 	CHECK( slider != NULL );
