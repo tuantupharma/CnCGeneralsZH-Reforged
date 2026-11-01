@@ -292,6 +292,9 @@ struct AIDifficultyProfile
 	// Enemies in the base that have not hit anything yet (AIPlayer::baseSquatter)
 	Real	m_baseWatchSeconds;							///< how often it looks for them, and so how late it answers; 0 = only once something has been hit
 	Real	m_baseWatchOdds;								///< what it trains and sends at them, in times their price
+
+	// A superweapon going up, the word every seat hears (AIPlayer::dodgeStrike)
+	Real	m_strikeDodgeSeconds;						///< how long after that word its helicopters leave where they stand; 0 = they stay
 };
 
 //-------------------------------------------------------------------------------------------------
@@ -431,6 +434,12 @@ Bool aiFireAnswerOver( Bool retreatHasIt, Bool steppedAway, UnsignedInt framesOn
 	* one it has lost track of runs to staleFrames.  Nothing ends the others (a rung with no retreat, the default
 	* team): they hold holdFrames and go free once they have stopped walking, for the call-ups to have them. */
 Bool aiHolderLetGo( Bool retreatSeesIt, UnsignedInt heldFrames, Bool moving, UnsignedInt holdFrames, UnsignedInt staleFrames );
+
+/** Where a helicopter at (x, y) goes when it hears a launch: reach away from the middle of the group it hangs
+	* with (clumpX, clumpY), or off on its own line, picked by tie, when it is that middle.  Back the other way when
+	* the map ends first (bounds: low x, low y, high x, high y).  Nobody knows where the shot is going, so reach is
+	* twice the blast: from anywhere inside it, a straight flight that long ends outside whatever the heading. */
+void aiStrikeDodgeSpot( Real x, Real y, Real clumpX, Real clumpY, Real reach, const Real *bounds, Int tie, Real *outX, Real *outY );
 
 /** Whether a unit may answer a gun by leaving.  A fight at home is fought, home being where a retreat goes,
 	* and a gun out past home that is shelling it is nothing the retreat will take up, so that one it may.

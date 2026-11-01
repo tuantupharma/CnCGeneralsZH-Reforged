@@ -273,6 +273,7 @@ enum
 	AIKNOB_ANSWER_ARMY	= 2,
 	AIKNOB_MASS_UNIT		= 4,
 	AIKNOB_BASE_WATCH		= 8,
+	AIKNOB_STRIKE_DODGE	= 16,
 };
 
 //-------------------------------------------------------------------------------------------------

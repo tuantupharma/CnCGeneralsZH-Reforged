@@ -1338,6 +1338,12 @@ void Player::noteTeamRequest( Int kind, Int from, Int enemy, const Coord3D *pos 
 		m_ai->noteTeamRequest( (AITeamRequestKind)kind, from, enemy, pos );
 }
 
+void Player::noteStrikeLaunched( const Player *launcher )
+{
+	if( m_ai )
+		m_ai->noteStrikeLaunched( launcher );
+}
+
 //-------------------------------------------------------------------------------------------------
 // PlayerObjectFindInfo is used to find a player's object. For example, we iterate through
 // to find a player's command center, or a specific building capable of firing the specified

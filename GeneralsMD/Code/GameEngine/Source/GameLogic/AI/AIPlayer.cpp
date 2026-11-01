@@ -439,6 +439,7 @@ m_role(AIROLE_AGGRESSIVE)
 		m_heldSuffix[ held ] = 0;
 	}
 	m_heldSince = 0;
+	m_strikeNoticeFrame = 0;
 	m_pressure = AIPRESSURE_NORMAL;
 	m_knownEnemyPower = 0.0f;
 	m_pressureEnemy = -1;
@@ -5719,6 +5720,7 @@ void AIPlayer::update( void )
 		AI_PHASE( AIP_WAVE,    answerArmy() );					// Train the answer to the part of it nothing answers.
 		AI_PHASE( AIP_WAVE,    doMass() );							// Build the fist, and send it when it is one.
 		AI_PHASE( AIP_WAVE,    doWaves() );							// Send the parked attack teams out together.
+		AI_PHASE( AIP_TACTICS, dodgeStrike() );					// A superweapon went up: the helicopters do not wait to see where.
 		AI_PHASE( AIP_TACTICS, doTactics() );						// Fight each unit from where it is strongest.
 		AI_PHASE( AIP_TACTICS, holdAtDefences() );			// Wait at the edge of the guns, and shell what can be outranged.
 		AI_PHASE( AIP_TACTICS, doTransports() );				// Put the helicopters' riders down at the fight.
@@ -15449,6 +15451,91 @@ void AIPlayer::doTactics( void )
 }
 
 //----------------------------------------------------------------------------------------------------------
+/** Twice the widest superweapon blast, 210 for the Neutron Missile and 200 for a Scud Storm's. */
+static const Real STRIKE_DODGE_REACH = 450.0f;
+
+void AIPlayer::noteStrikeLaunched( const Player *launcher )
+{
+	if( m_strikeNoticeFrame == 0 && runsOwnAI() && getSkillProfile()->m_strikeDodgeSeconds > 0.0f &&
+			m_player->getRelationship( launcher->getDefaultTeam() ) == ENEMIES )
+		m_strikeNoticeFrame = TheGameLogic->getFrame();
+}
+
+struct StrikeDodgers
+{
+	const AIPlayer *owner;
+	ObjectID ferry;
+	std::vector<Object *> ships;
+};
+
+static void collectStrikeDodgers( Object *obj, void *userData )
+{
+	StrikeDodgers *found = (StrikeDodgers *)userData;
+	if( !found->owner->isGunshipAircraft( obj ) || found->owner->isTransportChinook( obj ) || obj->isContained() || obj->getID() == found->ferry )
+		return;
+	found->ships.push_back( obj );
+}
+
+/** Six Comanches hovering in a base died to a nuclear missile with five seconds of warning, four of them on Medium
+	* and all six on the other rungs, and to a Scud Storm with ten.  Every seat hears a launch announced.  The aim is never said, its marker shows
+	* only to the player firing, so the helicopters leave wherever they are, spread out from each other, and take
+	* the retreat's own row: nothing calls a holder up, the hold's clock brings it back to the ground it left.  One
+	* launch anywhere costs each a few seconds of hovering somewhere else.  Nothing here runs without a launch.
+	* ponytail: ground units stay, too slow to clear a blast, and a jet flies its own loop; a visible missile's
+	* heading would say more, at the cost of a walk over the projectiles every launch */
+void AIPlayer::dodgeStrike( void )
+{
+	if( m_strikeNoticeFrame == 0 || TheGameLogic->getFrame() - m_strikeNoticeFrame < (UnsignedInt)rungFrames( getSkillProfile()->m_strikeDodgeSeconds ) )
+		return;
+	m_strikeNoticeFrame = 0;
+
+	StrikeDodgers found;
+	found.owner = this;
+	found.ferry = m_ferryID;
+	m_player->iterateObjects( collectStrikeDodgers, &found );
+	if( found.ships.empty() )
+		return;
+
+	Region3D map;
+	TheTerrainLogic->getExtent( &map );
+	const Real bounds[ 4 ] = { map.lo.x, map.lo.y, map.hi.x, map.hi.y };
+	const UnsignedInt now = TheGameLogic->getFrame();
+	std::vector<Coord3D> spots( found.ships.size() );
+	for( size_t s = 0; s < found.ships.size(); ++s )
+	{
+		const Coord3D *pos = found.ships[ s ]->getPosition();
+		Real sumX = 0.0f, sumY = 0.0f;
+		Int group = 0;
+		for( size_t o = 0; o < found.ships.size(); ++o )
+		{
+			const Coord3D *other = found.ships[ o ]->getPosition();
+			if( sqr( other->x - pos->x ) + sqr( other->y - pos->y ) > sqr( STRIKE_DODGE_REACH ) )
+				continue;
+			sumX += other->x;
+			sumY += other->y;
+			++group;
+		}
+		aiStrikeDodgeSpot( pos->x, pos->y, sumX / group, sumY / group, STRIKE_DODGE_REACH, bounds, (Int)found.ships[ s ]->getID(), &spots[ s ].x, &spots[ s ].y );
+		spots[ s ].z = TheTerrainLogic->getGroundHeight( spots[ s ].x, spots[ s ].y );
+	}
+	for( size_t s = 0; s < found.ships.size(); ++s )
+	{
+		Object *ship = found.ships[ s ];
+		const Coord3D origin = *ship->getPosition();
+		leaveTacticsAlone( ship->getID() );
+		TacticalStep *step = findTacticalStep( ship->getID() );
+		if( !step->fallingBack )
+			step->fallbackFrame = now;
+		step->fallingBack = TRUE;
+		step->fallbackFrom = origin;
+		step->answerFrame = 0;
+		step->rejoin = FALSE;
+		stepCalmly( ship, step, &spots[ s ] );
+	}
+	DEBUG_LOG(("AI STRIKE frame %d player %d flies %d helicopters off on the word of a launch\n", now, m_player->getPlayerIndex(), (Int)found.ships.size()));
+}
+
+//----------------------------------------------------------------------------------------------------------
 /** How often the loaded helicopters are looked at, and how far back from the fight they may land. */
 static const Int TRANSPORT_CHECK_RATE = LOGICFRAMES_PER_SECOND / 2;
 static const Int DROP_BACKOFF_CELLS = 8;
@@ -17557,6 +17644,7 @@ const AIDifficultyProfile *AIPlayer::getSkillProfile( void ) const
 		if( mask & AIKNOB_ANSWER_ARMY )	m_measuredProfile.m_answerArmy = FALSE;
 		if( mask & AIKNOB_MASS_UNIT )		m_measuredProfile.m_massUnit = FALSE;
 		if( mask & AIKNOB_BASE_WATCH )	m_measuredProfile.m_baseWatchSeconds = 0.0f;
+		if( mask & AIKNOB_STRIKE_DODGE )	m_measuredProfile.m_strikeDodgeSeconds = 0.0f;
 	}
 	if( m_persona == AIPERSONA_NORMAL )
 		return &m_measuredProfile;
@@ -18410,7 +18498,7 @@ void AIPlayer::xfer( Xfer *xfer )
 {
 
 	// version
-	XferVersion currentVersion = 33;		// 2: scout 3: rung and role  4: scouting stamps  5: the capturer  6: parked waves  7: superweapon aims  8: the hijacker  9: tactical steps  10: the ferry and dropped riders  11: the outward placement ring  12: the pressure level  13: falling back  14: gunship Chinooks and the boarding wait  15: transport Chinooks and the lent one  16: healer and raider Helixes  17: the seen-enemy ledger  18: the fist  19: the Ambulances  20: the last Ambulance lost  21: the purchase queue's reservation  22: the measured income  23: the Ambulances bought  24: the starting fortune  25: the factory backlog clocks  26: the personality  27: the team request inbox  28: the last aircraft refused for parking  29: the watched sites and the cooled spots  30: the factory backlog as a window of passes  31: the factories that let a unit out since the last pass  32: the guns known by their shells, the answers to fire  33: the influence map being stamped
+	XferVersion currentVersion = 34;		// 34: the word of a launch not yet acted on  2: scout 3: rung and role  4: scouting stamps  5: the capturer  6: parked waves  7: superweapon aims  8: the hijacker  9: tactical steps  10: the ferry and dropped riders  11: the outward placement ring  12: the pressure level  13: falling back  14: gunship Chinooks and the boarding wait  15: transport Chinooks and the lent one  16: healer and raider Helixes  17: the seen-enemy ledger  18: the fist  19: the Ambulances  20: the last Ambulance lost  21: the purchase queue's reservation  22: the measured income  23: the Ambulances bought  24: the starting fortune  25: the factory backlog clocks  26: the personality  27: the team request inbox  28: the last aircraft refused for parking  29: the watched sites and the cooled spots  30: the factory backlog as a window of passes  31: the factories that let a unit out since the last pass  32: the guns known by their shells, the answers to fire  33: the influence map being stamped
 	XferVersion version = currentVersion;
 	xfer->xferVersion( &version, currentVersion );
 
@@ -18947,6 +19035,9 @@ void AIPlayer::xfer( Xfer *xfer )
 	// the influence map half stamped, or a loaded game's next map would be missing the round's first half
 	if( version >= 33 )
 		m_influenceNext.xfer( xfer );
+
+	if( version >= 34 )
+		xfer->xferUnsignedInt( &m_strikeNoticeFrame );
 
 }  // end xfer
 

@@ -13467,6 +13467,9 @@ TEST(the_difficulty_ladder_climbs_in_every_direction_it_should)
 		CHECK( upper.m_baseWatchSeconds < lower.m_baseWatchSeconds );
 		CHECK( upper.m_baseWatchOdds > lower.m_baseWatchOdds );
 
+		// the word of a launch: its helicopters leave sooner
+		CHECK( upper.m_strikeDodgeSeconds < lower.m_strikeDodgeSeconds );
+
 		// capabilities only ever switch on as you climb, never off again
 		CHECK( upper.m_massBeforeAttacking >= lower.m_massBeforeAttacking );
 		CHECK( upper.m_retreatIndividualUnits >= lower.m_retreatIndividualUnits );
@@ -14075,6 +14078,26 @@ TEST(a_unit_pulled_out_hurt_is_not_sent_back_to_the_gun)
 /** AI.cpp: who ends a hold.  The retreat ends those it looks at.  A hunter on the default team stood calm for
 	 forty seconds, out of every call-up, with nothing to send it on, and a rung with no retreat turned its unit
 	 back halfway to the quiet ground. */
+TEST(a_helicopter_hearing_a_launch_clears_any_blast_it_stands_in)
+{
+	const Real bounds[ 4 ] = { 0.0f, 0.0f, 5000.0f, 5000.0f };
+	const Real reach = 450.0f;
+	Real x, y;
+	// away from the middle of its group
+	aiStrikeDodgeSpot( 1000.0f, 1000.0f, 900.0f, 1000.0f, reach, bounds, 0, &x, &y );
+	CHECK_EQ( 1450.0f, x );
+	CHECK_EQ( 1000.0f, y );
+	// alone: a line of its own, by the tie, and the full distance
+	aiStrikeDodgeSpot( 1000.0f, 1000.0f, 1000.0f, 1000.0f, reach, bounds, 3, &x, &y );
+	CHECK( x > 1000.0f && y > 1000.0f );
+	CHECK( fabs( sqrt( (x - 1000.0f) * (x - 1000.0f) + (y - 1000.0f) * (y - 1000.0f) ) - reach ) < 0.01f );
+	aiStrikeDodgeSpot( 1000.0f, 1000.0f, 1000.0f, 1000.0f, reach, bounds, 0, &x, &y );
+	CHECK( x < 1000.0f && y < 1000.0f );
+	// the map's edge turns it back
+	aiStrikeDodgeSpot( 100.0f, 1000.0f, 200.0f, 1000.0f, reach, bounds, 0, &x, &y );
+	CHECK_EQ( 550.0f, x );
+}
+
 TEST(a_holder_nothing_sends_on_goes_free_once_it_has_stopped)
 {
 	const UnsignedInt hold = 600;
