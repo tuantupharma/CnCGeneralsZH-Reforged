@@ -37,6 +37,7 @@
 #include "Common/GlobalData.h"
 #include "Common/PerfTimer.h"
 #include "Common/Player.h"
+#include "Common/PlayerTemplate.h"
 #include "Common/SpecialPower.h"
 #include "Common/Team.h" 
 #include "Common/ThingFactory.h"
@@ -3254,6 +3255,19 @@ static Real templateFramesToKill( const ThingTemplate *attacker, const ThingTemp
 	return frames;
 }
 
+static Int playerArmyMod( const Player *player )
+{
+	const PlayerTemplate *faction = player->getPlayerTemplate();
+	return faction != NULL ? faction->getModIndex() : -1;
+}
+
+/** A mod's America carries retail's side name, so a scan of every template by side or by kind walks
+ * into the other army: a retail Ranger's job went to a mod's cheaper rifleman nobody can train here. */
+static Bool isOwnArmy( const Player *player, const ThingTemplate *tmpl )
+{
+	return tmpl->getModIndex() == playerArmyMod( player );
+}
+
 /*static*/ void AIPlayer::prepareMatchupTables( void )
 {
 	theFramesToKillCache.clear();
@@ -3261,14 +3275,16 @@ static Real templateFramesToKill( const ThingTemplate *attacker, const ThingTemp
 	theDetectsStealthCache.clear();
 
 	Bool skirmishAI = FALSE;
-	std::vector<AsciiString> sides;
+	typedef std::pair<AsciiString, Int> SideInMod;
+	std::vector<SideInMod> sides;
 	for( Int i = 0; i < ThePlayerList->getPlayerCount(); ++i )
 	{
 		Player *player = ThePlayerList->getNthPlayer( i );
 		if( player->isSkirmishAIPlayer() )
 			skirmishAI = TRUE;
-		if( std::find( sides.begin(), sides.end(), player->getSide() ) == sides.end() )
-			sides.push_back( player->getSide() );
+		const SideInMod side( player->getSide(), playerArmyMod( player ) );
+		if( std::find( sides.begin(), sides.end(), side ) == sides.end() )
+			sides.push_back( side );
 	}
 	if( !skirmishAI )
 		return;
@@ -3283,7 +3299,7 @@ static Real templateFramesToKill( const ThingTemplate *attacker, const ThingTemp
 	{
 		if( tmpl->friend_getBuildCost() <= 0 || tmpl->isKindOf( KINDOF_STRUCTURE ) || tmpl->getBuildable() == BSTATUS_NO )
 			continue;
-		if( std::find( sides.begin(), sides.end(), tmpl->getDefaultOwningSide() ) != sides.end() )
+		if( std::find( sides.begin(), sides.end(), SideInMod( tmpl->getDefaultOwningSide(), tmpl->getModIndex() ) ) != sides.end() )
 			units.push_back( tmpl );
 	}
 	for( size_t a = 0; a < units.size(); ++a )
@@ -3558,11 +3574,11 @@ static Bool templateCanStealth( const ThingTemplate *tmpl )
 }
 
 /** Some unit that goes invisible from the factory waits on this science: the USA's Pathfinder. */
-static Bool unlocksStealthUnit( ScienceType science )
+static Bool unlocksStealthUnit( const Player *player, ScienceType science )
 {
 	for( const ThingTemplate *tmpl = TheThingFactory->firstTemplate(); tmpl; tmpl = tmpl->friend_getNextTemplate() )
 	{
-		if( !templateCanStealth( tmpl ) )
+		if( !templateCanStealth( tmpl ) || !isOwnArmy( player, tmpl ) )
 			continue;
 		for( Int p = 0; p < tmpl->getPrereqCount(); ++p )
 		{
@@ -5560,7 +5576,7 @@ void AIPlayer::doUpgradesAndSkills( void )
 		if (m_persona == AIPERSONA_SNEAKY) {
 			for (Int s = 0; s < skillset->m_numSkills; ++s) {
 				const ScienceType science = skillset->m_skills[s];
-				if (unlocksStealthUnit(science) && m_player->isCapableOfPurchasingScience(science))
+				if (unlocksStealthUnit(m_player, science) && m_player->isCapableOfPurchasingScience(science))
 					m_player->attemptToPurchaseScience(science);
 			}
 		}
@@ -16181,7 +16197,7 @@ static const ThingTemplate *cheapestScoutTemplate( Player *player )
 			continue;		// those have a job
 		if( t->isKindOf( KINDOF_AIRCRAFT ) || t->isKindOf( KINDOF_IMMOBILE ) )
 			continue;
-		if( !player->canBuild( t ) )
+		if( !isOwnArmy( player, t ) || !player->canBuild( t ) )
 			continue;
 
 		Int cost = t->calcCostToBuild( player );
@@ -16652,7 +16668,7 @@ static const ThingTemplate *cheapestCapturerTemplate( Player *player )
 	{
 		if( !t->isKindOf( KINDOF_INFANTRY ) || t->isKindOf( KINDOF_DOZER ) )
 			continue;
-		if( !player->canBuild( t ) )
+		if( !isOwnArmy( player, t ) || !player->canBuild( t ) )
 			continue;
 
 		const Int cost = t->calcCostToBuild( player );
@@ -17002,7 +17018,7 @@ static const ThingTemplate *cheapestHijackerTemplate( Player *player )
 
 	for( const ThingTemplate *t = TheThingFactory->firstTemplate(); t; t = t->friend_getNextTemplate() )
 	{
-		if( !t->isKindOf( KINDOF_INFANTRY ) || !couldBuildUnit( player, t ) )
+		if( !t->isKindOf( KINDOF_INFANTRY ) || !isOwnArmy( player, t ) || !couldBuildUnit( player, t ) )
 			continue;
 
 		const Int cost = t->calcCostToBuild( player );
