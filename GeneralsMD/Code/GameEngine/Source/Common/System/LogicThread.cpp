@@ -422,11 +422,17 @@ void LogicThread::OverlapWindow::open( Bool mayOverlap )
 	 with 4 ms of picture in it.  Wait for the tick only as long as the sync point and a picture still
 	 fit in a 60 Hz frame after it, then draw once more, timed to end as the last tick's length says this
 	 one does, since a picture still going when the tick ends holds the next tick up.  A picture that
-	 fills the frame by itself (vsync, a slow card) gains nothing from a second one, and under vsync that
-	 second one would cost a whole refresh of game speed, so there the tick is simply waited for. */
+	 fills the frame by itself (a slow card) gains nothing from a second one.  A present that waits for
+	 the refresh never gets one either: the sync point ate the start of that refresh, so the picture's
+	 own length looks like room, and the second picture's whole refresh halved the game's speed. */
 static Bool tickOutlastsNextPicture( Real pictureMS )
 {
-	if( !TheGameEngine->isPassPacedByClock() )
+#if defined(_WIN32)
+	const Bool presentWaitsForRefresh = TheGlobalData->m_vsync;
+#else
+	const Bool presentWaitsForRefresh = TRUE;	// the SDL GPU swapchain's VSYNC, whatever was asked for
+#endif
+	if( presentWaitsForRefresh || !TheGameEngine->isPassPacedByClock() )
 		return FALSE;
 	const Real PICTURE_BUDGET_MS = 15.0f;		// 16.7 less the flush and the sync point's slower passes
 	if( pictureMS >= PICTURE_BUDGET_MS )
