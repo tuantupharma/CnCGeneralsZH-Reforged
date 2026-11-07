@@ -208,11 +208,6 @@ public:
 	Real m_groundPitch;					///< a ground vehicle's chassis pitch, roll and lift from that frame, drawn until the next one
 	Real m_groundRoll;
 	Real m_groundZ;
-	Real m_headingLag;					///< a ground vehicle's drawn heading minus its logic heading, sprung back towards 0
-	Real m_headingLagRate;			///< and how fast that changes, a logic frame
-	Real m_headingLogic;				///< the logic heading on m_headingFrame
-	UnsignedInt m_headingFrame;	///< the logic frame the heading spring last stepped on
-	Bool m_headingSeeded;				///< m_headingLogic and m_headingFrame hold a real heading and frame
 	TWheelInfo m_wheelInfo;			///< Wheel offset & angle info for a wheeled type locomotor.
 
 	DrawableLocoInfo();
@@ -523,6 +518,10 @@ public:
   //	inline UnsignedByte getFullyObscuredByShroudWithCheatSpy(void) {return (UnsignedByte)m_drawableFullyObscuredByShroud | 128;}//8 looks like a zero in most fonts
 
 	Bool getDrawsInMirror() const { if( LogicThread::isInsideWindow() ) return m_lookForDraw.drawsInMirror; return BitTest(m_status, DRAWABLE_STATUS_DRAWS_IN_MIRROR) || isKindOf(KINDOF_CAN_CAST_REFLECTIONS); }
+	Bool isNoSaveForDraw() const {
+		if( LogicThread::isInsideWindow() ) return m_lookForDraw.noSave;
+		return testDrawableStatus( DRAWABLE_STATUS_NO_SAVE );
+	}
 
 	/** LOGIC-THREAD.md phase 3, step 3b.  How the drawable looks, as the render reads it: hidden, stealth,
 		* opacity, tint, the mirror and dynamic light flags.  The tick writes these fields beside the render
@@ -534,6 +533,7 @@ public:
 		Bool						hidden;
 		Bool						fullyObscured;
 		Bool						drawsInMirror;
+		Bool						noSave;
 		Bool						receivesDynamicLights;
 		Bool						hasTintColor;
 		Bool						hasSelectionColor;
@@ -631,8 +631,6 @@ public:
 	const TWheelInfo *getWheelInfo(void) const { return m_locoInfo ? &m_locoInfo->m_wheelInfo : NULL; }
 	
 	const DrawableLocoInfo *getLocoInfo() const { return m_locoInfo; }
-	/// how far the drawn hull of a tank or car trails its logic heading (calcPhysicsXformGround), 0 for anything else
-	Real getDrawnHeadingLag() const { return m_locoInfo ? m_locoInfo->m_headingLag : 0.0f; }
 
 	// this method must ONLY be called from the client, NEVER From the logic, not even indirectly.
 	Bool clientOnly_getFirstRenderObjInfo(Coord3D* pos, Real* boundingSphereRadius, Matrix3D* transform);
@@ -790,9 +788,8 @@ protected:
 		Real m_totalRoll;						///< Current total roll for this frame.
 		Real m_totalYaw;						///< Current total yaw for this frame
 		Real m_totalZ;
-		Real m_headingYaw;					///< a ground vehicle's heading lag, turned before the pitch and roll
 
-		PhysicsXformInfo() : m_totalPitch(0), m_totalRoll(0), m_totalYaw(0), m_totalZ(0), m_headingYaw(0) { }
+		PhysicsXformInfo() : m_totalPitch(0), m_totalRoll(0), m_totalYaw(0), m_totalZ(0) { }
 	};
 
 	Bool calcPhysicsXform(PhysicsXformInfo& info);
@@ -897,7 +894,6 @@ private:
 	DisplayString*			m_constructDisplayString;  ///< string to display construction % complete
 	DisplayString*			m_supplyCashDisplayString; ///< string to display the cash left in a supply pile
 	Int									m_lastSupplyCashDisplayed; ///< so the string is only rebuilt when the pile shrinks
-	DisplayString*			m_productionTimeDisplayString; ///< seconds left on what this building is making
 	DisplayString*			m_chargeTimeDisplayString; ///< seconds left on a public timer charging here
 	DisplayString*			m_captionDisplayString;		///< string to display caption
 	DisplayString*			m_groupNumber;						///< string to display the group number of this drawable
@@ -943,14 +939,6 @@ private:
 	//Perhaps we can move this out of Drawable???
 public:
 	static void killStaticImages();
-	/// one rank insignia of the thing's side (RankLadder::insigniaIndex), at `scale` times its health bar
-	/// size; FALSE when there is none. `centred` puts its middle on `x`.
-	static Bool drawRankInsignia( const ThingTemplate *thing, Int insignia, Int x, Int top, Bool centred, Real scale, Color color );
-	static const Image *getRankInsignia( const ThingTemplate *thing, Int insignia );	///< NULL: none drawn
-	static const Image *getRankInsignia( const Object *obj );	///< what obj wears now; NULL at grade 0 and for anything that cannot climb
-	/// its health bar size: DisplayHeight high (12 when unset), width following up to 1.5 times the height, all times `scale`
-	static void rankInsigniaSize( const Image *image, Real scale, Int *width, Int *height );
-
 #ifdef DIRTY_CONDITION_FLAGS
 	// only for StDrawableDirtyStuffLocker!
 	static void friend_lockDirtyStuffForIteration();
@@ -973,6 +961,7 @@ private:
 	void drawEmoticon( const IRegion2D* healthBarRegion );
 	void drawHealthBar( const IRegion2D* healthBarRegion );					///< draw heath bar
 	void drawCaptureProgress( void );																///< the clock under the health bar of the building this one is taking
+	void drawAltitudeLine( void );																	///< the line from an aircraft in the air down to the ground under it
 	void drawHealing( const IRegion2D* healthBarRegion );						///< draw icons
 	void drawEnthusiastic( const IRegion2D* healthBarRegin );				///< draw icons
 #ifdef ALLOW_DEMORALIZE

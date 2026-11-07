@@ -55,6 +55,7 @@
 #include "GameClient/GadgetPushButton.h"
 #include "GameClient/GadgetStaticText.h"
 #include "GameClient/GadgetCheckBox.h"
+#include "GameClient/GadgetRadioButton.h"
 #include "GameClient/MapUtil.h"
 #include "GameClient/EstablishConnectionsMenu.h"
 #include "GameClient/GameWindowTransitions.h"
@@ -63,12 +64,16 @@
 #include "GameNetwork/GameSpy/BuddyDefs.h"
 #include "GameNetwork/GameSpy/PeerDefs.h"
 #include "GameNetwork/GameSpy/PeerThread.h"
+#include "GameNetwork/GameSpy/ThreadUtils.h"
 #include "GameNetwork/GameSpy/PersistentStorageDefs.h"
 #include "GameNetwork/GameSpy/PersistentStorageThread.h"
 #include "GameNetwork/GameSpyOverlay.h"
+#include "GameNetwork/Online/OnlineQueues.h"
+#include "Lib/WideCharFns.h"
 #include "GameNetwork/NAT.h"
 #include "GameNetwork/GUIUtil.h"
 #include "GameNetwork/GameSpy/GSConfig.h"
+#include "GameNetwork/Transport.h"
 
 void WOLDisplaySlotList( void );
 
@@ -256,6 +261,13 @@ static GameWindow *comboBoxTeam[MAX_SLOTS] = {NULL,NULL,NULL,NULL,
 static GameWindow *comboBoxAIPersona[MAX_SLOTS] = {NULL,NULL,NULL,NULL,
 																								NULL,NULL,NULL,NULL };
 static NameKeyType comboBoxAIPersonaID[MAX_SLOTS] = { NAMEKEY_INVALID,NAMEKEY_INVALID,
+																										NAMEKEY_INVALID,NAMEKEY_INVALID,
+																										NAMEKEY_INVALID,NAMEKEY_INVALID,
+																										NAMEKEY_INVALID,NAMEKEY_INVALID };
+
+static GameWindow *comboBoxHandicap[MAX_SLOTS] = {NULL,NULL,NULL,NULL,
+																								NULL,NULL,NULL,NULL };
+static NameKeyType comboBoxHandicapID[MAX_SLOTS] = { NAMEKEY_INVALID,NAMEKEY_INVALID,
 																										NAMEKEY_INVALID,NAMEKEY_INVALID,
 																										NAMEKEY_INVALID,NAMEKEY_INVALID,
 																										NAMEKEY_INVALID,NAMEKEY_INVALID };
@@ -796,6 +808,35 @@ static void handleTeamSelection(int index)
 	}
 }
 
+// HandleHandicapSelection has set the host's slot; the same round as a team pick from here
+static void handleHandicapSelection(Int handicap)
+{
+	GameInfo *myGame = TheGameSpyInfo->getCurrentStagingRoom();
+
+	if (TheGameSpyInfo->amIHost())
+	{
+		// send around a new slotlist
+		myGame->resetAccepted();
+		TheGameSpyInfo->setGameOptions();
+		WOLDisplaySlotList();
+	}
+	else
+	{
+		// request the handicap from the host
+		AsciiString options;
+		options.format("Handicap=%d", handicap);
+		AsciiString hostName;
+		hostName.translate(myGame->getSlot(0)->getName());
+		PeerRequest req;
+		req.peerRequestType = PeerRequest::PEERREQUEST_UTMPLAYER;
+		req.UTM.isStagingRoom = TRUE;
+		req.id = "REQ/";
+		req.nick = hostName.str();
+		req.options = options.str();
+		TheGameSpyPeerMessageQueue->addRequest(req);
+	}
+}
+
 static void handleStartingCashSelection()
 {
   GameInfo *myGame = TheGameSpyInfo->getCurrentStagingRoom();
@@ -1272,6 +1313,7 @@ void WOLDisplaySlotList( void )
 	UpdateSlotList( game, comboBoxPlayer, comboBoxColor,
 		comboBoxPlayerTemplate, comboBoxTeam, buttonAccept, buttonStart, buttonMapStartPosition );
 	UpdateAIPersonaComboBoxes( game, comboBoxAIPersona );
+	UpdateHandicapComboBoxes( game, comboBoxHandicap, comboBoxTeam );
 	UpdateLobbySeatVisuals( game );
 
 	WOLDisplayGameOptions();
@@ -1536,6 +1578,7 @@ void InitWOLGameGadgets( void )
 		//GadgetButtonSetEnabledColor(buttonAccept[0], GameSpyColor[GSCOLOR_ACCEPT_TRUE]);
 
 	InitAIPersonaComboBoxes( parentWOLGameSetup, "GameSpyGameOptionsMenu.wnd", comboBoxAIPersona, comboBoxAIPersonaID );
+	InitHandicapComboBoxes( parentWOLGameSetup, "GameSpyGameOptionsMenu.wnd", comboBoxHandicap, comboBoxHandicapID );
 	InitLobbySeatVisuals( parentWOLGameSetup, "GameSpyGameOptionsMenu.wnd" );
 
 	// the settings page and the chat log share one rectangle; this opens on the chat log
@@ -1574,6 +1617,7 @@ void DeinitWOLGameGadgets( void )
 		comboBoxColor[i] = NULL;
 		comboBoxPlayerTemplate[i] = NULL;
 		comboBoxTeam[i] = NULL;
+		comboBoxHandicap[i] = NULL;
 		buttonAccept[i] = NULL;
 //		buttonStartPosition[i] = NULL;
 		buttonMapStartPosition[i] = NULL;
@@ -1585,6 +1629,141 @@ static Bool initDone = false;
 UnsignedInt lastSlotlistTime = 0;
 UnsignedInt enterTime = 0;
 Bool initialAcceptEnable = FALSE;
+
+/// -onlinemap: the map the -onlinehost host opens its room on, a cache path or a folder name under Maps
+static AsciiString onlineScriptMap( const AsciiString &otherwise )
+{
+	if (!OnlineIsEnabled() || TheGlobalData->m_onlineMap.isEmpty() || TheGlobalData->m_onlineHostGame.isEmpty())
+		return otherwise;
+	AsciiString name = TheGlobalData->m_onlineMap;
+	if (!TheMapCache->findMap( name ))
+		name.format( "maps\\%s\\%s.map", TheGlobalData->m_onlineMap.str(), TheGlobalData->m_onlineMap.str() );
+	if (!TheMapCache->findMap( name ))
+	{
+		DEBUG_LOG(("ONLINE MAP missing name=%s\n", TheGlobalData->m_onlineMap.str()));
+		return otherwise;
+	}
+	DEBUG_LOG(("ONLINE MAP name=%s\n", name.str()));
+	return name;
+}
+
+/* -online scripting in the staging room: -onlinesay says its line once; a -onlinejoin joiner accepts
+	 whenever the Accept button is live and it has not; the -onlinehost host with -onlinestart N presses
+	 Start once N players sit in the room and every one of them has accepted. */
+static void onlineStagingScript( void )
+{
+	if (!OnlineIsEnabled() || !parentWOLGameSetup)
+		return;
+	GameSpyStagingRoom *game = TheGameSpyInfo->getCurrentStagingRoom();
+	if (!game || !game->isInGame() || game->isGameInProgress())
+		return;
+
+	// said once a second player is seated, so somebody reads it
+	static Bool s_said = FALSE;
+	Int seated = 0;
+	for (Int i = 0; i < MAX_SLOTS; ++i)
+		if (game->getSlot( i ) && game->getSlot( i )->isHuman())
+			++seated;
+	if (!s_said && seated >= 2 && TheGlobalData->m_onlineSay.isNotEmpty())
+	{
+		s_said = TRUE;
+		UnicodeString line( MultiByteToWideCharSingleLine( TheGlobalData->m_onlineSay.str() ).c_str() );
+		PeerRequest req;
+		req.peerRequestType = PeerRequest::PEERREQUEST_MESSAGEROOM;
+		req.text = line.str();
+		req.message.isAction = FALSE;
+		TheGameSpyPeerMessageQueue->addRequest( req );
+		DEBUG_LOG(("ONLINE SAY where=staging text=%s\n", TheGlobalData->m_onlineSay.str()));
+	}
+
+	if (!TheGameSpyInfo->amIHost())
+	{
+		const Int local = game->getLocalSlotNum();
+		GameSlot *slot = local >= 0 ? game->getSlot( local ) : NULL;
+		if (TheGlobalData->m_onlineJoinGame.isNotEmpty() && slot && !slot->isAccepted()
+			&& buttonStart && buttonStart->winGetEnabled())
+		{
+			DEBUG_LOG(("ONLINE ACCEPT slot=%d\n", local));
+			TheWindowManager->winSendSystemMsg( parentWOLGameSetup, GBM_SELECTED, (WindowMsgData)buttonStart, buttonStartID );
+		}
+		return;
+	}
+
+	/* -onlineoptions prorules,turbo,unitlimit,randommap: once a second seat is taken the host flips each named
+		 check box and picks a random map through the room's own controls, as clicks would, logging whether each
+		 control was live; Start waits until that is done.  A stats room left them all dead for the host. */
+	static Int s_optionStep = 0;
+	const char *wanted = TheGlobalData->m_onlineOptions.str();
+	if (TheGlobalData->m_onlineOptions.isNotEmpty() && s_optionStep >= 0)
+	{
+		if (seated < 2)
+			return;
+		if (s_optionStep == 0)
+		{
+			const struct { const char *name; GameWindow *box; } boxes[] = {
+				{ "prorules", checkBoxProRules }, { "turbo", checkBoxTurbo }, { "unitlimit", checkBoxUnitLimit } };
+			for (Int i = 0; i < (Int)ARRAY_SIZE(boxes); ++i)
+			{
+				GameWindow *box = boxes[i].box;
+				if (!strstr( wanted, boxes[i].name ) || !box)
+					continue;
+				const Bool live = box->winGetEnabled() && !box->winIsHidden();
+				if (live)
+				{
+					GadgetCheckBoxSetChecked( box, !GadgetCheckBoxIsChecked( box ) );
+					TheWindowManager->winSendSystemMsg( parentWOLGameSetup, GBM_SELECTED, (WindowMsgData)box, box->winGetWindowId() );
+				}
+				DEBUG_LOG(("ONLINE OPTION %s live=%d on=%d\n", boxes[i].name, (Int)live, (Int)GadgetCheckBoxIsChecked( box )));
+			}
+			s_optionStep = strstr( wanted, "randommap" ) ? 1 : -1;
+			return;
+		}
+		if (s_optionStep == 1)
+		{
+			const Bool live = buttonSelectMap && buttonSelectMap->winGetEnabled() && !buttonSelectMap->winIsHidden();
+			s_optionStep = live ? 2 : -1;
+			if (live)
+				TheWindowManager->winSendSystemMsg( parentWOLGameSetup, GBM_SELECTED, (WindowMsgData)buttonSelectMap, buttonSelectMapID );
+			else
+				DEBUG_LOG(("ONLINE OPTION randommap live=0 (Select Map)\n"));
+			return;
+		}
+		GameWindow *tab = TheWindowManager->winGetWindowFromId( NULL, NAMEKEY( "WOLMapSelectMenu.wnd:RadioButtonRandomMaps" ) );
+		GameWindow *ok = TheWindowManager->winGetWindowFromId( NULL, NAMEKEY( "WOLMapSelectMenu.wnd:ButtonOK" ) );
+		if (!tab || !ok)
+			return;		// the map list is still opening
+		const Bool live = tab->winGetEnabled() && !tab->winIsHidden();
+		if (live)
+		{
+			GadgetRadioSetSelection( tab, FALSE );
+			TheWindowManager->winSendSystemMsg( tab->winGetOwner(), GBM_SELECTED, (WindowMsgData)tab, tab->winGetWindowId() );
+			TheWindowManager->winSendSystemMsg( ok->winGetOwner(), GBM_SELECTED, (WindowMsgData)ok, ok->winGetWindowId() );
+		}
+		DEBUG_LOG(("ONLINE OPTION randommap live=%d map=%s\n", (Int)live, game->getMap().str()));
+		s_optionStep = -1;
+		return;
+	}
+
+	static Bool s_started = FALSE;
+	if (s_started || TheGlobalData->m_onlineStart < 2 || TheGlobalData->m_onlineHostGame.isEmpty())
+		return;
+	Int humans = 0;
+	for (Int i = 0; i < MAX_SLOTS; ++i)
+	{
+		GameSlot *slot = game->getSlot( i );
+		if (!slot || !slot->isHuman())
+			continue;
+		if (!slot->isAccepted())
+			return;
+		++humans;
+	}
+	if (humans < TheGlobalData->m_onlineStart)
+		return;
+	s_started = TRUE;
+	DEBUG_LOG(("ONLINE START players=%d\n", humans));
+	StartPressed();
+}
+
 //-------------------------------------------------------------------------------------------------
 /** Initialize the Lan Game Options Menu */
 //-------------------------------------------------------------------------------------------------
@@ -1653,7 +1832,8 @@ void WOLGameSetupMenuInit( WindowLayout *layout, void *userData )
 		hostSlot->setPlayerTemplate( customPref.getPreferredFaction() );
 		hostSlot->setNATBehavior((FirewallHelperClass::FirewallBehaviorType)natPref.getFirewallBehavior());
 		hostSlot->setPingString(TheGameSpyInfo->getPingString());
-		game->setMap(customPref.getPreferredMap());
+		const AsciiString hostMap = onlineScriptMap( customPref.getPreferredMap() );
+		game->setMap(hostMap);
 
 		// Recorded stats games can never limit superweapons, limit armies, or have inflated starting cash.
 		// This should probably be enforced at the gamespy level as well, to prevent expoits.
@@ -1689,7 +1869,7 @@ void WOLGameSetupMenuInit( WindowLayout *layout, void *userData )
 			slot->setState( SLOT_OPEN );
 		}
 
-		AsciiString lowerMap = customPref.getPreferredMap();
+		AsciiString lowerMap = hostMap;
 		lowerMap.toLower();
 		std::map<AsciiString, MapMetaData>::iterator it = TheMapCache->find(lowerMap);
 		if (it != TheMapCache->end())
@@ -1886,7 +2066,8 @@ void WOLGameSetupMenuUpdate( WindowLayout * layout, void *userData)
 	}
 
 	GameSpyStagingRoom *room = TheGameSpyInfo->getCurrentStagingRoom();
-	if (room && !room->isGameInProgress())
+	// the shutdown clears the gadgets before its exit animation plays, and this runs through that animation
+	if (parentWOLGameSetup && room && !room->isGameInProgress())
 		fitRandomMapToRoom(room);
 
 	if (TheShell->isAnimFinished() && !buttonPushed && TheGameSpyPeerMessageQueue)
@@ -1937,7 +2118,9 @@ void WOLGameSetupMenuUpdate( WindowLayout * layout, void *userData)
 
 		Bool isHosting = TheGameSpyInfo->amIHost(); // only while in game setup screen
 		isHosting = isHosting || (TheGameSpyGame && TheGameSpyGame->isInGame() && TheGameSpyGame->amIHost()); // while in game
-		if (!isHosting && !lastSlotlistTime && Clock_Milliseconds() > enterTime + 10000)
+		// the first slot list comes over a player-to-player connection when a route is set, and at 300 ms of
+		// ping that connection can still be coming up after ten seconds
+		if (!isHosting && !lastSlotlistTime && Clock_Milliseconds() > enterTime + (TheTransportRoute ? 30000 : 10000))
 		{
 			// don't do this if we're disconnected
 			if (TheGameSpyPeerMessageQueue->isConnected())
@@ -1985,6 +2168,8 @@ void WOLGameSetupMenuUpdate( WindowLayout * layout, void *userData)
 				return;
 			}
 		}
+
+		onlineStagingScript();
 
 		PeerResponse resp;
 
@@ -2211,6 +2396,8 @@ void WOLGameSetupMenuUpdate( WindowLayout * layout, void *userData)
 
 			case PeerResponse::PEERRESPONSE_MESSAGE:
 				{
+					if (OnlineIsEnabled())
+						DEBUG_LOG(("ONLINE CHAT where=staging from=%s text=%s\n", resp.nick.c_str(), WideCharAsUtf8( resp.text.c_str() ).str()));
 					TheGameSpyInfo->addChat(resp.nick.c_str(), resp.message.profileID,
 						UnicodeString(resp.text.c_str()), !resp.message.isPrivate, resp.message.isAction, listboxGameSetupChat);
 				}
@@ -2649,6 +2836,14 @@ void WOLGameSetupMenuUpdate( WindowLayout * layout, void *userData)
 										DEBUG_LOG(("Rejecting invalid team %d\n", val));
 									}
 								}
+								else if (key == "Handicap")
+								{
+									if (ApplyHandicapRequest(game, slot, val))
+									{
+										change = true;
+										shouldUnaccept = true;
+									}
+								}
 								else if (key == "IP")
 								{
 									if (uVal != slot->getIP())
@@ -2918,6 +3113,10 @@ WindowMsgHandledType WOLGameSetupMenuSystem( GameWindow *window, UnsignedInt msg
           TheGameSpyInfo->getCurrentStagingRoom()->resetAccepted();
           TheGameSpyInfo->setGameOptions();
           WOLDisplaySlotList();
+        }
+        else if ( Int handicap = HandleHandicapSelection( TheGameSpyInfo->getCurrentStagingRoom(), comboBoxHandicap, comboBoxHandicapID, (NameKeyType)controlID ) )
+        {
+          handleHandicapSelection( handicap );
         }
         else
         {

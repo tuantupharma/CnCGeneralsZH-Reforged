@@ -40,6 +40,20 @@
  * The transport layer handles the UDP socket for the game, and will packetize and
  * de-packetize multiple ACK/CommandPacket/etc packets into larger aggregates.
  */
+/**
+ * Where a Transport sends and reads when it has no UDP socket of its own. Internet play sets this for as
+ * long as a player is signed in, and packets go over a connection the lobby service brokered. Null everywhere
+ * else: LAN, skirmish and -netgame never touch it.
+ */
+class TransportRoute
+{
+public:
+	virtual ~TransportRoute() {}
+	virtual Int send(const unsigned char *buf, UnsignedInt len, UnsignedInt ip, UnsignedShort port) = 0;
+	virtual Int recv(unsigned char *buf, UnsignedInt len, sockaddr_in *from) = 0;
+};
+extern TransportRoute *TheTransportRoute;
+
 // we only ever allocate one of there, and it is quite large, so we really DON'T want
 // it to be a MemoryPoolObject (srj)
 class Transport //: public MemoryPoolObject
@@ -66,6 +80,16 @@ public:
 	/// The address the system bound when the last init() was refused because it was not the one asked
 	/// for (a VPN split tunnel or a firewall redirecting the socket), 0 otherwise
 	UnsignedInt getRedirectedIP( void ) const { return m_redirectedIP; }
+
+	/// -relay: the virtual address the relay gave this machine, 0 before the first init() reached it
+	static UnsignedInt getRelayIP( void );
+
+	/// -online: HELLO_AUTH with the login's ticket against OnlineGetRelayEndpoint (blocks up to five seconds)
+	static Bool openOnlineRelay( void );
+	/// -online: pump the relay socket (keepalive) while no Transport is attached; once a frame
+	static void keepOnlineRelay( void );
+	/// -online: drop the session unless a Transport still uses it
+	static void closeOnlineRelay( void );
 
 #if !defined(_WIN32)
 	/* Port defect 29 (udp.h): shareAddress(TRUE) before init lets this socket share its port with another
@@ -101,6 +125,7 @@ private:
 	Bool m_winsockInit;
 	UDP *m_udpsock;
 	UnsignedInt m_redirectedIP;
+	Bool m_relayed;		///< -relay: no socket of its own; every datagram goes through the one relay socket (Transport.cpp)
 #if !defined(_WIN32)
 	Bool m_shareAddress;
 	Bool m_broadcastsOnly;
@@ -121,6 +146,13 @@ private:
 	UnsignedInt m_lastSecond;
 
 	Bool isGeneralsPacket( TransportMessage *msg );
+	void resetQueues( UnsignedShort port );
+	void receivePacket( TransportMessage &msg, Int len, UnsignedInt addr, UnsignedShort port, UnsignedInt now );
+	Bool initRelayed( UnsignedInt ip, UnsignedShort port );
+	static Bool connectRelay( const AsciiString &host, UnsignedShort relayPort );
+	void detachRelay( void );
+	Int writeRelayed( TransportMessage &msg );
+	static void pumpRelay( void );
 };
 
 #endif // _TRANSPORT_H_

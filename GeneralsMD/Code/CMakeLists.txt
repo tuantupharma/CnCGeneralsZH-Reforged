@@ -129,7 +129,9 @@ set(VENDORED
     ${COMP}/ZLib/deflate.c
     ${COMP}/LZHCompress/CompLibSource/Lzhl.cpp
     # The GameSpy SDK is built everywhere since B6 (see "gamespy" below).
-    ${CMAKE_CURRENT_SOURCE_DIR}/Libraries/Source/GameSpy/CMakeLists.txt)
+    ${CMAKE_CURRENT_SOURCE_DIR}/Libraries/Source/GameSpy/CMakeLists.txt
+    # mbedTLS, the online service's TLS, everywhere too (see "mbedtls" below).
+    ${CMAKE_CURRENT_SOURCE_DIR}/Libraries/Source/mbedtls/library/ssl_tls.c)
 # The DirectX 8 headers are only read by targets this file does not define on macOS, and A2 decides
 # what a Mac fetch pulls down.  Demanding them here would stop a Mac configure over files nothing
 # portable includes.
@@ -864,6 +866,19 @@ set(GS_BUILD_TESTS      OFF CACHE BOOL "" FORCE)
 set(GS_INCLUDE_VOICE    OFF CACHE BOOL "" FORCE)
 add_subdirectory(${LIBSRC}/GameSpy ${CMAKE_CURRENT_BINARY_DIR}/gamespy)
 
+# ---- mbedtls --------------------------------------------------------------
+# mbedTLS 3.6.7 (Apache-2.0), fetched by both vendor scripts: the TLS under the online service's lobby
+# connection (onlineconnection below), on every platform, since WinHTTP would leave macOS and Linux out.
+# Upstream's CMakeLists builds programs and tests and wants Python for files the release tarball already
+# carries, so library/*.c is compiled here with the stock mbedtls_config.h.  Windows' entropy source is
+# BCryptGenRandom, and net_sockets.c is Winsock there.
+file(GLOB MBEDTLS_SOURCES ${LIBSRC}/mbedtls/library/*.c)
+add_library(mbedtls STATIC ${MBEDTLS_SOURCES})
+target_include_directories(mbedtls PUBLIC ${LIBSRC}/mbedtls/include PRIVATE ${LIBSRC}/mbedtls/library)
+if(ZH_PLATFORM_WINDOWS)
+  target_link_libraries(mbedtls PUBLIC ws2_32 bcrypt)
+endif()
+
 # ---- SDL3 and miniaudio: the platform layer off Windows (decision 3) -------------------------------
 # Both are fetched by Tools/vendor.sh and neither is fetched on Windows, which keeps Win32Device and
 # Miles.  Nothing links either yet: C2/C3 take SDL3's window and events, D4 its GPU API, C4 miniaudio.
@@ -1053,6 +1068,17 @@ list(REMOVE_ITEM GAMEENGINE_SOURCES
 # includer - the live code went to GameNetwork/GameSpy/ instead.
 list(REMOVE_ITEM GAMEENGINE_SOURCES
   ${GE}/Source/GameNetwork/GameSpyGameInfo.cpp)
+# The online service's connection (TLS line, JSON reader and writer) knows nothing of the engine and is a
+# library of its own, so test_online links it without the game.  The adapters beside it stay in gameengine.
+list(REMOVE_ITEM GAMEENGINE_SOURCES
+  ${GE}/Source/GameNetwork/Online/OnlineConnection.cpp)
+add_library(onlineconnection STATIC ${GE}/Source/GameNetwork/Online/OnlineConnection.cpp)
+target_include_directories(onlineconnection PUBLIC ${GE}/Include)
+target_link_libraries(onlineconnection PRIVATE mbedtls)
+set_target_properties(onlineconnection PROPERTIES CXX_STANDARD 17)
+if(ZH_PLATFORM_POSIX)
+  target_link_libraries(onlineconnection PUBLIC Threads::Threads)
+endif()
 # Platform bodies of one interface: each side's file is left out of the other's build, so Windows
 # gets exactly the sources it had.  B5, bucket (c).
 #  - StackDump.cpp: dbghelp symbol lookup and a structured-exception context walk, Windows only.
@@ -1095,11 +1121,40 @@ endif()
 
 # ZH_NOT_YET_PORTABLE: defined on macOS, kept out of the default build there until B1-B6 land.
 # The link list below is left exactly as it is on purpose - B6 owns it.
+# The lobby service client (GameNetwork/GeneralsOnline) needs C++20 and two libraries the plain build does not
+# fetch, so it is a library of its own and comes only when Tools/online-libs.ps1 has been run.  Without them the
+# game builds as before and its Online button does what it did.
+file(GLOB_RECURSE ZH_ONLINE_SOURCES ${GE}/Source/GameNetwork/GeneralsOnline/*.cpp)
+list(REMOVE_ITEM GAMEENGINE_SOURCES ${ZH_ONLINE_SOURCES})
+
 add_library(gameengine STATIC ${ZH_NOT_YET_PORTABLE} ${GAMEENGINE_SOURCES})
 # GameMemory.cpp asks MSVC for the engine library by the build's name (#pragma comment(lib, "GameEngineDebug")
 # under _DEBUG), so a Debug build names it that way.  Release keeps gameengine.lib, which "GameEngine" finds.
 if(MSVC)
   set_target_properties(gameengine PROPERTIES OUTPUT_NAME_DEBUG GameEngineDebug)
+endif()
+
+set(ZH_ONLINE_LIBS ${LIBSRC}/online/vcpkg_installed/x64-windows-static)
+if(ZH_PLATFORM_WINDOWS AND EXISTS ${ZH_ONLINE_LIBS}/include/steam/steamnetworkingsockets.h AND CMAKE_GENERATOR_PLATFORM STREQUAL "x64")
+  message(STATUS "Online: lobby service client on (${ZH_ONLINE_LIBS})")
+  list(APPEND CMAKE_PREFIX_PATH ${ZH_ONLINE_LIBS})
+  set(OPENSSL_ROOT_DIR ${ZH_ONLINE_LIBS})
+  set(OPENSSL_USE_STATIC_LIBS ON)
+  set(Protobuf_USE_STATIC_LIBS ON)
+  find_package(CURL CONFIG REQUIRED)
+  find_package(GameNetworkingSockets CONFIG REQUIRED)
+  add_library(zhonline STATIC ${ZH_ONLINE_SOURCES})
+  set_target_properties(zhonline PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
+  target_compile_options(zhonline PRIVATE /FIPreRTS.h)
+  target_include_directories(zhonline PRIVATE
+    $<TARGET_PROPERTY:gameengine,INTERFACE_INCLUDE_DIRECTORIES>
+    ${GE}/Include/GameNetwork/GeneralsOnline)
+  target_compile_definitions(zhonline PRIVATE
+    $<TARGET_PROPERTY:gameengine,INTERFACE_COMPILE_DEFINITIONS>
+    ZH_ONLINE GENERALS_ONLINE _DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR CURL_STATICLIB)
+  target_link_libraries(zhonline PRIVATE CURL::libcurl GameNetworkingSockets::GameNetworkingSockets_s)
+  target_compile_definitions(gameengine PRIVATE ZH_ONLINE)
+  target_link_libraries(gameengine PUBLIC zhonline)
 endif()
 
 # N1 (decision 5): the build fingerprint GlobalData.cpp folds into m_exeCRC in place of the executable's
@@ -1204,7 +1259,7 @@ if(ZH_PLATFORM_WINDOWS)
 endif()
 target_link_libraries(gameengine PUBLIC
   ${ZH_GAMEENGINE_WW3D2} wwlib wwmath wwsaveload wwdebug wwutil compression ${ZH_GAMEENGINE_DEBUGLIB} ${ZH_GAMEENGINE_WWDOWNLOAD}
-  benchmark ${ZH_GAMEENGINE_EABROWSERDISPATCH} ${ZH_GAMEENGINE_PROFILE} gamespy
+  benchmark ${ZH_GAMEENGINE_EABROWSERDISPATCH} ${ZH_GAMEENGINE_PROFILE} gamespy onlineconnection
   ${ZH_GAMEENGINE_DINPUT8} ${ZH_GAMEENGINE_WIN32_SDK_LIBS})
 
 # B1's gate: the bytes a UnicodeString puts into the replay and network CRC, before and after
@@ -1613,7 +1668,9 @@ if(ZH_PLATFORM_POSIX)
   # the SDL GPU cloud backend and its runtime capability query.
   target_sources(w3ddevice PRIVATE
     ${ZH_POSIX_RENDER_DIR}/SdlHazardCloud.cpp
-    ${ZH_POSIX_RENDER_DIR}/SdlHazardCloudEmbers.cpp)
+    ${ZH_POSIX_RENDER_DIR}/SdlHazardCloudEmbers.cpp
+    ${ZH_POSIX_RENDER_DIR}/SdlHazardCloudShared.cpp
+    ${ZH_POSIX_RENDER_DIR}/SdlHazardCloudSharedShader.cpp)
   set_target_properties(w3ddevice PROPERTIES CXX_STANDARD 17)
   target_include_directories(w3ddevice PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/GameEngineDevice/Include
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/Stubs ${CMAKE_CURRENT_SOURCE_DIR}/Main
@@ -1692,10 +1749,10 @@ endif()
 set(GENERATED ${CMAKE_CURRENT_BINARY_DIR}/generated)
 file(WRITE ${GENERATED}/BuildVersion.h
 "// Generated by CMake, standing in for Tools/buildVersionUpdate.\n"
-"#define VERSION_STRING \"v3.5.1\"\n"
+"#define VERSION_STRING \"v3.8.0\"\n"
 "#define VERSION_MAJOR 3\n"
-"#define VERSION_MINOR 5\n"
-"#define VERSION_BUILDNUM 1\n")
+"#define VERSION_MINOR 8\n"
+"#define VERSION_BUILDNUM 0\n")
 file(WRITE ${GENERATED}/GeneratedVersion.h
 "// Generated by CMake, standing in for Tools/versionUpdate.\n"
 "#define LOCAL_BUILD_STRING \"0\"\n"
@@ -2241,6 +2298,19 @@ target_sources(test_hazard_cloud_policy PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/GameEngineDevice/Source/W3DDevice/GameClient/HazardCloudFlow.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/GameEngineDevice/Source/W3DDevice/GameClient/HazardCloudUnsupported.cpp)
 
+add_lib_test(test_hazard_cloud_bake)
+target_include_directories(test_hazard_cloud_bake PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/Libraries/Include)
+add_lib_test(test_hazard_cloud_shared)
+set_target_properties(test_hazard_cloud_shared PROPERTIES CXX_STANDARD 17)
+target_include_directories(test_hazard_cloud_shared PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/Libraries/Include)
+target_sources(test_hazard_cloud_shared PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/GameEngineDevice/Source/W3DDevice/GameClient/HazardCloudSharedModel.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/GameEngineDevice/Source/W3DDevice/GameClient/HazardCloud.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/GameEngineDevice/Source/W3DDevice/GameClient/HazardCloudCore.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/GameEngineDevice/Source/W3DDevice/GameClient/HazardCloudShader.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/GameEngineDevice/Source/W3DDevice/GameClient/HazardCloudFlow.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/GameEngineDevice/Source/W3DDevice/GameClient/HazardCloudUnsupported.cpp)
+
 add_lib_test(test_wwmath wwmath wwlib wwsaveload wwdebug)
 target_include_directories(test_wwmath PRIVATE ${WW}/WWLib ${WW}/WWSaveLoad ${WW}/Wwutil)
 # R1, smooth motion: W3DSmoothMotion.h's blend and verdicts, header-only over WWMath.
@@ -2281,6 +2351,24 @@ if(ZH_PLATFORM_WINDOWS)
 endif()
 
 add_lib_test(test_compression compression)
+
+# The online service's connection: the JSON line reader and writer, and a TLS loopback against a server
+# inside the test, verified against a CA the test makes on the spot (no key or certificate is committed).
+# Then the adapters (OnlinePeer, OnlineBuddy, OnlineStats) fed scripted server lines, which are engine
+# code: so it links gameengine the way test_water_grid does.
+add_lib_test(test_online gameengine onlineconnection mbedtls)
+target_sources(test_online PRIVATE ${TESTS}/test_gameengine_stubs.cpp)
+set_target_properties(test_online PROPERTIES CXX_STANDARD 17)
+if(ZH_PLATFORM_POSIX)
+  target_link_libraries(test_online PRIVATE posixdevice w3ddevice)
+else()
+  target_sources(test_online PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/GameEngineDevice/Source/W3DDevice/GameClient/HazardCloudUnsupported.cpp)
+endif()
+if(MSVC)
+  target_sources(test_online PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/Tests/debug_build_stubs.cpp)
+  target_compile_definitions(test_online PRIVATE ZH_DEBUG_STUBS_ENGINE)
+endif()
 
 # .w3d on-disk layout pins.  Deliberately OUTSIDE the ZH_PLATFORM_WINDOWS guard
 # below: it is header-only, asserts sizeof/offsetof and links nothing but the
@@ -2423,17 +2511,6 @@ set_target_properties(test_water_grid PROPERTIES CXX_STANDARD 17)
 if(ZH_PLATFORM_POSIX)
   target_link_libraries(test_water_grid PRIVATE posixdevice w3ddevice)
 endif()
-# The rank ladder's arithmetic (RankLadder, GlobalData.cpp): thresholds, pins, the one-grade clip, the
-# stat split.  Linked like test_water_grid.
-add_lib_test(test_rank_ladder gameengine)
-target_sources(test_rank_ladder PRIVATE ${TESTS}/test_gameengine_stubs.cpp)
-set_target_properties(test_rank_ladder PROPERTIES CXX_STANDARD 17)
-# the shipped Perk_ lines, read from the tracked master rather than Run/'s copy
-target_compile_definitions(test_rank_ladder PRIVATE
-  BALANCE_REFORGED_INI="${CMAKE_CURRENT_SOURCE_DIR}/Data/INI/BalanceReforged.ini")
-if(ZH_PLATFORM_POSIX)
-  target_link_libraries(test_rank_ladder PRIVATE posixdevice w3ddevice)
-endif()
 # Off Windows the device layer's hooks are the game's own: the renderer's from W3DDevice, the CD
 # manager from PosixDevice.  On Windows the test's own stubs stand in for gameenginedevice, which it
 # does not link (B6).
@@ -2442,7 +2519,7 @@ if(ZH_PLATFORM_POSIX)
 else()
   # FunctionLexicon pulls in OptionsMenu, which queries the cloud capability.
   # These tests omit gameenginedevice, so use its real no-backend entry points.
-  foreach(name test_gameengine test_terrain_golden test_water_grid test_rank_ladder)
+  foreach(name test_gameengine test_terrain_golden test_water_grid)
     target_sources(${name} PRIVATE
       ${CMAKE_CURRENT_SOURCE_DIR}/GameEngineDevice/Source/W3DDevice/GameClient/HazardCloudUnsupported.cpp)
   endforeach()
@@ -2463,13 +2540,14 @@ target_compile_definitions(test_gameengine PRIVATE
   GAMEENGINE_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/GameEngine"
   FXLIST_REFORGED_INI="${CMAKE_CURRENT_SOURCE_DIR}/Data/INI/FXListReforged.ini"
   WEAPON_REFORGED_INI="${CMAKE_CURRENT_SOURCE_DIR}/Data/INI/WeaponReforged.ini"
+  MULTIPLAYER_REFORGED_INI="${CMAKE_CURRENT_SOURCE_DIR}/Data/INI/MultiplayerReforged.ini"
   OPTIONS_MENU_WND="${CMAKE_CURRENT_SOURCE_DIR}/Data/Window/Menus/OptionsMenuClassic.wnd"
   PLATE_TEXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/Data/Art/Textures")
 
-# W3: these four link the engine without its device and WinMain, whose Debug-only names it reads
+# W3: these three link the engine without its device and WinMain, whose Debug-only names it reads
 # (Tests/debug_build_stubs.cpp; empty outside _DEBUG).
 if(MSVC)
-  foreach(name test_gameengine test_terrain_golden test_water_grid test_rank_ladder)
+  foreach(name test_gameengine test_terrain_golden test_water_grid)
     target_sources(${name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/Tests/debug_build_stubs.cpp)
     target_compile_definitions(${name} PRIVATE ZH_DEBUG_STUBS_ENGINE)
   endforeach()
@@ -2522,7 +2600,7 @@ add_test(NAME miles_smoke COMMAND miles_smoke
 # the test calls it by the same names.
 add_executable(test_miles_effects ${TESTS}/test_miles_effects.cpp ${WW}/Miles6/miniaudio/miles_miniaudio.cpp)
 set_source_files_properties(${TESTS}/test_miles_effects.cpp PROPERTIES COMPILE_DEFINITIONS MSS_BACKEND_PREFIX=MA_)
-target_include_directories(test_miles_effects PRIVATE ${WW}/Miles6/include ${WW}/WWLib)
+target_include_directories(test_miles_effects PRIVATE ${WW}/Miles6/include ${WW}/WWLib ${CMAKE_CURRENT_SOURCE_DIR}/GameEngineDevice/Include)
 target_link_libraries(test_miles_effects PRIVATE test_harness miniaudio)
 add_test(NAME test_miles_effects COMMAND test_miles_effects)
 endif()  # ZH_PLATFORM_WINDOWS - device and codec smoke tests
@@ -2554,7 +2632,7 @@ else()
 endif()
 # The same file Windows runs: the air, room and duck in the offline mix.
 add_executable(test_miles_effects ${TESTS}/test_miles_effects.cpp)
-target_include_directories(test_miles_effects PRIVATE ${WW}/Miles6/include)
+target_include_directories(test_miles_effects PRIVATE ${WW}/Miles6/include ${CMAKE_CURRENT_SOURCE_DIR}/GameEngineDevice/Include)
 target_link_libraries(test_miles_effects PRIVATE test_harness milesaudio)
 add_test(NAME test_miles_effects COMMAND test_miles_effects)
 
@@ -2707,6 +2785,9 @@ target_link_libraries(fs_oracle PRIVATE wwlib wwdebug)
 # SKIPPED for that step and says how many it did not check.
 find_program(ZH_SPIRV_VAL spirv-val)
 add_lib_test(test_shader_sdl ffvertex engineshader sdl3shadercompile)
+target_sources(test_shader_sdl PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/GameEngineDevice/Source/W3DDevice/GameClient/HazardCloudShader.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/GameEngineDevice/Source/PosixDevice/Render/SdlHazardCloudSharedShader.cpp)
 # Reflect the Linux Modern water blocks against their CPU upload structures.
 if(ZH_PLATFORM_LINUX)
   target_link_libraries(test_shader_sdl PRIVATE spirv-cross-c)
