@@ -61,13 +61,11 @@ enum
 	/// samples are one cell apart until the route is longer than this, then they stretch
 	CROWD_MAX_SAMPLES			= 160,
 
-	/// a lane taken to get round somebody is held this long, so it cannot flap side to side
-	CROWD_HOLD_FRAMES			= 3 * LOGICFRAMES_PER_SECOND / 2,
 
-	/* How many samples either side of a bridge are held to the deck's width, so the approach funnels
-		 in.  Six cells and not four: a unit that is still a lane wide of the deck when the band shuts
-		 is a unit arriving at the abutment sideways, and the sideways step is rate-limited to a
-		 quarter of its speed.  The funnel has to be longer than the time that step takes. */
+	/* How many samples either side of a bridge lose their band as well, so the approach funnels in.
+		 Six cells and not four: a unit that is still a lane wide of the centre when the band shuts is
+		 a unit arriving at the abutment sideways, and the sideways step is rate-limited to a quarter
+		 of its speed.  The funnel has to be longer than the time that step takes. */
 	CROWD_BRIDGE_SEAL			= 6,
 
 	/// how far ahead of itself a unit steers, in cells, before its own body length is added
@@ -82,6 +80,8 @@ enum
 		 keeps its shape from the field to the door. */
 	CROWD_MAX_LANES				= 5
 };
+/// a lane taken to get round somebody is held this long, so it cannot flap side to side
+#define CROWD_HOLD_FRAMES ((Int)(3 * LOGICFRAMES_PER_GAME_SECOND / 2))
 
 /** How many lanes to lay across `span` of drivable ground, `spacing` apart: what the ground holds,
 		capped at CROWD_MAX_LANES, and never more lanes than there are bodies to put in them
@@ -178,11 +178,10 @@ public:
 	void buildForTest( const Coord3D *pts, Int count, Real halfWidth,
 										 const PathfindLayerEnum *layers = NULL, const Real *halfWidths = NULL );
 
-	/// hold the ground either side of every bridge deck to a funnel onto the deck's own width
+	/// close the band on every bridge deck and on the ground either side of one
 	void sealBridges( void );
 
 private:
-	void holdApproach( Int end, Int step );		///< see sealBridges
 	/// the sample at or before `along`, with the fraction of the way to the next one
 	Int bracket( Real along, Real *frac ) const;
 

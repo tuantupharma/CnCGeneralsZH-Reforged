@@ -199,6 +199,10 @@ static const LookupListRec GameMessageMetaTypeNames[] =
 	{ "TOGGLE_GUARD",														GameMessage::MSG_META_TOGGLE_GUARD },
 	{ "TOGGLE_MOVE",														GameMessage::MSG_META_TOGGLE_MOVE },
 	{ "TOGGLE_PAUSE",														GameMessage::MSG_META_TOGGLE_PAUSE },
+	{ "TOGGLE_RADAR_COLORS",										GameMessage::MSG_META_TOGGLE_RADAR_COLORS },
+	{ "TOGGLE_COMMAND_TAB_BUILDINGS",						GameMessage::MSG_META_TOGGLE_COMMAND_TAB_BUILDINGS },
+	{ "TOGGLE_COMMAND_TAB_GROUND",							GameMessage::MSG_META_TOGGLE_COMMAND_TAB_GROUND },
+	{ "TOGGLE_COMMAND_TAB_AIRCRAFT",						GameMessage::MSG_META_TOGGLE_COMMAND_TAB_AIRCRAFT },
 	{ "DEPLOY",																		GameMessage::MSG_META_DEPLOY },
 	{ "CREATE_FORMATION",													GameMessage::MSG_META_CREATE_FORMATION },
 	{ "FOLLOW",																		GameMessage::MSG_META_FOLLOW },
@@ -911,6 +915,39 @@ void MetaMap::keepArrowsForCamera()
 			DEBUG_LOG(( "HOTKEYS: %s on a bare arrow, moved to Ctrl so the arrow scrolls\n", findGameMessageNameByType( map->m_meta ) ));
 			map->m_modState = CTRL;
 		}
+	}
+
+	// The fork's own commands no language's CommandMap.ini knows, on a key the shipped files leave
+	// free, unless the language file already binds the command or gives that key to something else.
+	// Hotkeys.ini is read after this, so a player's own key for either stands.
+	static const struct { GameMessage::Type meta; MappableKeyType key; MappableKeyModState mods; } DEFAULTS[] =
+	{
+		{ GameMessage::MSG_META_TOGGLE_RADAR_COLORS, MK_F11, NONE },
+		// the smoke signals on Alt with Z, X and C, the launcher's own default (HotKey.cpp's
+		// LAUNCHER_DEFAULTS), which it leaves out of Hotkeys.ini as no change of the player's: without
+		// these a game run with no launcher-written file had the signals on no key at all, and the
+		// signal keys' tooltips named none
+		{ GameMessage::MSG_META_SIGNAL_ATTACK, MK_Z, ALT },
+		{ GameMessage::MSG_META_SIGNAL_DEFEND, MK_X, ALT },
+		{ GameMessage::MSG_META_SIGNAL_ATTENTION, MK_C, ALT },
+		// the bar's three command tabs, Q W E being the grid's top row and free under Ctrl
+		{ GameMessage::MSG_META_TOGGLE_COMMAND_TAB_BUILDINGS, MK_Q, CTRL },
+		{ GameMessage::MSG_META_TOGGLE_COMMAND_TAB_GROUND, MK_W, CTRL },
+		{ GameMessage::MSG_META_TOGGLE_COMMAND_TAB_AIRCRAFT, MK_E, CTRL },
+	};
+	for( size_t each = 0; each < sizeof( DEFAULTS ) / sizeof( DEFAULTS[ 0 ] ); ++each )
+	{
+		Bool taken = FALSE;
+		for( const MetaMapRec *map = m_metaMaps; map && !taken; map = map->m_next )
+			taken = map->m_meta == DEFAULTS[ each ].meta ||
+				( map->m_key == DEFAULTS[ each ].key && map->m_modState == DEFAULTS[ each ].mods && map->m_usableIn != COMMANDUSABLE_NONE );
+		if( taken )
+			continue;
+		MetaMapRec *rec = getMetaMapRec( DEFAULTS[ each ].meta );
+		rec->m_key = DEFAULTS[ each ].key;
+		rec->m_modState = DEFAULTS[ each ].mods;
+		rec->m_usableIn = COMMANDUSABLE_GAME;
+		rec->m_category = CATEGORY_INTERFACE;
 	}
 }
 

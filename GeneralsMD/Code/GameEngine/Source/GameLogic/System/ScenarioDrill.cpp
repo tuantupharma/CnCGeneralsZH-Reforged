@@ -44,8 +44,10 @@
 #include "GameLogic/Module/AIUpdate.h"
 #include "GameLogic/Module/BehaviorModule.h"
 #include "GameLogic/Module/CreateModule.h"
+#include "GameLogic/Module/PhysicsUpdate.h"
 #include "GameLogic/Module/ProductionUpdate.h"
 #include "GameLogic/Module/SpecialPowerModule.h"
+#include "GameLogic/Module/UpgradeModule.h"
 #include "GameLogic/Object.h"
 #include "GameLogic/ScenarioDrill.h"
 #include "GameLogic/TerrainLogic.h"
@@ -53,6 +55,7 @@
 #include "GameClient/ParticleSys.h"
 #include "GameClient/TerrainVisual.h"	// removeAllBibs, after the build check lights them
 #include "GameLogic/PartitionManager.h"
+#include "GameLogic/RankInfo.h"
 #include "GameLogic/Module/BodyModule.h"
 #include "GameLogic/Weapon.h"
 #include "GameClient/ReachOverlay.h"
@@ -236,6 +239,8 @@ static Bool parseActionType( const AsciiString &token, ScenarioActionType *actio
 		*action = SCENARIO_ACTION_SHIFTUPGRADE;
 	else if (token == "construct")
 		*action = SCENARIO_ACTION_CONSTRUCT;
+	else if (token == "shiftconstruct")
+		*action = SCENARIO_ACTION_SHIFTCONSTRUCT;
 	else if (token == "stance")
 		*action = SCENARIO_ACTION_STANCE;
 	else if (token == "forceattack")
@@ -244,6 +249,8 @@ static Bool parseActionType( const AsciiString &token, ScenarioActionType *actio
 		*action = SCENARIO_ACTION_CLICKENTER;
 	else if (token == "weaponat")
 		*action = SCENARIO_ACTION_WEAPONAT;
+	else if (token == "switchweapon")
+		*action = SCENARIO_ACTION_SWITCHWEAPON;
 	else if (token == "forceground")
 		*action = SCENARIO_ACTION_FORCEGROUND;
 	else if (token == "reaim")
@@ -260,6 +267,8 @@ static Bool parseActionType( const AsciiString &token, ScenarioActionType *actio
 		*action = SCENARIO_ACTION_REACHPROOF;
 	else if (token == "topup")
 		*action = SCENARIO_ACTION_TOPUP;
+	else if (token == "handover")
+		*action = SCENARIO_ACTION_HANDOVER;
 	else
 		return FALSE;
 
@@ -342,11 +351,13 @@ static Int tokensNeededFor( ScenarioActionType action )
 		case SCENARIO_ACTION_SHIFTATTACKMOVE:	return SCENARIO_TOKENS_MOVE;
 		case SCENARIO_ACTION_SHIFTGUARD:	return SCENARIO_TOKENS_MOVE;
 		case SCENARIO_ACTION_CONSTRUCT:		return SCENARIO_TOKENS_MOVE;
+		case SCENARIO_ACTION_SHIFTCONSTRUCT:	return SCENARIO_TOKENS_MOVE;
 		case SCENARIO_ACTION_WEAPONAT:		return SCENARIO_TOKENS_MOVE;
 		case SCENARIO_ACTION_FORCEGROUND:	return SCENARIO_TOKENS_MOVE;
 		case SCENARIO_ACTION_REAIM:				return SCENARIO_TOKENS_MOVE;
 		case SCENARIO_ACTION_RESPOND:			return SCENARIO_TOKENS_MOVE;
 		case SCENARIO_ACTION_STANCE:			return SCENARIO_TOKENS_STANCE;
+		case SCENARIO_ACTION_SWITCHWEAPON:	return SCENARIO_TOKENS_STANCE;
 		case SCENARIO_ACTION_SHIFTATTACK:	return SCENARIO_TOKENS_ATTACK;
 		case SCENARIO_ACTION_FORCEATTACK:	return SCENARIO_TOKENS_ATTACK;
 		case SCENARIO_ACTION_CLICKENTER:	return SCENARIO_TOKENS_ATTACK;
@@ -369,6 +380,7 @@ static Int tokensNeededFor( ScenarioActionType action )
 		case SCENARIO_ACTION_PURCHASE:		return SCENARIO_TOKENS_STOP;
 		case SCENARIO_ACTION_ARRIVE:			return SCENARIO_TOKENS_ARRIVE;
 		case SCENARIO_ACTION_TOPUP:				return SCENARIO_TOKENS_MOVE;
+		case SCENARIO_ACTION_HANDOVER:		return SCENARIO_TOKENS_ATTACK;
 	}
 	return SCENARIO_TOKENS_STOP;
 }
@@ -444,6 +456,7 @@ ScenarioParseResult ScenarioDrill_parseLine( const char *line, ScenarioAction *a
 		case SCENARIO_ACTION_SHIFTATTACKMOVE:
 		case SCENARIO_ACTION_SHIFTGUARD:
 		case SCENARIO_ACTION_CONSTRUCT:
+		case SCENARIO_ACTION_SHIFTCONSTRUCT:
 		case SCENARIO_ACTION_WEAPONAT:
 		case SCENARIO_ACTION_FORCEGROUND:
 		case SCENARIO_ACTION_REAIM:
@@ -488,6 +501,19 @@ ScenarioParseResult ScenarioDrill_parseLine( const char *line, ScenarioAction *a
 			break;
 		}
 
+		case SCENARIO_ACTION_HANDOVER:
+		{
+			Int next = SCENARIO_ORDER_POSITION_TOKEN;
+			const ScenarioParseResult position = parseScenarioPosition( tokens, count, &next, action );
+			if (position != SCENARIO_PARSE_OK)
+				return position;
+			if (next >= count)
+				return SCENARIO_PARSE_MISSING_ARGS;
+			if (!parseWholeNumber( tokens[ next ], &action->targetSlot ))
+				return SCENARIO_PARSE_BAD_SLOT;
+			break;
+		}
+
 		case SCENARIO_ACTION_REACHPROOF:
 		{
 			if (!parseWholeNumber( tokens[ 4 ], &action->targetSlot ))
@@ -506,6 +532,12 @@ ScenarioParseResult ScenarioDrill_parseLine( const char *line, ScenarioAction *a
 		case SCENARIO_ACTION_STANCE:
 			action->name = tokens[ SCENARIO_STANCE_NAME_TOKEN ];
 			if (action->name != "aggressive" && action->name != "defensive")
+				return SCENARIO_PARSE_BAD_ACTION;
+			break;
+
+		case SCENARIO_ACTION_SWITCHWEAPON:
+			action->name = tokens[ SCENARIO_STANCE_NAME_TOKEN ];
+			if (action->name != "primary" && action->name != "secondary" && action->name != "tertiary")
 				return SCENARIO_PARSE_BAD_ACTION;
 			break;
 
@@ -535,6 +567,8 @@ ScenarioParseResult ScenarioDrill_parseLine( const char *line, ScenarioAction *a
 			action->count = -1;		// nothing wanted, unless the file names a count
 			if (count > SCENARIO_TOKENS_STOP && !parseWholeNumber( tokens[ SCENARIO_TOKENS_STOP ], &action->count ))
 				return SCENARIO_PARSE_BAD_COUNT;
+			// and how far from their middle the furthest of them may stand, 0 for no opinion
+			action->radius = (count > SCENARIO_TOKENS_STOP + 1) ? (Real)atof( tokens[ SCENARIO_TOKENS_STOP + 1 ].str() ) : 0.0f;
 			break;
 
 		case SCENARIO_ACTION_STOP:
@@ -608,9 +642,9 @@ struct ScenarioArrival
 };
 
 /// how long a unit on its way has to stand still before it counts as having stopped
-static const Int SCENARIO_STALL_FRAMES = LOGICFRAMES_PER_SECOND;
+#define SCENARIO_STALL_FRAMES ((Int)(LOGICFRAMES_PER_GAME_SECOND))
 /// less than this from one frame to the next is standing still
-static const Real SCENARIO_STILL_DISTANCE = ConvertRetailPerFrameRate( 0.05f );
+#define SCENARIO_STILL_DISTANCE ((Real)(ConvertRetailPerFrameRate( 0.05f )))
 
 /// how far a unit has to have gone from where it stood before it counts as having obeyed the order
 static const Real SCENARIO_DEPARTED_DISTANCE = 20.0f;
@@ -1262,7 +1296,7 @@ struct StatueTrack
 	Bool counted;
 	Bool seen;
 };
-static const Int STATUE_FRAMES = 3 * LOGICFRAMES_PER_SECOND;
+#define STATUE_FRAMES ((Int)(3 * LOGICFRAMES_PER_GAME_SECOND))
 static const Int STATUE_DETAIL_LINES = 40;
 static std::map<ObjectID, StatueTrack> theStatueTracks;
 static Int theStatueStops = 0;
@@ -1304,7 +1338,7 @@ static void updateStatues( UnsignedInt now )
 			continue;
 		}
 		++track.stillFor;
-		if (track.stillFor < STATUE_FRAMES || (track.stillFor % LOGICFRAMES_PER_SECOND) != 0)
+		if (track.stillFor < STATUE_FRAMES || (track.stillFor % LOGICFRAMES_PER_GAME_SECOND) != 0)
 			continue;
 
 		PartitionFilterRelationship enemies( obj, PartitionFilterRelationship::ALLOW_ENEMIES );
@@ -1356,7 +1390,7 @@ static void updateStatues( UnsignedInt now )
 static void logStatues( void )
 {
 	DEBUG_LOG(("HEADLESS STATUE: %d stops of %.0f s or more with an enemy in reach and no shot (%d infantry), %d unit-seconds - %d waiting for a path, %d blocked, %d no target, %d target in range, %d target out of range\n",
-						 theStatueStops, (Real)STATUE_FRAMES / (Real)LOGICFRAMES_PER_SECOND, theStatueInfantryStops, theStatueSeconds,
+						 theStatueStops, (Real)STATUE_FRAMES / (Real)LOGICFRAMES_PER_GAME_SECOND, theStatueInfantryStops, theStatueSeconds,
 						 theStatueWaiting, theStatueBlocked, theStatueNoVictim, theStatueVictimInRange, theStatueVictimOutOfRange));
 	for( Int s = 0; s < NUM_AI_STATES; ++s )
 		if (theStatueByState[ s ] > 0)
@@ -1415,14 +1449,14 @@ void ScenarioDrill_logArrivals( void )
 		DEBUG_LOG(("HEADLESS DEPART: slot %d '%s' from frame %d: %d of %d moved %.0f, the last after %d frames (%.1f s)\n",
 							 it->slot, it->selector.str(), it->fromFrame, departed, total, SCENARIO_DEPARTED_DISTANCE,
 							 departed ? (Int)(lastDeparture - it->fromFrame) : 0,
-							 departed ? (Real)(lastDeparture - it->fromFrame) / (Real)LOGICFRAMES_PER_SECOND : 0.0f));
+							 departed ? (Real)(lastDeparture - it->fromFrame) / (Real)LOGICFRAMES_PER_GAME_SECOND : 0.0f));
 
 		DEBUG_LOG(("HEADLESS STALL: slot %d '%s': %d stops of %.0f s or more on the way - %d idle, %d held back, %d waiting for a path, %d blocked, %d with a path and no reason; longest %d frames (%.1f s), unit %d\n",
 							 it->slot, it->selector.str(),
 							 it->stallsIdle + it->stallsHeldBack + it->stallsWaitingForPath + it->stallsBlocked + it->stallsOther,
-							 (Real)SCENARIO_STALL_FRAMES / (Real)LOGICFRAMES_PER_SECOND,
+							 (Real)SCENARIO_STALL_FRAMES / (Real)LOGICFRAMES_PER_GAME_SECOND,
 							 it->stallsIdle, it->stallsHeldBack, it->stallsWaitingForPath, it->stallsBlocked, it->stallsOther,
-							 it->longestStall, (Real)it->longestStall / (Real)LOGICFRAMES_PER_SECOND,
+							 it->longestStall, (Real)it->longestStall / (Real)LOGICFRAMES_PER_GAME_SECOND,
 							 (Int)it->longestStallID));
 
 		if (arrived == 0)
@@ -1436,7 +1470,7 @@ void ScenarioDrill_logArrivals( void )
 		DEBUG_LOG(("HEADLESS ARRIVE: slot %d '%s' from frame %d: %d of %d within %.0f of (%.0f,%.0f), first after %d frames, mean %.0f, last after %d frames (%.1f s), %d lost, %d still out\n",
 							 it->slot, it->selector.str(), it->fromFrame, arrived, total, it->radius, it->goal.x, it->goal.y,
 							 first - it->fromFrame, arrivalSum / (Real)arrived, last - it->fromFrame,
-							 (Real)(last - it->fromFrame) / (Real)LOGICFRAMES_PER_SECOND, lost, stillOut));
+							 (Real)(last - it->fromFrame) / (Real)LOGICFRAMES_PER_GAME_SECOND, lost, stillOut));
 	}
 }
 
@@ -1519,11 +1553,23 @@ static Bool executeTally( const ScenarioAction &action, Player *player )
 	Real health = 0.0f;
 	Real maxHealth = 0.0f;
 	Int worth = 0;
+	// where a small group stands, for HEADLESS SPREAD: how far apart a mob's members walk and stand
+	const Int SPREAD_MAX = 32;
+	Coord3D spot[ SPREAD_MAX ];
+	// and how fast the slowest and the fastest of them are moving: an Angry Mob's men keep one pace
+	Real slowest = 1.0e9f;
+	Real fastest = 0.0f;
 	for( Object *obj = TheGameLogic->getFirstObject(); obj; obj = obj->getNextObject() )
 	{
 		if (obj->getControllingPlayer() != player || obj->isEffectivelyDead() || !selectorMatches( action.selector, obj ))
 			continue;
 
+		if (alive < SPREAD_MAX)
+			spot[ alive ] = *obj->getPosition();
+		const PhysicsBehavior *physics = obj->getPhysics();
+		const Real speed = physics ? physics->getVelocityMagnitude() * LOGICFRAMES_PER_GAME_SECOND : 0.0f;
+		slowest = MIN( slowest, speed );
+		fastest = MAX( fastest, speed );
 		++alive;
 		if (obj->getContainedBy() != NULL)
 			++inside;
@@ -1535,6 +1581,46 @@ static Bool executeTally( const ScenarioAction &action, Player *player )
 	DEBUG_LOG(("HEADLESS TALLY: frame %d slot %d '%s': %d alive, health %.0f of %.0f, worth %d, %d inside, money %d\n",
 						 action.frame, action.slot, action.selector.str(), alive, health, maxHealth, worth, inside,
 						 player->getMoney()->countMoney()));
+	if (alive >= 2 && alive <= SPREAD_MAX)
+	{
+		// each unit's distance to its nearest neighbour on the ground: the closest pair and the mean
+		Real closest = 1.0e9f;
+		Real sum = 0.0f;
+		Real cx = 0.0f, cy = 0.0f;
+		for (Int i = 0; i < alive; ++i)
+		{
+			Real nearest = 1.0e9f;
+			for (Int j = 0; j < alive; ++j)
+			{
+				if (i == j)
+					continue;
+				const Real dx = spot[ i ].x - spot[ j ].x;
+				const Real dy = spot[ i ].y - spot[ j ].y;
+				nearest = MIN( nearest, sqrtf( dx * dx + dy * dy ) );
+			}
+			closest = MIN( closest, nearest );
+			sum += nearest;
+			cx += spot[ i ].x;
+			cy += spot[ i ].y;
+		}
+		// and how far the furthest one has strayed from the middle: a group strung out along a road has
+		// close neighbours all the way down the line, so only this number sees it come apart
+		cx /= alive;
+		cy /= alive;
+		Real widest = 0.0f;
+		for (Int i = 0; i < alive; ++i)
+		{
+			const Real dx = spot[ i ].x - cx;
+			const Real dy = spot[ i ].y - cy;
+			widest = MAX( widest, sqrtf( dx * dx + dy * dy ) );
+		}
+		DEBUG_LOG(("HEADLESS SPREAD: frame %d slot %d '%s': %d units around (%.0f,%.0f), nearest neighbour closest %.1f mean %.1f, widest %.1f, speed %.1f to %.1f a second\n",
+							 action.frame, action.slot, action.selector.str(), alive, cx, cy, closest, sum / alive, widest, slowest, fastest));
+		if (action.radius > 0.0f)
+			DEBUG_LOG(("HEADLESS EXPECT: %s: frame %d slot %d '%s': widest %.1f, wanted at most %.0f\n",
+								 widest <= action.radius ? "PASS" : "FAIL",
+								 action.frame, action.slot, action.selector.str(), widest, action.radius));
+	}
 	if (action.count >= 0)
 		DEBUG_LOG(("HEADLESS EXPECT: %s: frame %d slot %d '%s': %d alive, wanted %d\n",
 							 alive == action.count ? "PASS" : "FAIL",
@@ -1779,13 +1865,43 @@ static Bool executeWeaponAt( const ScenarioAction &action, Player *player, const
 	return TRUE;
 }
 
+/** A SWITCH_WEAPON button (the Nuke Cannon's Neutron Shells): MSG_SWITCH_WEAPONS with the slot, handed
+	  to the dispatcher with the matching units as the selection.  The log line counts the units whose
+	  current weapon is that slot afterwards, so a switch the logic refused reads as 0.  The dispatcher
+	  destroys the group, so the units are counted from the player's objects. */
+static Bool executeSwitchWeapon( const ScenarioAction &action, Player *player, AIGroup *group, Int taken )
+{
+	const WeaponSlotType weaponSlot = (action.name == "primary") ? PRIMARY_WEAPON
+																	: (action.name == "secondary") ? SECONDARY_WEAPON : TERTIARY_WEAPON;
+	std::vector<ObjectID> members;
+	const VecObjectID &ids = group->getAllIDs();
+	members.assign( ids.begin(), ids.end() );
+
+	GameMessage *msg = newInstance( GameMessage )( GameMessage::MSG_SWITCH_WEAPONS );
+	msg->friend_setPlayerIndex( player->getPlayerIndex() );
+	msg->appendIntegerArgument( weaponSlot );
+	TheGameLogic->logicMessageDispatcher( msg, group );
+	msg->deleteInstance();
+
+	Int switched = 0;
+	for (std::vector<ObjectID>::const_iterator it = members.begin(); it != members.end(); ++it)
+	{
+		const Object *obj = TheGameLogic->findObjectByID( *it );
+		if (obj && obj->getCurrentWeapon() && obj->getCurrentWeapon()->getWeaponSlot() == weaponSlot)
+			++switched;
+	}
+
+	DEBUG_LOG(("SCENARIO: frame %d switchweapon slot %d '%s' x%d %s: %d on that weapon\n",
+						 action.frame, action.slot, action.selector.str(), taken, action.name.str(), switched));
+	return TRUE;
+}
+
 /** The rank tree's button: the player is raised to the rank the science asks for and given the points
 	  it costs, and then MSG_PURCHASE_SCIENCE goes to the dispatcher as the control bar sends it, so the
 	  purchase itself is the one a click makes. */
-static const Int SCENARIO_HIGHEST_RANK = 5;
-
 static Bool executePurchase( const ScenarioAction &action, Player *player )
 {
+	const Int SCENARIO_HIGHEST_RANK = TheRankInfoStore->getRankLevelCount();
 	const ScienceType science = TheScienceStore->getScienceFromInternalName( action.selector );
 	if (science == SCIENCE_INVALID)
 	{
@@ -1919,6 +2035,9 @@ static Bool executeOrder( const ScenarioAction &action, Player *player, const Co
 		case SCENARIO_ACTION_WEAPONAT:
 			return executeWeaponAt( action, player, dest, group, taken );		// the dispatcher again
 
+		case SCENARIO_ACTION_SWITCHWEAPON:
+			return executeSwitchWeapon( action, player, group, taken );		// the dispatcher again
+
 		case SCENARIO_ACTION_AUTOGARRISON:
 		case SCENARIO_ACTION_AUTOREPAIR:
 		{
@@ -1988,6 +2107,7 @@ static Bool executeOrder( const ScenarioAction &action, Player *player, const Co
 		case SCENARIO_ACTION_RESPOND:
 		case SCENARIO_ACTION_REACHPROOF:
 		case SCENARIO_ACTION_TOPUP:
+		case SCENARIO_ACTION_HANDOVER:
 			ordered = FALSE;		// handled before the group is built
 			break;
 	}
@@ -2047,13 +2167,21 @@ static Bool executeConstruct( const ScenarioAction &action, Player *player, cons
 		return FALSE;
 	}
 
+	// shiftconstruct: the mark PlaceEventTranslator puts in front of a placement made with shift held
+	const Bool shift = action.action == SCENARIO_ACTION_SHIFTCONSTRUCT;
+	if (shift)
+	{
+		GameMessage *mark = TheMessageStream->appendMessage( GameMessage::MSG_QUEUE_NEXT_ORDER );
+		mark->appendIntegerArgument( ORDER_QUEUE_APPEND );
+	}
+
 	GameMessage *msg = TheMessageStream->appendMessage( GameMessage::MSG_DOZER_CONSTRUCT );
 	msg->appendIntegerArgument( build->getTemplateID() );
 	msg->appendLocationArgument( dest );
 	msg->appendRealArgument( 0.0f );
 
-	DEBUG_LOG(("SCENARIO: frame %d construct slot %d '%s' at (%.0f,%.0f)\n",
-						 action.frame, action.slot, action.selector.str(), dest.x, dest.y));
+	DEBUG_LOG(("SCENARIO: frame %d %s slot %d '%s' at (%.0f,%.0f)\n",
+						 action.frame, shift ? "shiftconstruct" : "construct", action.slot, action.selector.str(), dest.x, dest.y));
 	return TRUE;
 }
 
@@ -2100,6 +2228,61 @@ static Bool executeGiveMoney( const ScenarioAction &action, Player *player )
 	DEBUG_LOG(("SCENARIO: frame %d givemoney slot %d to slot %d (player %d) %d\n", action.frame, action.slot,
 						 action.targetSlot, target->getPlayerIndex(), action.count));
 	return TRUE;
+}
+
+/** A building changing hands with nothing in between: setTeam, the call a capture, a hijack, a
+	  defeated player's tech buildings and a script's change of owner all end in, so the owner change
+	  runs Object::onCapture and every module's onCapture as a capture would.  Each upgrade module's
+	  state is logged before and after, which is what shows a FollowsOwner part going away or coming. */
+static Bool executeHandover( const ScenarioAction &action, Player *player, const Coord3D &point )
+{
+	Player *target = findPlayerForSlot( action.targetSlot );
+	Object *building = NULL;
+	Real best = 0.0f;
+	for( Object *obj = TheGameLogic->getFirstObject(); obj; obj = obj->getNextObject() )
+	{
+		if (obj->getControllingPlayer() != player || obj->isEffectivelyDead() || !selectorMatches( action.selector, obj ))
+			continue;
+		const Real dx = obj->getPosition()->x - point.x;
+		const Real dy = obj->getPosition()->y - point.y;
+		if (building == NULL || dx * dx + dy * dy < best)
+		{
+			building = obj;
+			best = dx * dx + dy * dy;
+		}
+	}
+	if (building == NULL || target == NULL || target == player)
+	{
+		DEBUG_LOG(("SCENARIO: frame %d handover: slot %d owns no '%s', or slot %d is nobody else\n",
+							 action.frame, action.slot, action.selector.str(), action.targetSlot));
+		return FALSE;
+	}
+
+	std::vector<Bool> before;
+	for (BehaviorModule **module = building->getBehaviorModules(); *module; ++module)
+		if ((*module)->getUpgrade())
+			before.push_back( (*module)->getUpgrade()->isAlreadyUpgraded() );
+
+	building->setTeam( target->getDefaultTeam() );
+
+	const Bool arrived = building->getControllingPlayer() == target;
+	DEBUG_LOG(("SCENARIO: frame %d handover slot %d '%s' %d to slot %d: %s\n", action.frame, action.slot,
+						 action.selector.str(), building->getID(), action.targetSlot, arrived ? "owned" : "refused"));
+
+	Int index = 0;
+	for (BehaviorModule **module = building->getBehaviorModules(); *module; ++module)
+	{
+		UpgradeModuleInterface *upgrade = (*module)->getUpgrade();
+		if (upgrade == NULL)
+			continue;
+		const Bool after = upgrade->isAlreadyUpgraded();
+		DEBUG_LOG(("SCENARIO: frame %d handover %d module %s: %s -> %s%s\n", action.frame, building->getID(),
+							 TheNameKeyGenerator->keyToName( (*module)->getModuleTagNameKey() ).str(),
+							 before[ index ] ? "executed" : "not", after ? "executed" : "not",
+							 before[ index ] != after ? "  CHANGED" : ""));
+		++index;
+	}
+	return arrived;
 }
 
 Bool ScenarioDrill_execute( const ScenarioAction &action )
@@ -2162,7 +2345,10 @@ Bool ScenarioDrill_execute( const ScenarioAction &action )
 	if (action.action == SCENARIO_ACTION_PURCHASE)
 		return executePurchase( action, player );
 
-	if (action.action == SCENARIO_ACTION_CONSTRUCT)
+	if (action.action == SCENARIO_ACTION_HANDOVER)
+		return executeHandover( action, player, position );
+
+	if (action.action == SCENARIO_ACTION_CONSTRUCT || action.action == SCENARIO_ACTION_SHIFTCONSTRUCT)
 		return executeConstruct( action, player, position );
 
 	return executeOrder( action, player, position );

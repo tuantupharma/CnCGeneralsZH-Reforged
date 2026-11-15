@@ -10,9 +10,11 @@ desync and show the check is looking.
     python net_check.py --copies 3 --teams 2
     python net_check.py --each "-latAvg 120 -latNoise 60 -packetloss 5"
     python net_check.py --slot-args 1 "-drawdelay 100"    # one slow renderer
+    python net_check.py --slot-run 1 C:/other/Run         # copy 1 plays from another install
     python net_check.py --prove                           # must report a mismatch
     python net_check.py --each "-scenario netstance" --keys "KEY_A CTRL,KEY_H"   # the stance key, both ways
     python net_check.py --relay 8094 --each "-latAvg 90 -latNoise 30"           # through a local relay
+    python net_check.py --copies 32 --map <a 32-spot map> --each "-headless"     # a full room, nothing drawn
 
 --relay starts `node relay/relay.js` on that UDP port, gives the copies 10.0.0.x slot addresses and
 -relay 127.0.0.1:port, and prints the relay's join and stats lines (one a minute) at the end.
@@ -34,14 +36,18 @@ from control_client import Control, ControlError
 RUN_DIRECTORY = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "Run"))
 EXE_NAME = "generals.exe"
 FIRST_CONTROL_PORT = 8787
-MAXIMUM_COPIES = 8  # eight ran clean on 2026-10-24; the map needs a start spot per copy (Iron Dragon has 8)
+MAXIMUM_COPIES = 32  # MAX_SLOTS in NetworkDefs.h; the map needs a start spot per copy (Iron Dragon has 8)
 CONNECT_TIMEOUT_SECONDS = 120.0
 MATCH_START_TIMEOUT_SECONDS = 180.0
+SECONDS_PER_EXTRA_COPY = 10.0  # copies load side by side on one machine, so a big room takes longer to come up
 PRESS_INTERVAL_SECONDS = 0.5
 PRESSES = ("KEY_A CTRL", "KEY_X", "KEY_S", "KEY_X")
 MISMATCH_LINE = "CRC Mismatch"
 CENSUS_LINES = ("HEADLESS LOGICTHREAD OVERLAP", "HEADLESS LOGICTHREAD CENSUS", "HEADLESS LOGICTHREAD WINDOW")
-LOGIC_FPS = 60  # LOGICFRAMES_PER_SECOND: frame numbers here and in the logs count these
+# LOGICFRAMES_PER_SECOND, read from the engine's own header: frame numbers here and in the logs count these
+with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "GameEngine", "Include", "Common", "GameCommon.h"),
+          encoding="utf-8", errors="replace") as _header:
+    LOGIC_FPS = int(re.search(r"^\s*LOGICFRAMES_PER_SECOND\s*=\s*(\d+)", _header.read(), re.M).group(1))
 PROVE_FRAME = 10 * LOGIC_FPS
 PROVE_SPAWN = "spawn 0 AmericaVehicleHumvee 2 %s"
 QUIT_GRACE_SECONDS = 10.0
@@ -60,6 +66,8 @@ def parse_arguments() -> argparse.Namespace:
                         help="extra switches for one copy, repeatable")
     parser.add_argument("--slot-options", nargs=2, action="append", default=[], metavar=("SLOT", "FOLDER"),
                         help="one copy's ZH_USER_DATA_DIR, for a match between two setups, repeatable")
+    parser.add_argument("--slot-run", nargs=2, action="append", default=[], metavar=("SLOT", "FOLDER"),
+                        help="one copy's game folder (its exe, archives and log), for a match between two installs, repeatable")
     parser.add_argument("--tag", default="net", help="log prefix; copy n logs to Run/<tag><n>_DebugLogFile.txt")
     parser.add_argument("--prove", action="store_true", help="spawn on copy 0 alone at frame %d" % PROVE_FRAME)
     parser.add_argument("--prove-at", default="2192 3537", help="map position for --prove")
@@ -67,14 +75,22 @@ def parse_arguments() -> argparse.Namespace:
                         help="the presses, comma separated, each as the control socket's key command takes it")
     parser.add_argument("--relay", type=int, default=0, metavar="PORT",
                         help="play through a local relay.js on this UDP port instead of loopback")
+    parser.add_argument("--capped", action="store_true",
+                        help="leave out -noFPSLimit, so each copy keeps its Options.ini FrameRateLimit "
+                             "(give one with --slot-options); players run capped, and the cap's wait is time the network sits")
     return parser.parse_args()
+
+
+def run_directory(arguments: argparse.Namespace, slot: int) -> str:
+    folders = {int(target): folder for target, folder in arguments.slot_run}
+    return os.path.abspath(folders[slot]) if slot in folders else RUN_DIRECTORY
 
 
 def command_line(arguments: argparse.Namespace, slot: int) -> list:
     network = "10.0.0.%d" if arguments.relay else "127.0.0.%d"
     hosts = ",".join(network % (index + 1) for index in range(arguments.copies))
-    line = [os.path.join(RUN_DIRECTORY, EXE_NAME), "-multiInstance", "-quickstart", "-win",
-            "-xres", "800", "-yres", "600", "-msaa", "0", "-noFPSLimit",
+    line = [os.path.join(run_directory(arguments, slot), EXE_NAME), "-multiInstance", "-quickstart", "-win",
+            "-xres", "800", "-yres", "600", "-msaa", "0"] + ([] if arguments.capped else ["-noFPSLimit"]) + [
             "-netgame", hosts, "-netslot", str(slot), "-control", str(FIRST_CONTROL_PORT + slot),
             "-map", arguments.map, "-seed", str(arguments.seed),
             "-logPrefix", "%s%d_" % (arguments.tag, slot)]
@@ -89,22 +105,28 @@ def command_line(arguments: argparse.Namespace, slot: int) -> list:
     return line
 
 
-def connect(port: int) -> Control:
-    deadline = time.monotonic() + CONNECT_TIMEOUT_SECONDS
+def slack(copies: int) -> float:
+    return SECONDS_PER_EXTRA_COPY * max(0, copies - 2)
+
+
+def connect(port: int, copies: int) -> Control:
+    timeout = CONNECT_TIMEOUT_SECONDS + slack(copies)
+    deadline = time.monotonic() + timeout
     while True:
         try:
             return Control(port)
         except (OSError, ControlError):
             if time.monotonic() > deadline:
-                raise ControlError("no control socket on port %d after %.0f s" % (port, CONNECT_TIMEOUT_SECONDS))
+                raise ControlError("no control socket on port %d after %.0f s" % (port, timeout))
             time.sleep(1.0)
 
 
 def wait_for_match(games: list) -> None:
-    deadline = time.monotonic() + MATCH_START_TIMEOUT_SECONDS
+    timeout = MATCH_START_TIMEOUT_SECONDS + slack(len(games))
+    deadline = time.monotonic() + timeout
     while not all(game.status()["inGame"] for game in games):
         if time.monotonic() > deadline:
-            raise ControlError("the match did not start on every copy within %.0f s" % MATCH_START_TIMEOUT_SECONDS)
+            raise ControlError("the match did not start on every copy within %.0f s" % timeout)
         time.sleep(1.0)
 
 
@@ -172,12 +194,12 @@ def main() -> int:
         time.sleep(1.0)
         if relay.poll() is not None:
             raise SystemExit("relay.js exited at once: " + open(relay_log).read())
-    processes = [subprocess.Popen(command_line(arguments, slot), cwd=RUN_DIRECTORY,
+    processes = [subprocess.Popen(command_line(arguments, slot), cwd=run_directory(arguments, slot),
                                   env=dict(os.environ, ZH_USER_DATA_DIR=folders[slot]) if slot in folders else None)
                  for slot in range(arguments.copies)]
     games = []
     try:
-        games = [connect(FIRST_CONTROL_PORT + slot) for slot in range(arguments.copies)]
+        games = [connect(FIRST_CONTROL_PORT + slot, arguments.copies) for slot in range(arguments.copies)]
         wait_for_match(games)
         results = play(arguments, games)
         for game in games:
@@ -209,7 +231,7 @@ def main() -> int:
     total = 0
     reads = 0
     for slot, (first, last, seconds) in enumerate(results):
-        log_path = os.path.join(RUN_DIRECTORY, "%s%d_DebugLogFile.txt" % (arguments.tag, slot))
+        log_path = os.path.join(run_directory(arguments, slot), "%s%d_DebugLogFile.txt" % (arguments.tag, slot))
         mismatches = count_mismatches(log_path)
         total += max(mismatches, 0)
         print("NET CHECK slot %d: frame %d, %.1f logic fps, %s mismatches, %s"

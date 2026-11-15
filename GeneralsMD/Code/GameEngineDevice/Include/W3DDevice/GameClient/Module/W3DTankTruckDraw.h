@@ -61,13 +61,13 @@ public:
 	AsciiString m_midRearRightTireBoneName;
 
 	Real				m_rotationSpeedMultiplier;
-	Real				m_powerslideRotationAddition;
+	RetailPerFrame				m_powerslideRotationAddition;
 
 	//Tank data
 	AsciiString m_treadDebrisNameLeft;
 	AsciiString m_treadDebrisNameRight;
 
-	Real m_treadAnimationRate;	///<amount of tread texture to scroll per sec at top speed.  1.0 == full width.
+	VelocityPerFrame m_treadAnimationRate;	///<amount of tread texture to scroll per sec at top speed.  1.0 == full width.
 	Real m_treadPivotSpeedFraction;	///<no longer read: the treads follow the ground. Kept so the INI key parses.
 	Real m_treadDriveSpeedFraction;	///<no longer read either.
 
@@ -129,7 +129,8 @@ protected:
 	ParticleSystem* m_treadDebrisRight;
 
 	enum TreadType { TREAD_LEFT, TREAD_RIGHT, TREAD_MIDDLE };	//types of treads for different vehicles
-	enum {MAX_TREADS_PER_TANK=4};
+	// four belts a level of detail, for up to four levels: every level's belts scroll, so the one drawn does
+	enum {MAX_TREADS_PER_TANK=4, MAX_TREAD_LODS=4, MAX_TREAD_SLOTS=MAX_TREADS_PER_TANK*MAX_TREAD_LODS};
 
 	struct TreadObjectInfo
 	{
@@ -138,7 +139,7 @@ protected:
 		RenderObjClass::Material_Override m_materialSettings;	///<used to set current uv scroll amount.
 	};
 
-	TreadObjectInfo m_treads[MAX_TREADS_PER_TANK];
+	TreadObjectInfo m_treads[MAX_TREAD_SLOTS];
 	Int m_treadCount;
 
 	RenderObjClass *m_prevRenderObj;

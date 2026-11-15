@@ -390,6 +390,18 @@ public:
 	// note that m_override is not used here, see getTemplateID(), for it is the same reasons
 	const AsciiString& getName() const { return m_nameString; }  ///< return the name of this template
 
+	/** NAMEKEY(getName()), kept from the first time it is asked for.  Every building in production
+		* asks for its unit's build time every frame, and the lookup hashes the name under a lock.  The
+		* first ask still goes through NAMEKEY, so a name gets its key at the same moment it always did. */
+	NameKeyType getNameKey() const
+	{
+		if( m_nameKey == NAMEKEY_INVALID )
+			m_nameKey = NAMEKEY( m_nameString );
+		return m_nameKey;
+	}
+	/** Whether getNameKey has been asked, so asking again writes nothing (a logic job may only ask then). */
+	Bool hasNameKey() const { return m_nameKey != NAMEKEY_INVALID; }
+
 	/// get the display color (used for the editor)	
 	Color getDisplayColor() const { return m_displayColor; }
 
@@ -574,7 +586,7 @@ public:
 	// these are intended ONLY for the private use of ThingFactory and do not use
 	// the m_override pointer, it deals only with templates at the "top" level
 	//
-	inline void friend_setTemplateName( const AsciiString& name ) { m_nameString = name; }
+	inline void friend_setTemplateName( const AsciiString& name ) { m_nameString = name; m_nameKey = NAMEKEY_INVALID; }
 	inline ThingTemplate *friend_getNextTemplate() const { return m_nextThingTemplate; }
 	inline void friend_setNextTemplate(ThingTemplate *tmplate) { m_nextThingTemplate = tmplate; }
 	inline void friend_setTemplateID(UnsignedShort id) { m_templateID = id; }
@@ -704,6 +716,7 @@ private:
 	// ---- Strings
 	UnicodeString			m_displayName;			///< UI display for onscreen display
 	AsciiString				m_nameString;					///< name of this thing template
+	mutable NameKeyType	m_nameKey;					///< getNameKey's answer, NAMEKEY_INVALID until first asked
 	AsciiString				m_defaultOwningSide;	///< default owning side (owning player is inferred)
 	AsciiString				m_commandSetString;
 	AsciiString				m_selectedPortraitImageName;
@@ -774,7 +787,7 @@ private:
 	Int						m_energyProduction;						///< how much Energy this takes (negative values produce Energy, rather than consuming it)
 	Int						m_energyBonus;								///< how much extra Energy this produces due to the upgrade
 	Color					m_displayColor;								///< for the editor display color
-	UnsignedInt		m_occlusionDelay;							///< delay after object creation before building occlusion is allowed.
+	DurationFrames		m_occlusionDelay;							///< delay after object creation before building occlusion is allowed.
   NameKeyType   m_maxSimultaneousLinkKey;     ///< If this is not NAMEKEY_INVALID, it indicates that all the templates which have the same name key should be counted as the same "type" when looking at getMaxSimultaneousOfType().
 
 	// ---- Short-sized things

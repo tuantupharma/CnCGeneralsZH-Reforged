@@ -184,6 +184,34 @@ enum {
 	SCORESCREEN_REPLAY
 	};
 static Int screenType;
+static Bool s_onlineVerdictShown = FALSE;		///< -online: the rated/unrated line is in the chat box
+
+/* -online: the server rates the match a moment after both reports are in, so the verdict comes while
+	 this screen is up.  One line in the chat box: "Rating +1.3 -> 22", or why the match was unrated. */
+static void showOnlineVerdict( void )
+{
+	if (s_onlineVerdictShown || screenType != SCORESCREEN_INTERNET || !OnlineIsEnabled() || !listboxChatWindowScoreScreen)
+		return;
+	OnlineUpdate();
+	Bool rated = FALSE;
+	Real delta = 0.0f, rating = 0.0f;
+	AsciiString reason;
+	if (!OnlineGetMatchResult( rated, delta, rating, reason ))
+		return;
+	s_onlineVerdictShown = TRUE;
+	UnicodeString line;
+	if (rated)
+		line.format( TheGameText->fetch( "GUI:OnlineRatedResult" ), delta, REAL_TO_INT( floorf( rating + 0.5f ) ) );
+	else
+	{
+		AsciiString label;
+		label.format( "GUI:OnlineUnrated_%s", reason.str() );
+		Bool known = FALSE;
+		UnicodeString why = TheGameText->fetch( label, &known );
+		line = known ? why : TheGameText->fetch( "GUI:OnlineUnrated" );
+	}
+	GadgetListBoxAddEntryText( listboxChatWindowScoreScreen, line, GameSpyColor[GSCOLOR_MOTD_HEADING], -1 );
+}
 
 struct ScoreGather
 {
@@ -230,7 +258,7 @@ void startNextCampaignGame(void)
 	msg->appendIntegerArgument(GAME_SINGLE_PLAYER);
 	msg->appendIntegerArgument(TheCampaignManager->getGameDifficulty());
 	msg->appendIntegerArgument(TheCampaignManager->getRankPoints());
-	msg->appendIntegerArgument(GameEngine_matchFramesPerSecond(TheGlobalData->m_turboMode));
+	GameEngine_appendNewGameRates( msg, TheGlobalData->m_missionGameSpeedPercent );
 	
 	InitRandom(0);
 }
@@ -276,6 +304,7 @@ void ScoreScreenInit( WindowLayout *layout, void *userData )
 
 	DontShowMainMenu = TRUE; //KRIS
 	buttonIsFinishCampaign = FALSE;
+	s_onlineVerdictShown = FALSE;
 
 	//Store the keys so we have them later
 	parentID = TheNameKeyGenerator->nameToKey( AsciiString( "ScoreScreen.wnd:ParentScoreScreen" ) );
@@ -448,7 +477,9 @@ void ScoreScreenUpdate( WindowLayout * layout, void *userData)
 		finishSinglePlayerInit();
 		s_needToFinishSinglePlayerInit = FALSE;
 	}
-	
+
+	showOnlineVerdict();
+
 	//TheGameLogic->clearGameData() gets called after ScoreScreenInit and before the
 	//first ScoreScreenUpdate(), so it was creatively moved here so we can actually
 	//hear the music play.
@@ -1930,7 +1961,7 @@ void grabSinglePlayerInfo( void )
 			for(Int k = 0; k < MAX_PLAYER_COUNT; ++k)
 			{
 				localPlayer = ThePlayerList->getNthPlayer(k);
-				if(localPlayer->getPlayerType() == PLAYER_HUMAN)
+				if(localPlayer && localPlayer->getPlayerType() == PLAYER_HUMAN)
 				{
 					populatePlayerInfo(localPlayer, playerCount);
 					++playerCount;
@@ -2067,7 +2098,9 @@ static void hideScoreTable( void )
 		for( Int each = 0; each < ARRAY_SIZE( rowWindows ); ++each )
 		{
 			winName.format( rowWindows[ each ], i );
-			TheWindowManager->winGetWindowFromId( parent, TheNameKeyGenerator->nameToKey( winName ) )->winHide( TRUE );
+			GameWindow *row = TheWindowManager->winGetWindowFromId( parent, TheNameKeyGenerator->nameToKey( winName ) );
+			if( row )	// the layout has eight rows, MAX_SLOTS may be more
+				row->winHide( TRUE );
 		}
 	}
 }

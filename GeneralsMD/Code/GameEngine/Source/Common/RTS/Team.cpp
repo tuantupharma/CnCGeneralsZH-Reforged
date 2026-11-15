@@ -1160,7 +1160,7 @@ Bool TeamPrototype::evaluateProductionCondition(void)
 		Int delaySeconds = m_productionConditionScript->getDelayEvalSeconds();
 
 		if (delaySeconds>0) {
-			m_productionConditionScript->setFrameToEvaluate(TheGameLogic->getFrame()+delaySeconds*LOGICFRAMES_PER_SECOND);
+			m_productionConditionScript->setFrameToEvaluate(TheGameLogic->getFrame()+delaySeconds*LOGICFRAMES_PER_GAME_SECOND);
 		}
 		return TheScriptEngine->evaluateConditions(m_productionConditionScript, NULL, getControllingPlayer());
 	}
@@ -2438,13 +2438,18 @@ static Bool isInBuildVariations(const ThingTemplate* ttWithVariations, const Thi
 
 // ------------------------------------------------------------------------
 /* Try to recruit a unit from other teams of this player. */
-Object *Team::tryToRecruit(const ThingTemplate *tTemplate, const Coord3D *teamHome, Real maxDist)
+Object *Team::tryToRecruit(const ThingTemplate *tTemplate, const Coord3D *teamHome, Real maxDist,
+														const std::vector<Object *> *ownObjects)
 {
 	Player *myPlayer = getControllingPlayer();
 	Object *obj=NULL;
 	Real distSqr = maxDist*maxDist;
 	Object *recruit = NULL;
-	for( obj = TheGameLogic->getFirstObject(); obj; obj = obj->getNextObject() )
+	// only the controlling player's objects pass the owner test below, so a caller asking several times in a
+	// row hands those over, in the list's order, rather than have every ask walk every object on the map
+	size_t own = 0;
+	for( obj = ownObjects ? ( ownObjects->empty() ? NULL : (*ownObjects)[ 0 ] ) : TheGameLogic->getFirstObject(); obj;
+			 obj = ownObjects ? ( ++own < ownObjects->size() ? (*ownObjects)[ own ] : NULL ) : obj->getNextObject() )
 	{
 		if (!obj->getTemplate()->isEquivalentTo(tTemplate)) 
 		{

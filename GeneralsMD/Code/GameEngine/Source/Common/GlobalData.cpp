@@ -79,6 +79,13 @@ static void parseIgnoredField( INI *, void *, void *, const void * )
 {
 }
 
+// FramesPerSecondLimit paces the logic on the wall clock, so it takes the logic rate but not the
+// game speed (INI::parseRetailFramesInt carries both)
+static void parseRetailFramesIntWall( INI *ini, void *, void *store, const void * )
+{
+	*(Int *)store = ConvertRetailFramesWall( INI::scanInt( ini->getNextToken() ) );
+}
+
 // A map's map.ini can carry a GameData block.  Retail is 40; a tiny cell makes the partition grid
 // millions of cells on a large map, a huge one leaves the whole map in a handful of cells.
 static const INI::RealRange PARTITION_CELL_SIZE_RANGE = { 20.0f, 400.0f };
@@ -96,7 +103,7 @@ static const INI::RealRange PARTITION_CELL_SIZE_RANGE = { 20.0f, 400.0f };
 	{ "UseTrees",									INI::parseBool,				NULL,			offsetof( GlobalData, m_useTrees ) },
 	{ "UseFPSLimit",							INI::parseBool,				NULL,			offsetof( GlobalData, m_useFpsLimit ) },
 	{ "DumpAssetUsage",						INI::parseBool,				NULL,			offsetof( GlobalData, m_dumpAssetUsage ) },
-	{ "FramesPerSecondLimit",			INI::parseRetailFramesInt,	NULL,			offsetof( GlobalData, m_framesPerSecondLimit ) },	// retail 30 is normal speed: LOGICFRAMES_PER_SECOND
+	{ "FramesPerSecondLimit",			parseRetailFramesIntWall,	NULL,			offsetof( GlobalData, m_framesPerSecondLimit ) },	// retail 30 is normal speed: LOGICFRAMES_PER_SECOND
 	{ "ChipsetType",							INI::parseInt,				NULL,			offsetof( GlobalData, m_chipSetType ) },
 	{ "MaxShellScreens",					INI::parseInt,				NULL,			offsetof( GlobalData, m_maxShellScreens ) },
 	{ "UseCloudMap",							INI::parseBool,				NULL,			offsetof( GlobalData, m_useCloudMap ) },
@@ -231,9 +238,9 @@ static const INI::RealRange PARTITION_CELL_SIZE_RANGE = { 20.0f, 400.0f };
 	{ "UnitReallyDamagedThreshold",	INI::parseReal,				NULL,			offsetof( GlobalData, m_unitReallyDamagedThresh ) },
 	{ "GroundStiffness",					INI::parseReal,				NULL,				offsetof( GlobalData, m_groundStiffness ) },
 	{ "StructureStiffness",					INI::parseReal,				NULL,				offsetof( GlobalData, m_structureStiffness ) },
-	{ "Gravity",									INI::parseAccelerationReal,				NULL,				offsetof( GlobalData, m_gravity ) },
+	{ "Gravity",									SPEED_FIELD( GlobalData, m_gravity ) },
 	{ "StealthFriendlyOpacity",		INI::parsePercentToReal,				NULL,				offsetof( GlobalData, m_stealthFriendlyOpacity ) },
-	{ "DefaultOcclusionDelay",				INI::parseDurationUnsignedInt,				NULL,			offsetof( GlobalData, m_defaultOcclusionDelay ) },
+	{ "DefaultOcclusionDelay",				SPEED_FIELD( GlobalData, m_defaultOcclusionDelay ) },
 	
 	{ "PartitionCellSize",				INI::parseRealInRange,				&PARTITION_CELL_SIZE_RANGE,			offsetof( GlobalData, m_partitionCellSize ) },
 
@@ -244,7 +251,7 @@ static const INI::RealRange PARTITION_CELL_SIZE_RANGE = { 20.0f, 400.0f };
 	{ "AmmoPipScreenOffset",						INI::parseCoord2D,				NULL,			offsetof( GlobalData, m_ammoPipScreenOffset ) },
 	{ "ContainerPipScreenOffset",				INI::parseCoord2D,				NULL,			offsetof( GlobalData, m_containerPipScreenOffset ) },
 
-	{ "HistoricDamageLimit",				INI::parseDurationUnsignedInt,				NULL,			offsetof( GlobalData, m_historicDamageLimit ) },
+	{ "HistoricDamageLimit",				SPEED_FIELD( GlobalData, m_historicDamageLimit ) },
 
 	{ "MaxTerrainTracks",					INI::parseInt,				NULL,			offsetof( GlobalData, m_maxTerrainTracks ) },
 	{ "TimeOfDay",								INI::parseIndexList,	TimeOfDayNames,			offsetof( GlobalData, m_timeOfDay ) },
@@ -495,7 +502,7 @@ static const INI::RealRange PARTITION_CELL_SIZE_RANGE = { 20.0f, 400.0f };
 	{ "MaxShakeRange",							INI::parseReal,				NULL,			offsetof( GlobalData, m_maxShakeRange) },
 	{ "SellPercentage",							INI::parsePercentToReal,	NULL,			offsetof( GlobalData, m_sellPercentage ) },
 	{ "BaseRegenHealthPercentPerSecond", INI::parsePercentToReal, NULL,	offsetof( GlobalData, m_baseRegenHealthPercentPerSecond ) },
-	{ "BaseRegenDelay",							INI::parseDurationUnsignedInt, NULL,offsetof( GlobalData, m_baseRegenDelay ) },
+	{ "BaseRegenDelay",							SPEED_FIELD( GlobalData, m_baseRegenDelay ) },
 
 #ifdef ALLOW_SURRENDER
 	{ "PrisonBountyMultiplier",			INI::parseReal,				NULL,			offsetof( GlobalData, m_prisonBountyMultiplier ) },
@@ -523,7 +530,7 @@ static const INI::RealRange PARTITION_CELL_SIZE_RANGE = { 20.0f, 400.0f };
 	{ "PowerBarBase",												INI::parseInt,							NULL,	offsetof( GlobalData, m_powerBarBase) },
 	{ "PowerBarIntervals",									INI::parseReal,							NULL,	offsetof( GlobalData, m_powerBarIntervals) },
 	{ "PowerBarYellowRange",								INI::parseInt,							NULL,	offsetof( GlobalData, m_powerBarYellowRange) },
-	{ "UnlookPersistDuration",							INI::parseDurationUnsignedInt, NULL, offsetof( GlobalData, m_unlookPersistDuration) },
+	{ "UnlookPersistDuration",							SPEED_FIELD( GlobalData, m_unlookPersistDuration ) },
 
 	{ "NetworkFPSHistoryLength", INI::parseInt, NULL, offsetof(GlobalData, m_networkFPSHistoryLength) },
 	{ "NetworkLatencyHistoryLength", INI::parseInt, NULL, offsetof(GlobalData, m_networkLatencyHistoryLength) },
@@ -695,12 +702,15 @@ GlobalData::GlobalData()
 	m_useShadowDecals = FALSE;
 	m_shadowsForProjectiles = FALSE;
 	m_startAtMaxZoom = FALSE;		//off, a match opens at START_CAMERA_HEIGHT (View.cpp); on, as far out as the wheel goes
-	m_turboMode = FALSE;				//a mission runs at normal speed
+	m_missionGameSpeedPercent = PLAYER_GAME_SPEED_PERCENT_DEFAULT;	//a mission runs at the native tick
 	m_shadowsForProps = FALSE;			//on, scenery with no shadow of its own gets one
 	m_shadowsForParticles = FALSE;
 	m_volumetricSmokeShadows = FALSE;
 	m_smokeFireLighting = FALSE;
-	m_smoothMotion = FALSE;					//a model stands where the last logic tick left it until the box is ticked
+	// On whenever the logic ticks slower than the commonest 60 Hz screen, which would otherwise show each
+	// tick for two refreshes or more; at 60 ticks a second that screen gets a new tick every refresh and the
+	// box starts clear.  It blends only on a display faster than the logic either way (W3DDisplay).
+	m_smoothMotion = LOGICFRAMES_PER_SECOND < 60;
 	m_smoothMotionAnyDisplay = FALSE;
 	m_waterStyle = 0;				// classic by default; modern water is an explicit option
 	m_waterReflection = 2;		// Hybrid once Modern is explicitly selected
@@ -715,6 +725,8 @@ GlobalData::GlobalData()
 	// The owner's rule of 2026-10-31: the game opens in Classic with everything the fork added off, and
 	// whoever wants the Reforged picture turns it on in Options.  Options.ini wins over all of this.
 	m_classicGraphics = TRUE;
+	m_detailedModels = TRUE;			//on, as the download was asked for: only a player who has the archives sees it, and only off Classic
+	m_hdTextures = TRUE;					//the same for the upscaled textures and ground
 	m_lightingStyle = LIGHTING_STYLE_CLASSIC;
 	m_shadowMap = TRUE;						//the sun's own shadows, once ClassicGraphics is off; parseGameDataDefinition takes them back while it is on
 	m_shadowMapOnly = TRUE;				//and they replace the stencil volumes rather than joining them
@@ -746,7 +758,7 @@ GlobalData::GlobalData()
 	m_incomeSharing = 0;						// INCOME_SHARING_OFF unless -incomesharing asks
 	m_techRespawn = 0;							// a destroyed tech building stays destroyed unless -techrespawn asks
 	m_supplyPileLimit = 0;					// a supply pile takes any number of players unless -supplypilelimit asks
-	m_turboMatch = FALSE;						// normal speed unless -turbomode asks
+	m_autoSkirmishGameSpeedPercent = PLAYER_GAME_SPEED_PERCENT_DEFAULT;	// the native tick unless -gamespeed asks
 	m_superweapons = 0;							// SUPERWEAPONS_ALLOW unless -superweapons asks
 	m_startingCash = 0;							// the INI's DefaultStartingCash unless -startingcash asks
 	m_autoSkirmishObserver = FALSE;
@@ -757,7 +769,7 @@ GlobalData::GlobalData()
 	m_videoStartFrame = 0;
 	m_videoEndFrame = 0; // record nothing unless -video asks for a range
 	m_videoName.clear();
-	m_videoPictures = 1; // a picture a logic frame, 30 a second, unless -recordfps asks for more
+	m_videoPictures = 1; // a picture a logic frame, LOGICFRAMES_PER_SECOND a second, unless -recordfps asks for more
 	m_directorRecord = FALSE;
 	m_directorScoutFile.clear();
 	m_directorTimelineFile.clear();
@@ -769,6 +781,7 @@ GlobalData::GlobalData()
 	m_cameraLook.x = m_cameraLook.y = 0.0f;
 	m_traceMoveID = 0; // no movement trace
 	m_slowFrameMS = 20.0f; // a frame worth a line in the log; -slowframe lowers it for a hunt
+	m_logicProfile = FALSE; // no clock around each module or script unless -slowframe asks
 	m_drawDelayMS = 0; // client passes run as fast as the machine does unless -drawdelay slows them
 	m_drawDelayJitterMS = 0;
 	m_showLanes = FALSE; // the lane overlay is a diagnostic, off unless -showlanes asks for it
@@ -874,7 +887,7 @@ GlobalData::GlobalData()
 	m_drawSkyBox = FALSE;
 	m_skyBoxScale = 4.5f;
 
-	m_historicDamageLimit = 0;
+	m_historicDamageLimit.setRaw( 0 );
 	m_maxTerrainTracks = 0;
 
 	m_levelGainAnimationDisplayTimeInSeconds = 0.0f;
@@ -1043,9 +1056,9 @@ GlobalData::GlobalData()
 	m_unitReallyDamagedThresh = 0.1f;
 	m_groundStiffness = 0.5f;
 	m_structureStiffness = 0.5f;
-	m_gravity = -1.0f;
+	m_gravity.setRaw( -399.99997f );	// dist/sec^2: -1.0f a frame^2 at the native speed
 	m_stealthFriendlyOpacity = 0.5f;
-	m_defaultOcclusionDelay = LOGICFRAMES_PER_SECOND * 3;	//default to 3 seconds
+	m_defaultOcclusionDelay.setRaw( 3000 );	//default to 3 seconds
 
 	m_preloadEverything = FALSE;
 	m_preloadReport = FALSE;
@@ -1094,7 +1107,7 @@ GlobalData::GlobalData()
 
 	m_sellPercentage = 1.0f;
 	m_baseRegenHealthPercentPerSecond = 0.0f;
-	m_baseRegenDelay = 0;
+	m_baseRegenDelay.setRaw( 0 );
 
 #ifdef ALLOW_SURRENDER
 	m_prisonBountyMultiplier = 1.0f;
@@ -1137,7 +1150,7 @@ GlobalData::GlobalData()
 
 	// By default, show all asserts.
 
-	m_unlookPersistDuration		= ConvertRetailFrames(30);
+	m_unlookPersistDuration.setRaw( 1000 );	// a second
 
 	//-----------------------------------------------------------------------------------------------
 
@@ -1244,6 +1257,7 @@ GlobalData::GlobalData()
 	m_buildPlacementOpacity = PLACEMENT_SILHOUETTE_OPACITY;
 	m_buildPlacementShadows = TRUE;
 	m_showNetBox = FALSE;
+	m_minimapSize = 100;
 	m_showEmptyBuildingPips = TRUE;
 	m_workersReturnToSupply = TRUE;
 	m_archiveReplays = TRUE;

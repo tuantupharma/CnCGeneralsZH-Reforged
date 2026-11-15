@@ -122,7 +122,8 @@ public:
 	virtual Object *construct( const ThingTemplate *what, 
 														 const Coord3D *pos, Real angle, 
 														 Player *owningPlayer,
-														 Bool isRebuild ) = 0;
+														 Bool isRebuild,
+														 Bool takeJob = TRUE ) = 0;	///< takeJob FALSE lays the plan and leaves the builder to it
 
 
 	// get task information
@@ -179,7 +180,7 @@ public:
 	// !!!
 
 	Real m_repairHealthPercentPerSecond;	///< how many health points per second the dozer repairs at
-	Real m_boredTime;											///< after this many frames, a dozer will try to find something to do on its own
+	DurationFramesReal m_boredTime;											///< after this many frames, a dozer will try to find something to do on its own
 	Real m_boredRange;										///< range the dozers try to auto repair when they're bored
 
 	static void buildFieldParse( MultiIniFieldParse &p );
@@ -224,7 +225,8 @@ public:
 	virtual Object* construct( const ThingTemplate *what, 
 														 const Coord3D *pos, Real angle, 
 														 Player *owningPlayer,
-														 Bool isRebuild );								///< construct an object
+														 Bool isRebuild,
+														 Bool takeJob = TRUE );								///< construct an object
 
 
 	// get task information

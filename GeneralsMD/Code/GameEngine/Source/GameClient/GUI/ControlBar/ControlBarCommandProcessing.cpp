@@ -368,6 +368,16 @@ CBCommandStatus ControlBar::processCommandUI( GameWindow *control,
 			if( m_currentSelectedDrawable == NULL )
 				break;
 
+			// a buildings tab cell another side's builder fills is that builder's to place
+			Drawable *source = m_currentSelectedDrawable;
+			if( Object *foreign = ControlBar_foreignBuilder( control ) )
+			{
+				obj = foreign;
+				source = foreign->getDrawable();
+				if( source == NULL )
+					break;
+			}
+
 			//Kris: September 27, 2002
 			//Make sure we have enough CASH to build it WHEN we click the button to build it,
 			//before actually previewing the purchase, otherwise, cancel altogether.
@@ -396,7 +406,7 @@ CBCommandStatus ControlBar::processCommandUI( GameWindow *control,
 			} 
 
 			// tell the UI that we want to build something so we get a building at the cursor
-			TheInGameUI->placeBuildAvailable( commandButton->getThingTemplate(), m_currentSelectedDrawable );
+			TheInGameUI->placeBuildAvailable( commandButton->getThingTemplate(), source );
 
 			break;
 
@@ -990,7 +1000,9 @@ CBCommandStatus ControlBar::processCommandUI( GameWindow *control,
 
       //what if container is subdued... assert a logic failure, perhaps?
 
-			// send message to exit
+			// send message to exit; with shift, once the transport has done what is on its list
+			if( TheInGameUI->isInWaypointMode() )
+				TheInGameUI->markNextOrderQueued( ORDER_QUEUE_APPEND );
 			GameMessage *exitMsg = TheMessageStream->appendMessage( GameMessage::MSG_EXIT );
 			exitMsg->appendObjectIDArgument( objWantingExit->getID() ); // 0 is the thing inside coming out
 
@@ -1022,6 +1034,9 @@ CBCommandStatus ControlBar::processCommandUI( GameWindow *control,
 			// Cancel GUI command mode.
 			TheInGameUI->setGUICommand( NULL );
 			pickAndPlayUnitVoiceResponse( TheInGameUI->getAllSelectedDrawables(), GameMessage::MSG_EVACUATE );
+			// shift: unload where its list ends, after the moves before it
+			if( TheInGameUI->isInWaypointMode() )
+				TheInGameUI->markNextOrderQueued( ORDER_QUEUE_APPEND );
 			TheMessageStream->appendMessage( GameMessage::MSG_EVACUATE );
 			break;
 		}  // end evacuate
@@ -1169,7 +1184,7 @@ CBCommandStatus ControlBar::processCommandUI( GameWindow *control,
 			for(Int i = 0; i < commandButton->getScienceVec().size(); ++i)
 			{
 				st = commandButton->getScienceVec()[ i ];
-				if(!player->hasScience(st) && TheScienceStore->playerHasPrereqsForScience(player, st) && TheScienceStore->getSciencePurchaseCost(st) <= player->getSciencePurchasePoints())
+				if(player->isCapableOfPurchasingScience(st))
 				{
 					break;
 				}

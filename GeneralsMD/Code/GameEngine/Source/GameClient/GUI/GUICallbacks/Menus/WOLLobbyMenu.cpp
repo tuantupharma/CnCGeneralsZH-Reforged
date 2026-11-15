@@ -75,6 +75,20 @@
 #include "GameNetwork/GameSpy/PersistentStorageThread.h"
 #include "GameNetwork/GameSpy/LobbyUtils.h"
 #include "GameNetwork/RankPointValue.h"
+#include "GameNetwork/GameDataMatch.h"
+
+// Which half of the room's pair differs from ours: a build the player updates, or data files he can put back
+static const char *joinRefusalLabel( const GameSpyStagingRoom *room )
+{
+	if (!room)
+		return "GUI:JoinFailedCRCMismatch";
+	switch (compareGameData(room->getExeCRC(), room->getIniCRC(), TheGlobalData->m_exeCRC, TheGlobalData->m_iniCRC))
+	{
+	case GAMEDATA_EXE_DIFFERS:	return "GUI:JoinFailedDifferentBuild";
+	case GAMEDATA_INI_DIFFERS:	return "GUI:JoinFailedDifferentData";
+	default:					return "GUI:JoinFailedCRCMismatch";
+	}
+}
 
 #ifdef _INTERNAL
 // for occasional debugging...
@@ -318,6 +332,16 @@ static void onlineLobbyScript( void )
 
 // Tooltips -------------------------------------------------------------------------------
 
+/* The nick a player-list row shows.  -online writes the rating and the ping after it, and a nick has no
+	 spaces, so the first word is the nick either way. */
+static AsciiString nickInRow( GameWindow *listbox, Int row )
+{
+	AsciiString full, nick;		// nextToken leaves nick empty on an empty row
+	full.translate( GadgetListBoxGetText( listbox, row, COLUMN_PLAYERNAME ) );
+	full.nextToken( &nick, " " );
+	return nick;
+}
+
 static void playerTooltip(GameWindow *window,
 													WinInstanceData *instData,
 													UnsignedInt mouse)
@@ -334,11 +358,16 @@ static void playerTooltip(GameWindow *window,
 		return;
 	}
 
-	UnicodeString uName = GadgetListBoxGetText(window, row, COLUMN_PLAYERNAME);
-	AsciiString aName;
-	aName.translate(uName);
+	AsciiString aName = nickInRow(window, row);
+	UnicodeString uName;
+	uName.translate(aName);
 
 	PlayerInfoMap::iterator it = TheGameSpyInfo->getPlayerInfoMap()->find(aName);
+	if (it == TheGameSpyInfo->getPlayerInfoMap()->end())
+	{
+		TheMouse->setCursorTooltip( UnicodeString::TheEmptyString );
+		return;
+	}
 	PlayerInfo *info = &(it->second);
 	Bool isLocalPlayer = (TheGameSpyInfo->getLocalName().compareNoCase(info->m_name) == 0);
 
@@ -361,7 +390,10 @@ static void playerTooltip(GameWindow *window,
 	Int					playerWins   = info->m_wins;
 	Int					playerLosses = info->m_losses;
 	UnicodeString	playerInfo;
-	playerInfo.format(TheGameText->fetch("TOOLTIP:PlayerInfo"), TheGameText->fetch(localeIdentifier).str(), playerWins, playerLosses);
+	if (OnlineIsEnabled())		// no locale on this service: EA's "Region: Unknown" goes
+		playerInfo.format(TheGameText->fetch("TOOLTIP:OnlinePlayerInfo"), playerWins, playerLosses);
+	else
+		playerInfo.format(TheGameText->fetch("TOOLTIP:PlayerInfo"), TheGameText->fetch(localeIdentifier).str(), playerWins, playerLosses);
 
 	UnicodeString tooltip = UnicodeString::TheEmptyString;//TheGameText->fetch("TOOLTIP:PlayersInLobby");
 	if (isLocalPlayer)
@@ -416,6 +448,17 @@ static void playerTooltip(GameWindow *window,
 	UnicodeString tmp;
 	tmp.format(u"\n%ls %ls", TheGameText->fetch(sideName).str(), TheGameText->fetch(rankName).str());
 	tooltip.concat(tmp);
+
+	OnlinePlayerInfo card;
+	if (OnlineIsEnabled() && OnlineGetPlayerInfo(aName, card))
+	{
+		tmp = OnlineRatingText(card);
+		if (!tmp.isEmpty())
+		{
+			tooltip.concat(u"\n");
+			tooltip.concat(tmp);
+		}
+	}
 
 	TheMouse->setCursorTooltip( tooltip, -1, NULL, 1.5f ); // the text and width are the only params used.  the others are the default values.
 }
@@ -557,6 +600,24 @@ static Int insertPlayerInListbox(const PlayerInfo& info, Color color)
 
 	const Image *rankImg = LookupSmallRankImage(currentSide, currentRank);
 
+	// -online: the rating and the round trip to the server after the nick (nickInRow reads it back)
+	OnlinePlayerInfo card;
+	if (OnlineIsEnabled() && OnlineGetPlayerInfo(info.m_name, card))
+	{
+		UnicodeString extra;
+		if (card.hasRating)
+		{
+			extra.format(u"  %d", card.rating);
+			uStr.concat(extra);
+		}
+		if (card.ping >= 0)
+		{
+			extra.format(TheGameText->fetch("GUI:OnlinePingMs"), card.ping);
+			uStr.concat(u"  ");
+			uStr.concat(extra);
+		}
+	}
+
 #if 0  //Officer's Club (preorder image) no longer used in Zero Hour
 	Int index = GadgetListBoxAddEntryImage(listboxLobbyPlayers, preorderImg, -1, 0, w, h);
 	GadgetListBoxAddEntryImage(listboxLobbyPlayers, rankImg, index, 1, w, h);
@@ -598,9 +659,7 @@ void PopulateLobbyPlayerListbox(void)
 				break;
 			}
 			++numSelected;
-			AsciiString selectedName;
-			uStr = GadgetListBoxGetText(listboxLobbyPlayers, selectedIndices[i], COLUMN_PLAYERNAME);
-			selectedName.translate(uStr);
+			AsciiString selectedName = nickInRow(listboxLobbyPlayers, selectedIndices[i]);
 			selectedNames.insert(selectedName);
 			DEBUG_LOG(("Saving off old selection %d (%s)\n", selectedIndices[i], selectedName.str()));
 		}
@@ -1179,6 +1238,22 @@ void WOLLobbyMenuUpdate( WindowLayout * layout, void *userData)
 									isHostPresent = TRUE;
 								}
 							}
+							if (!isHostPresent)
+							{
+								AsciiString hostName, names;
+								hostName.translate(room->getConstSlot(0)->getName());
+								for (Int i=0; i<MAX_SLOTS; ++i)
+								{
+									if (resp.stagingRoomPlayerNames[i].empty())
+										continue;
+									if (!names.isEmpty())
+										names.concat(',');
+									names.concat(resp.stagingRoomPlayerNames[i].c_str());
+								}
+								DEBUG_LOG(("Join: host '%s' (seat 0 state %d) is not among the room's players [%s]; leaving\n",
+									hostName.str(), (Int)room->getConstSlot(0)->getState(), names.str()));
+								SendStagingLeaveReason("NOHOST", hostName);
+							}
 						}
 					}
 					if (resp.joinStagingRoom.ok == PEERTrue && isHostPresent)
@@ -1313,12 +1388,13 @@ void WOLLobbyMenuUpdate( WindowLayout * layout, void *userData)
 									slot->setColor( resp.stagingRoom.color[i] );
 									// Every AI seat the ladder has, asked in one place: an advertised seat this list did not
 									// recognise used to show up in the browser as an empty one.
-									if (IsAISlotState((SlotState)resp.stagingRoom.profileID[i]))
+									const SlotState listed = ListedSeatState(resp.stagingRoomPlayerNames[i].c_str(), resp.stagingRoom.profileID[i]);
+									if (IsAISlotState(listed))
 									{
-										slot->setState((SlotState)resp.stagingRoom.profileID[i]);
+										slot->setState(listed);
 										++numPlayers;
 									}
-									else if (resp.stagingRoomPlayerNames[i].length())
+									else if (listed == SLOT_PLAYER)
 									{
 										UnicodeString nameUStr;
 										nameUStr.translate(resp.stagingRoomPlayerNames[i].c_str());
@@ -1567,7 +1643,7 @@ WindowMsgHandledType WOLLobbyMenuSystem( GameWindow *window, UnsignedInt msg,
 						req.peerRequestType = PeerRequest::PEERREQUEST_GETEXTENDEDSTAGINGROOMINFO;
 						req.stagingRoom.id = (Int)(intptr_t)GadgetListBoxGetItemData(control, rowSelected, 0);
 
-						if (lastID != req.stagingRoom.id || now > lastFrame + ConvertRetailFrames( 60U ))
+						if (lastID != req.stagingRoom.id || now > lastFrame + ConvertRetailFramesWall( 60U ))
 						{
 							TheGameSpyPeerMessageQueue->addRequest(req);
 						}
@@ -1667,7 +1743,7 @@ WindowMsgHandledType WOLLobbyMenuSystem( GameWindow *window, UnsignedInt msg,
 										TheWritableGlobalData->m_iniCRC = roomToJoin->getIniCRC();
 									}
 #else
-									GSMessageBoxOk(TheGameText->fetch("GUI:JoinFailedDefault"), TheGameText->fetch("GUI:JoinFailedCRCMismatch"));
+									GSMessageBoxOk(TheGameText->fetch("GUI:JoinFailedDefault"), TheGameText->fetch(joinRefusalLabel(roomToJoin)));
 									break;
 #endif
 								}
@@ -1818,8 +1894,7 @@ WindowMsgHandledType WOLLobbyMenuSystem( GameWindow *window, UnsignedInt msg,
 					}
 
 					GPProfile profileID = 0;
-					AsciiString aName;
-					aName.translate(GadgetListBoxGetText(control, rc->pos, COLUMN_PLAYERNAME));
+					AsciiString aName = nickInRow(control, rc->pos);
 					PlayerInfoMap::iterator it = TheGameSpyInfo->getPlayerInfoMap()->find(aName);
 					if (it != TheGameSpyInfo->getPlayerInfoMap()->end())
 						profileID = it->second.m_profileID;

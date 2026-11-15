@@ -53,6 +53,8 @@
 #include "GameClient/ObserverCamera.h"
 #include "GameClient/PlayerColorScheme.h"
 #include "GameClient/Shadow.h"
+#include "GameClient/TankSkin.h"
+#include "GameNetwork/GameInfo.h"
 #include "GameLogic/GameLogic.h"		// for real-time frame
 #include "GameLogic/GhostObject.h"
 #include "GameLogic/PartitionManager.h"
@@ -258,6 +260,7 @@ enum ACBits
 	MAINTAIN_FRAME_ACROSS_STATES2,
 	MAINTAIN_FRAME_ACROSS_STATES3,
 	MAINTAIN_FRAME_ACROSS_STATES4,
+	PREATTACK_RESTARTS,
 };
 
 static const char *ACBitsNames[] =
@@ -272,7 +275,8 @@ static const char *ACBitsNames[] =
 	"MAINTAIN_FRAME_ACROSS_STATES2",
 	"MAINTAIN_FRAME_ACROSS_STATES3",
 	"MAINTAIN_FRAME_ACROSS_STATES4",
-	
+	"PREATTACK_RESTARTS",
+
 	NULL
 };
 
@@ -1072,6 +1076,12 @@ W3DModelDrawModuleData::W3DModelDrawModuleData() :
 	m_stabilizedTurretPitch(false),
 	m_barrelArtPitch(0.0f),
 	m_landingGearUpHeight(0.0f),
+	m_quadMaxTilt(0.0f),
+	m_quadTiltGravity(400.0f),
+	m_quadTiltDrag(1.0f),
+	m_quadTiltTime(DurationFramesReal::fromRaw(120.0f)),
+	m_quadYawTime(DurationFramesReal::fromRaw(300.0f)),
+	m_quadMaxDiveTilt(0.0f),
 #ifdef CACHE_ATTACH_BONE
 	m_attachToDrawableBoneOffsetValid(false),
 #endif
@@ -1081,13 +1091,13 @@ W3DModelDrawModuleData::W3DModelDrawModuleData() :
 	const Real MAX_SHIFT = 3.0f;			
 	const Real INITIAL_RECOIL_RATE = 2.0f;	
 	const Real RECOIL_DAMPING = 0.4f;	
-	const Real SETTLE_RATE = 0.065f;		
+	const Real SETTLE_RATE_PER_SEC = 1.9499999f;		// ConvertRetailPerFrameRate( 0.065f ) a frame at the native speed
 
 	m_projectileBoneFeedbackEnabledSlots = 0;
-	m_initialRecoil = ConvertRetailPerFrameRate(INITIAL_RECOIL_RATE);
+	m_initialRecoil.setRaw( INITIAL_RECOIL_RATE * (Real)RETAIL_LOGICFRAMES_PER_SECOND );	// per second: 60, ConvertRetailPerFrameRate's 3.0f at the native speed
 	m_maxRecoil = MAX_SHIFT;
-	m_recoilDamping = ConvertRetailPerFrameFactor(RECOIL_DAMPING);
-	m_recoilSettle = ConvertRetailPerFrameRate(SETTLE_RATE);
+	m_recoilDamping.setRaw( RECOIL_DAMPING );
+	m_recoilSettle.setRaw( SETTLE_RATE_PER_SEC );
 
 
   m_receivesDynamicLights = TRUE;
@@ -1261,16 +1271,22 @@ void W3DModelDrawModuleData::buildFieldParse(MultiIniFieldParse& p)
 
 	static const FieldParse dataFieldParse[] = 
 	{
-		{ "InitialRecoilSpeed",	INI::parseVelocityReal, NULL, offsetof(W3DModelDrawModuleData, m_initialRecoil) },
+		{ "InitialRecoilSpeed",	SPEED_FIELD( W3DModelDrawModuleData, m_initialRecoil ) },
 		{ "MaxRecoilDistance",	INI::parseReal, NULL, offsetof(W3DModelDrawModuleData, m_maxRecoil) },
-		{ "RecoilDamping",	INI::parseRetailPerFrameFactorReal, NULL, offsetof(W3DModelDrawModuleData, m_recoilDamping) },
-		{ "RecoilSettleSpeed",	INI::parseVelocityReal, NULL, offsetof(W3DModelDrawModuleData, m_recoilSettle) },
+		{ "RecoilDamping",	SPEED_FIELD( W3DModelDrawModuleData, m_recoilDamping ) },
+		{ "RecoilSettleSpeed",	SPEED_FIELD( W3DModelDrawModuleData, m_recoilSettle ) },
 		{ "OkToChangeModelColor",	INI::parseBool, NULL, offsetof(W3DModelDrawModuleData, m_okToChangeModelColor) },
 		{ "AnimationsRequirePower",	INI::parseBool, NULL, offsetof(W3DModelDrawModuleData, m_animationsRequirePower) },
 		{ "StabilizedTurretPitch",	INI::parseBool, NULL, offsetof(W3DModelDrawModuleData, m_stabilizedTurretPitch) },
 		{ "BarrelArtPitch",	INI::parseAngleReal, NULL, offsetof(W3DModelDrawModuleData, m_barrelArtPitch) },
 		{ "LandingGearSubObject",	INI::parseAsciiString, NULL, offsetof(W3DModelDrawModuleData, m_landingGearSubObject) },
 		{ "LandingGearUpHeight",	INI::parseReal, NULL, offsetof(W3DModelDrawModuleData, m_landingGearUpHeight) },
+		{ "QuadMaxTilt",	INI::parseAngleReal, NULL, offsetof(W3DModelDrawModuleData, m_quadMaxTilt) },
+		{ "QuadTiltGravity",	INI::parseReal, NULL, offsetof(W3DModelDrawModuleData, m_quadTiltGravity) },
+		{ "QuadTiltDrag",	INI::parseReal, NULL, offsetof(W3DModelDrawModuleData, m_quadTiltDrag) },
+		{ "QuadTiltTime",	SPEED_FIELD( W3DModelDrawModuleData, m_quadTiltTime ) },
+		{ "QuadYawTime",	SPEED_FIELD( W3DModelDrawModuleData, m_quadYawTime ) },
+		{ "QuadMaxDiveTilt",	INI::parseAngleReal, NULL, offsetof(W3DModelDrawModuleData, m_quadMaxDiveTilt) },
 		{ "ParticlesAttachedToAnimatedBones",	INI::parseBool, NULL, offsetof(W3DModelDrawModuleData, m_particlesAttachedToAnimatedBones) },
 		{ "MinLODRequired",		INI::parseStaticGameLODLevel,	NULL,	offsetof(W3DModelDrawModuleData, m_minLODRequired) },
 		{ "ProjectileBoneFeedbackEnabledSlots", INI::parseBitString32, TheWeaponSlotTypeNames, offsetof(W3DModelDrawModuleData, m_projectileBoneFeedbackEnabledSlots) },
@@ -1394,6 +1410,9 @@ void W3DModelDraw::showSubObject( const AsciiString& name, Bool show )
 			info.hide = !show;
 			m_subObjectVec.push_back( info );
 		}
+		// a caller that never calls updateSubObjects (a payload carrier's shown parts) had the next
+		// projectile apply put this order on the model, and still does
+		forgetProjectileShown();
 	}
 }
 
@@ -1784,6 +1803,20 @@ const ModelConditionInfo* W3DModelDrawModuleData::findBestInfo(const ModelCondit
 //-------------------------------------------------------------------------------------------------
 
 //-------------------------------------------------------------------------------------------------
+/** The skin id this model wears for this machine, 0 for none: the owner's lobby seat's, or a disguised
+	unit's apparent owner's (TankSkin_seenPlayerIndex).  Inside the render's overlap window the object
+	may be changing or going away beside it, so the player comes from the copy taken at the sync point. */
+//-------------------------------------------------------------------------------------------------
+static Int ownerSkin( const Drawable *draw, const AsciiString &modelName )
+{
+	if (TheGameInfo == NULL)
+		return 0;		// a mission: nobody wears a skin, so no owner to look up
+	const Int playerIndex = LogicThread::isInsideWindow() ? draw->getObjectForDraw().skinPlayerIndex
+		: TankSkin_seenPlayerIndex(draw->getObject());
+	return TankSkin_forModel(TankSkin_ofPlayer(playerIndex), modelName.str());
+}
+
+//-------------------------------------------------------------------------------------------------
 //-------------------------------------------------------------------------------------------------
 W3DModelDraw::W3DModelDraw(Thing *thing, const ModuleData* moduleData) : DrawModule(thing, moduleData)
 {
@@ -1795,7 +1828,9 @@ W3DModelDraw::W3DModelDraw(Thing *thing, const ModuleData* moduleData) : DrawMod
 	m_headlightPass = 0;
 	m_pauseAnimation = false;
 	m_curState = NULL;
+	forgetProjectileShown();
 	m_hexColor = 0;
+	m_skin = 0;
 	m_renderObject = NULL;
 	m_shadow = NULL;
 	m_contactShadow = NULL;
@@ -1817,6 +1852,7 @@ W3DModelDraw::W3DModelDraw(Thing *thing, const ModuleData* moduleData) : DrawMod
 	m_groundMotionPos.zero();
 	m_groundMotionAngle = 0.0f;
 	m_groundMotionFrame = 0;
+	memset(&m_quad, 0, sizeof(m_quad));
 
 	ModelConditionFlags emptyFlags;
 	const ModelConditionInfo* info = findBestInfo(emptyFlags);
@@ -1962,18 +1998,19 @@ void W3DModelDraw::releaseShadows(void)	///< frees all shadow resources used by 
 }
 
 /** Does this model contain any skinned (bone-deformed) geometry?  Infantry and other animated
-characters do; vehicles and structures are built from rigid sub-meshes.  Only LOD 0 is checked - that
-is the LOD the shadow system fetches its live meshes from. */
+characters do; vehicles and structures are built from rigid sub-meshes.  Only the top LOD, the full
+model, is checked - that is the LOD the shadow system fetches its live meshes from. */
 static Bool hasSkinnedGeometry(RenderObjClass *robj)
 {
 	if (robj == NULL || robj->Class_ID() != RenderObjClass::CLASSID_HLOD)
 		return FALSE;
 
 	HLodClass *hlod=(HLodClass *)robj;
+	const Int top = hlod->Get_LOD_Count()-1;
 
-	for (Int i=0; i<hlod->Get_Lod_Model_Count(0); i++)
+	for (Int i=0; i<hlod->Get_Lod_Model_Count(top); i++)
 	{
-		RenderObjClass *lodModel=hlod->Peek_Lod_Model(0,i);
+		RenderObjClass *lodModel=hlod->Peek_Lod_Model(top,i);
 
 		if (lodModel && lodModel->Class_ID() == RenderObjClass::CLASSID_MESH &&
 				((MeshClass *)lodModel)->Peek_Model()->Get_Flag(MeshGeometryClass::SKIN))
@@ -2344,7 +2381,7 @@ void W3DModelDraw::adjustAnimSpeedToMovementSpeed()
 				{
 					// if distance-covered is specified for this anim, adjust the frame rate
 					// so it appears to sync with our unit speed
-					Real desiredDurationInMsec = dist / speed * MSEC_PER_LOGICFRAME_REAL;
+					Real desiredDurationInMsec = dist / speed * GAME_MSEC_PER_LOGICFRAME_REAL;	// the W3D clock runs game time
 					setCurAnimDurationInMsec(desiredDurationInMsec);
 				}
 			}
@@ -2403,6 +2440,14 @@ void W3DModelDraw::doDrawModule(const Matrix3D* transformMtx)
 {
 	// update whether or not we should be animating.
 	setPauseAnimation( !getDrawable()->getShouldAnimate(getW3DModelDrawModuleData()->m_animationsRequirePower) );
+
+	Matrix3D quadTransform;
+	if (getW3DModelDrawModuleData()->m_quadMaxTilt > 0.0f)
+	{
+		quadTransform = *transformMtx;
+		applyQuadAttitude(quadTransform);
+		transformMtx = &quadTransform;
+	}
 
 	Matrix3D scaledTransform;
 	if (getDrawable()->getInstanceScale() != 1.0f)
@@ -2487,9 +2532,21 @@ void W3DModelDraw::doDrawModule(const Matrix3D* transformMtx)
 			for (size_t i = 0; i < m_curState->m_conditionsYesVec.size(); ++i)
 				airLoco = airLoco || m_curState->m_conditionsYesVec[i].test(MODELCONDITION_JETEXHAUST);
 			const Coord3D* pos = getDrawable()->getPositionForDraw();
-			gear->Set_Hidden(airLoco &&
-				pos->z - TheTerrainRenderObject->getHeightMapHeight(pos->x, pos->y, NULL) > modData->m_landingGearUpHeight);
+			const Bool up = airLoco &&
+				pos->z - TheTerrainRenderObject->getHeightMapHeight(pos->x, pos->y, NULL) > modData->m_landingGearUpHeight;
+			gear->Set_Hidden(up);
 			gear->Release_Ref();
+			// every level's gear on a model with levels of detail, as hideShowSubObject does
+			if (m_renderObject->Class_ID() == RenderObjClass::CLASSID_HLOD && ((HLodClass *)m_renderObject)->Get_LOD_Count() > 1)
+			{
+				for (Int i = 0; i < m_renderObject->Get_Num_Sub_Objects(); ++i)
+				{
+					RenderObjClass* part = m_renderObject->Get_Sub_Object(i);
+					if (HLodClass::Is_Part_Or_LOD_Copy(part->Get_Name(), modData->m_landingGearSubObject.str()))
+						part->Set_Hidden(up);
+					part->Release_Ref();
+				}
+			}
 		}
 	}
 
@@ -2771,6 +2828,136 @@ UnsignedInt W3DModelDraw::stepGroundMotion(Real& forward, Real& turn)
 }
 
 //-------------------------------------------------------------------------------------------------
+/** Draws the model flying as a quadcopter, whatever moves it (QuadMaxTilt in the Draw block). The
+	* Alpagu's drone is a shell on a Bezier path with no locomotor to lean it, so the attitude comes
+	* from where the drawable went from one logic frame to the next, and the logic never sees it.
+	*
+	* A quad holds itself up by tilting its rotors' push: the body leans toward the horizontal push it
+	* needs, which is the acceleration plus what holds the speed against the air (QuadTiltDrag times
+	* the speed), set against the pull that keeps it up (QuadTiltGravity), and clamped at QuadMaxTilt.
+	* So it dips its nose as it sets off, keeps it down at speed, lifts it braking and banks into a
+	* sideways pull; diving, the nose follows the path down (QuadMaxDiveTilt). The nose turns to the heading while the drone moves sideways at all,
+	* and holds the last heading on a climb or a drop straight down. Speed, tilt and heading each ease
+	* in over their time, which is what keeps the shell's path, a straight line between 30 Hz samples,
+	* from reading as a snap. The tilt is worked out in the world and read in the body's frame, so a
+	* nose still coming round turns part of the forward lean into a bank, as a real quad's does. */
+//-------------------------------------------------------------------------------------------------
+void W3DModelDraw::applyQuadAttitude(Matrix3D& mtx)
+{
+	const W3DModelDrawModuleData* d = getW3DModelDrawModuleData();
+	const Coord3D* pos = getDrawable()->getPosition();
+	const UnsignedInt now = TheGameLogic->getFrame();
+	const UnsignedInt MAX_GAP = 4;							// logic frames; past a longer gap (a hitch) the speed is taken fresh
+	const Real MIN_HEADING_SPEED = 10.0f;			// per second; slower than this sideways, the nose holds its heading
+
+	if (now != m_quad.frame)
+	{
+		const UnsignedInt frames = now - m_quad.frame;
+		if (m_quad.frame == 0)
+		{
+			// first sight: no motion known yet, so level and facing the way the logic left it
+			m_quad.velX = m_quad.velY = m_quad.velZ = 0.0f;
+			m_quad.leanX = m_quad.leanY = 0.0f;
+			m_quad.yaw = mtx.Get_Z_Rotation();
+			m_quad.velKnown = false;
+		}
+		else
+		{
+			const Real perSecond = (Real)LOGICFRAMES_PER_GAME_SECOND / (Real)frames;
+			const Real ease = d->m_quadTiltTime > (Real)frames ? (Real)frames / d->m_quadTiltTime : 1.0f;
+			const Real rawX = (pos->x - m_quad.pos.x) * perSecond;
+			const Real rawY = (pos->y - m_quad.pos.y) * perSecond;
+			const Real rawZ = (pos->z - m_quad.pos.z) * perSecond;
+			Real velX, velY, pushX, pushY;
+			if (!m_quad.velKnown || frames > MAX_GAP)
+			{
+				// the speed straight off the step, and no acceleration read into it: the whole speed
+				// counted as one frame's change would dip the nose to the limit for nothing
+				velX = rawX;
+				velY = rawY;
+				m_quad.velZ = rawZ;
+				pushX = d->m_quadTiltDrag * velX;
+				pushY = d->m_quadTiltDrag * velY;
+				m_quad.velKnown = true;
+			}
+			else
+			{
+				velX = m_quad.velX + (rawX - m_quad.velX) * ease;
+				velY = m_quad.velY + (rawY - m_quad.velY) * ease;
+				m_quad.velZ += (rawZ - m_quad.velZ) * ease;
+				pushX = (velX - m_quad.velX) * perSecond + d->m_quadTiltDrag * velX;
+				pushY = (velY - m_quad.velY) * perSecond + d->m_quadTiltDrag * velY;
+			}
+			m_quad.velX = velX;
+			m_quad.velY = velY;
+
+			Real tiltX = 0.0f;
+			Real tiltY = 0.0f;
+			const Real push = sqrtf(pushX * pushX + pushY * pushY);
+			if (push > 0.001f && d->m_quadTiltGravity > 0.0f)
+			{
+				Real tilt = atan2f(push, d->m_quadTiltGravity);
+				if (tilt > d->m_quadMaxTilt)
+					tilt = d->m_quadMaxTilt;
+				tiltX = pushX * tilt / push;
+				tiltY = pushY * tilt / push;
+			}
+
+			// Coming down, the nose points down the path, a kamikaze's dive and not a hover's: the lean
+			// along the nose is raised to the path's angle under level, up to QuadMaxDiveTilt. It only
+			// ever raises it, so braking in a dive never lifts the nose. It fades in with the speed
+			// over the first MIN_HEADING_SPEED, so a drone all but standing still does not tip over,
+			// and has no gate on the sideways speed, which would drop the nose's lean in one step
+			// as a steep dive slowed through it.
+			const Real speed = sqrtf(velX * velX + velY * velY);
+			if (d->m_quadMaxDiveTilt > 0.0f && m_quad.velZ < 0.0f)
+			{
+				Real dive = atan2f(-m_quad.velZ, speed);
+				if (dive > d->m_quadMaxDiveTilt)
+					dive = d->m_quadMaxDiveTilt;
+				const Real fade = sqrtf(speed * speed + m_quad.velZ * m_quad.velZ) / MIN_HEADING_SPEED;
+				if (fade < 1.0f)
+					dive *= fade;
+				const Real noseX = cosf(m_quad.yaw);
+				const Real noseY = sinf(m_quad.yaw);
+				const Real along = tiltX * noseX + tiltY * noseY;
+				if (along < dive)
+				{
+					tiltX += (dive - along) * noseX;
+					tiltY += (dive - along) * noseY;
+				}
+			}
+			m_quad.leanX += (tiltX - m_quad.leanX) * ease;
+			m_quad.leanY += (tiltY - m_quad.leanY) * ease;
+
+			if (speed > MIN_HEADING_SPEED)
+			{
+				const Real yawEase = d->m_quadYawTime > (Real)frames ? (Real)frames / d->m_quadYawTime : 1.0f;
+				m_quad.yaw = normalizeAngle(m_quad.yaw + stdAngleDiff(atan2f(velY, velX), m_quad.yaw) * yawEase);
+			}
+		}
+		m_quad.pos = *pos;
+		m_quad.frame = now;
+	}
+
+	const Real c = cosf(m_quad.yaw);
+	const Real s = sinf(m_quad.yaw);
+	const Real pitch = m_quad.leanX * c + m_quad.leanY * s;		// toward the nose: nose down
+	const Real roll = m_quad.leanY * c - m_quad.leanX * s;		// toward the left side: left side down
+	const Vector3 at = mtx.Get_Translation();
+	// a uniform scale the drawable carries in (its instance matrix: the Beret's Kargu, drawn at the
+	// size of the one in his hands while it stands on the ground) survives the new attitude
+	const Real scale = mtx.Get_X_Vector().Length();
+	mtx.Make_Identity();
+	mtx.Set_Translation(at);
+	mtx.Rotate_Z(m_quad.yaw);
+	mtx.Rotate_Y(pitch);
+	mtx.Rotate_X(-roll);
+	if (fabs(scale - 1.0f) > 0.001f)
+		mtx.Scale(scale);
+}
+
+//-------------------------------------------------------------------------------------------------
 Real W3DModelDraw::getCurAnimDistanceCovered() const
 {
 	if (m_curState != NULL && m_whichAnimInCurState >= 0)
@@ -2839,10 +3026,66 @@ static void doHideShowBoneSubObjs(Bool state, Int numSubObjects, Int boneIdx, Re
 }
 
 //-------------------------------------------------------------------------------------------------
+/** Hide or show the sub-object a ShowSubObject or HideSubObject line names, with everything on the
+	bones below its own.  The part is the first sub-object of that name, as Get_Sub_Object_By_Name finds
+	it, and on a model of one level, every retail one, that is all.  A model with levels of detail
+	carries the part once a level, and the first copy is the coarsest level's, so every copy takes the
+	order there, or an upgrade's pods would come and go as the camera zooms.  FALSE when nothing has
+	the name. */
+static Bool hideShowSubObject(RenderObjClass *fullObject, const char *name, Bool hide)
+{
+	Int objIndex;
+	RenderObjClass *subObj = fullObject->Get_Sub_Object_By_Name(name, &objIndex);
+	if (subObj == NULL)
+		return FALSE;
+	subObj->Release_Ref();
+
+	const Bool everyLevel = fullObject->Class_ID() == RenderObjClass::CLASSID_HLOD
+		&& ((HLodClass *)fullObject)->Get_LOD_Count() > 1;
+	const Int numSubObjects = fullObject->Get_Num_Sub_Objects();
+	const HTreeClass *htree = fullObject->Get_HTree();
+	for (Int i = everyLevel ? 0 : objIndex; i < (everyLevel ? numSubObjects : objIndex + 1); ++i)
+	{
+		subObj = fullObject->Get_Sub_Object(i);
+		if (i == objIndex || HLodClass::Is_Part_Or_LOD_Copy(subObj->Get_Name(), name))
+		{
+			subObj->Set_Hidden(hide);
+			//get the bone of this subobject so we can hide all other child objects that use this bone
+			//as a parent.
+			if (htree)
+				doHideShowBoneSubObjs(hide, numSubObjects, fullObject->Get_Sub_Object_Bone_Index(0, i), fullObject, htree);
+		}
+		subObj->Release_Ref();
+	}
+	return TRUE;
+}
+
+//-------------------------------------------------------------------------------------------------
 void ModelConditionInfo::WeaponBarrelInfo::setMuzzleFlashHidden(RenderObjClass *fullObject, Bool hide) const
 {
 	if (fullObject)
 	{
+		/* A model with levels of detail can carry the flash at more than one of them, and the first
+			 part on the bone overall is the coarsest level's: the top one's would keep the state it loaded
+			 with.  So the first part on the bone in each level, which for a model of one level, every
+			 retail one, is the same part as below. */
+		if (fullObject->Class_ID() == RenderObjClass::CLASSID_HLOD && ((HLodClass *)fullObject)->Get_LOD_Count() > 1)
+		{
+			HLodClass *hlod = (HLodClass *)fullObject;
+			for (Int lod = 0; lod < hlod->Get_LOD_Count(); ++lod)
+			{
+				for (Int i = 0; i < hlod->Get_Lod_Model_Count(lod); ++i)
+				{
+					if (hlod->Get_Lod_Model_Bone(lod, i) == m_muzzleFlashBone)
+					{
+						hlod->Peek_Lod_Model(lod, i)->Set_Hidden(hide);
+						break;
+					}
+				}
+			}
+			return;
+		}
+
 		RenderObjClass* childObject = fullObject->Get_Sub_Object_On_Bone(0, m_muzzleFlashBone);
 		if (childObject)
 		{
@@ -2859,6 +3102,21 @@ void ModelConditionInfo::WeaponBarrelInfo::setMuzzleFlashHidden(RenderObjClass *
 //-------------------------------------------------------------------------------------------------
 void W3DModelDraw::doHideShowSubObjs(const std::vector<ModelConditionInfo::HideShowSubObjInfo>* vec)
 {
+	// a state's own hide/show can take in the projectile parts, so they are shown again after it
+	forgetProjectileShown();
+	applyHideShowSubObjs(vec);
+}
+
+//-------------------------------------------------------------------------------------------------
+void W3DModelDraw::forgetProjectileShown()
+{
+	for (Int slot = 0; slot < WEAPONSLOT_COUNT; ++slot)
+		m_projectileShown[slot].state = NULL;
+}
+
+//-------------------------------------------------------------------------------------------------
+void W3DModelDraw::applyHideShowSubObjs(const std::vector<ModelConditionInfo::HideShowSubObjInfo>* vec)
+{
 	if (!m_renderObject)
 		return;
 
@@ -2866,36 +3124,19 @@ void W3DModelDraw::doHideShowSubObjs(const std::vector<ModelConditionInfo::HideS
 	{
 		for (std::vector<ModelConditionInfo::HideShowSubObjInfo>::const_iterator it = vec->begin(); it != vec->end(); ++it)
 		{
-			Int objIndex;
-			RenderObjClass* subObj;
-
-			if ((subObj = m_renderObject->Get_Sub_Object_By_Name(it->subObjName.str(), &objIndex)) != NULL)
-			{
-				subObj->Set_Hidden(it->hide);
-
-				const HTreeClass *htree = m_renderObject->Get_HTree();
-				if (htree)
-				{	
-					//get the bone of this subobject so we can hide all other child objects that use this bone
-					//as a parent.
-					Int boneIdx = m_renderObject->Get_Sub_Object_Bone_Index(0, objIndex);
-					doHideShowBoneSubObjs(it->hide, m_renderObject->Get_Num_Sub_Objects(), boneIdx, m_renderObject, htree);
-				}
-				subObj->Release_Ref();
-			}
-			else
+			if (!hideShowSubObject(m_renderObject, it->subObjName.str(), it->hide))
 			{
 				DEBUG_CRASH(("*** ASSET ERROR: SubObject %s not found (%s)!\n",it->subObjName.str(),getDrawable()->getTemplate()->getName().str()));
 			}
 		}
 	}
 
-	//Kris (added Aug 2002) 
+	//Kris (added Aug 2002)
 	//This is really important as it allows a person to override modelcondition show/hide objects. Used by the A10 strike
 	//September 2002 -- now used by the UpgradeSubObject system.
 	if( !m_subObjectVec.empty() )
 	{
-		updateSubObjects();
+		applySubObjectVec();
 	}
 }
 
@@ -3375,23 +3616,7 @@ void W3DModelDraw::hideGarrisonFlags(Bool hide)
 	if (!m_renderObject)
 		return;
 
-	Int objIndex;
-	RenderObjClass* subObj;
-
-	if ((subObj = m_renderObject->Get_Sub_Object_By_Name("POLE", &objIndex)) != NULL)
-	{
-		subObj->Set_Hidden(hide);
-
-		const HTreeClass *htree = m_renderObject->Get_HTree();
-		if (htree)
-		{	
-			//get the bone of this subobject so we can hide all other child objects that use this bone
-			//as a parent.
-			Int boneIdx = m_renderObject->Get_Sub_Object_Bone_Index(0, objIndex);
-			doHideShowBoneSubObjs(hide, m_renderObject->Get_Num_Sub_Objects(), boneIdx, m_renderObject, htree);
-		}
-		subObj->Release_Ref();
-	}
+	hideShowSubObject(m_renderObject, "POLE", hide);
 }
 #endif
 
@@ -3648,10 +3873,15 @@ void W3DModelDraw::setModelState(const ModelConditionInfo* newState)
 			// he's already got one, you see
 			return;
 		} 
-		// check for allow-to-finish implicit transitions
+		// check for allow-to-finish implicit transitions; a PREATTACK_RESTARTS animation also plays out
+		// before a transition from it (the Beret's last placing finishes before he stands up through
+		// KGU), and a state with no transition from it (walking, dying) still cuts it off
 		else if (newState != m_curState &&
-							newState->m_allowToFinishKey != NAMEKEY_INVALID &&
-							newState->m_allowToFinishKey == m_curState->m_transitionKey &&
+							((newState->m_allowToFinishKey != NAMEKEY_INVALID &&
+								newState->m_allowToFinishKey == m_curState->m_transitionKey) ||
+							 (testFlagBit(m_curState->m_flags, PREATTACK_RESTARTS) &&
+								m_curState->m_transitionKey != NAMEKEY_INVALID && newState->m_transitionKey != NAMEKEY_INVALID &&
+								findTransitionForSig(buildTransitionSig(m_curState->m_transitionKey, newState->m_transitionKey)) != NULL)) &&
 							m_renderObject &&
 							!isAnimationComplete(m_renderObject))
 		{
@@ -3728,9 +3958,11 @@ void W3DModelDraw::setModelState(const ModelConditionInfo* newState)
 		{
 			const W3DModelDrawModuleData* data = getW3DModelDrawModuleData();
 			Bool swapsTexture = !data->m_replaceTextureOld.isEmpty();
+			// the owner's cosmetic skin; an owner change comes back through replaceIndicatorColor
+			m_skin = ownerSkin(draw, newState->m_modelName);
 			LOGIC_CENSUS( CENSUS_ASSET_LOAD );
 			m_renderObject = W3DDisplay::m_assetManager->Create_Render_Obj(newState->m_modelName.str(), draw->getScale(), m_hexColor,
-				swapsTexture ? data->m_replaceTextureOld.str() : NULL, swapsTexture ? data->m_replaceTextureNew.str() : NULL);
+				swapsTexture ? data->m_replaceTextureOld.str() : NULL, swapsTexture ? data->m_replaceTextureNew.str() : NULL, m_skin);
 			DEBUG_ASSERTCRASH(m_renderObject, ("*** ASSET ERROR: Model %s not found!\n",newState->m_modelName.str()));
 		}
 
@@ -3925,9 +4157,11 @@ void W3DModelDraw::replaceIndicatorColor(Color color)
 		return;
 
 	if (getRenderObject())
-	{	
+	{
 		Int newColor = (color == 0) ? 0 : (color | 0xFF000000);
-		if (newColor != m_hexColor)
+		// a new owner of the same colour (a relationship colour scheme) can still bring another skin
+		const Int skin = m_curState ? ownerSkin(getDrawable(), m_curState->m_modelName) : m_skin;
+		if (newColor != m_hexColor || skin != m_skin)
 		{
 			m_hexColor = newColor;
 
@@ -4384,11 +4618,14 @@ void W3DModelDraw::reactToTransformChange( const Matrix3D* oldMtx,
 	if( m_renderObject )
 	{
 		Matrix3D mtx = *getDrawable()->getTransformMatrix();
+		// a quad keeps flying off the view region too, or it shows level for a moment as it comes in
+		if (getW3DModelDrawModuleData()->m_quadMaxTilt > 0.0f)
+			applyQuadAttitude(mtx);
 		adjustTransformMtx(mtx);
 		m_renderObject->Set_Transform(mtx);
 	}
 
-	if (m_trackRenderObject) 
+	if (m_trackRenderObject)
 	{
 		Object *obj = getDrawable()->getObject();
 		const Coord3D* pos = getDrawable()->getPosition();
@@ -4401,10 +4638,13 @@ void W3DModelDraw::reactToTransformChange( const Matrix3D* oldMtx,
 		}
 		else
 		{
+			// asked only on seats that see the tank, and from the tick's flush as often as from the draw:
+			// the height is measured, never stored in the logic object (Thing::CachePeek)
+			Thing::CachePeek trackReadLeavesNoCache;
 			if (obj && obj->isSignificantlyAboveTerrain())
 			{
 				m_trackRenderObject->setAirborne();
-			} 
+			}
 			m_trackRenderObject->addEdgeToTrack(pos->x, pos->y);
 		}
 	}
@@ -4574,50 +4814,58 @@ Bool W3DModelDraw::handleWeaponFireFX(WeaponSlotType wslot, Int specificBarrelTo
 //-------------------------------------------------------------------------------------------------
 void W3DModelDraw::setAnimationLoopDuration(UnsignedInt numFrames)
 {
-// this is never defined -- srj
-#ifdef NO_DURATIONS_ON_TRANSITIONS
-	if (m_curState != NULL && m_curState->m_transition != NO_TRANSITION && 
-			m_nextState != NULL && m_nextState->m_transition == NO_TRANSITION)
+	// A duration that lands on a transition (a PREATTACK state reached through one) is split between
+	// it and the state it leads to.  EA stretched the transition alone over all of it, and the real
+	// state then started at its natural rate just as the time ran out: the Alpagu's ten frame turn
+	// from the controller to kneeling took the whole 2.1 s and his drone placing showed 5 of its 45
+	// frames before the shot.  The split
+	// guesses from the first animation of each, as setAnimationCompletionTime always did.
+	UnsignedInt curFrames = numFrames;
+	m_nextStateAnimLoopDuration = NO_NEXT_DURATION;
+
+	// PREATTACK_RESTARTS: an animation that runs on past the preattack, through the shots, is started
+	// over at its own speed when the preattack begins instead of squeezed into it, so it keeps time
+	// with the shots (the Maroon Beret's Kargu placing: 3.7 s of three placings, one a shot, played
+	// whole inside the 1.4 s to the first one, and then held on its last frame)
+	if (m_curState != NULL && testFlagBit(m_curState->m_flags, PREATTACK_RESTARTS) && m_nextState == NULL)
 	{
-		DEBUG_LOG(("deferring pending duration of %d frames\n",numFrames));
-		m_nextStateAnimLoopDuration = numFrames;
+		adjustAnimation(m_curState, -1.0);
 		return;
 	}
-
-	m_nextStateAnimLoopDuration = NO_NEXT_DURATION;
-	DEBUG_ASSERTCRASH(m_curState != NULL && m_curState->m_transition == NO_TRANSITION, ("Hmm, setAnimationLoopDuration on a transition state is probably not right... see srj"));
-#else
-	m_nextStateAnimLoopDuration = NO_NEXT_DURATION;
-#endif
-	Real desiredDurationInMsec = ceilf(numFrames * MSEC_PER_LOGICFRAME_REAL);
-	setCurAnimDurationInMsec(desiredDurationInMsec);
+	if (m_curState != NULL && m_curState->m_transitionSig != NO_TRANSITION && m_curState->m_animations.size() > 0 &&
+			m_nextState != NULL && m_nextState->m_transitionSig == NO_TRANSITION && m_nextState->m_animations.size() > 0)
+	{
+		// a natural duration is -1 until something loaded that animation, and the pending state's
+		// usually is not yet: a negative one would hand the real state nothing, or wrap to 4e9 frames
+		struct Natural { static Real msec(const W3DAnimationInfo& info)
+		{
+			if (info.getNaturalDurationInMsec() < 0.0f)
+			{
+				HAnimClass* handle = info.getAnimHandle();
+				REF_PTR_RELEASE(handle);
+			}
+			return info.getNaturalDurationInMsec();
+		} };
+		const Real t1 = Natural::msec(m_curState->m_animations.front());
+		const Real t2 = Natural::msec(m_nextState->m_animations.front());
+		if (t1 > 0.0f && t2 > 0.0f)
+		{
+			curFrames = REAL_TO_INT_FLOOR((numFrames * t1) / (t1 + t2));
+			m_nextStateAnimLoopDuration = numFrames - curFrames;
+		}
+	}
+	setCurAnimDurationInMsec(ceilf(curFrames * GAME_MSEC_PER_LOGICFRAME_REAL));	// the W3D clock runs game time
 }
 
 //-------------------------------------------------------------------------------------------------
 /**
 	similar to the above, but assumes that the current state is a "ONCE",
-	and is smart about transition states... if there is a transition state 
-	"inbetween", it is included in the completion time.
+	and is smart about transition states... if there is a transition state
+	"inbetween", it is included in the completion time.  The above does that split itself now.
 */
 void W3DModelDraw::setAnimationCompletionTime(UnsignedInt numFrames)
 {
-	if (m_curState != NULL && m_curState->m_transitionSig != NO_TRANSITION && m_curState->m_animations.size() > 0 &&
-			m_nextState != NULL && m_nextState->m_transitionSig == NO_TRANSITION && m_nextState->m_animations.size() > 0)
-	{
-		// we have a transition; split up the time suitably.
-		// note that this is just a guess, and assumes that the states
-		// have only one anim each (or, if multiple, that they are
-		// all pretty close in natural duration)
-		const Real t1 = m_curState->m_animations.front().getNaturalDurationInMsec();
-		const Real t2 = m_nextState->m_animations.front().getNaturalDurationInMsec();
-		UnsignedInt transTime = REAL_TO_INT_FLOOR((numFrames * t1) / (t1 + t2));
-		setAnimationLoopDuration(transTime);
-		m_nextStateAnimLoopDuration = numFrames - transTime;
-	}
-	else
-	{
-		setAnimationLoopDuration(numFrames);
-	}
+	setAnimationLoopDuration(numFrames);
 }
 
 //-------------------------------------------------------------------------------------------------
@@ -4754,6 +5002,30 @@ void W3DModelDraw::doHideShowProjectileObjects( UnsignedInt showCount, UnsignedI
 	}
 	Int hideCount = maxCount - showCount;
 
+	/* Every armed drawable with projectile bones asks every frame, and the answer is nearly always
+		 the one it already shows.  Each name is a search of every part by name and then a walk of
+		 every part's bones below each copy of it, which on a model with four levels of detail of about
+		 fifty parts was a tenth of the drawn frame in an eight-AI battle.  So the same count on the
+		 same state and render object is not applied again.  Every other hide/show of this module's
+		 parts forgets it: a model state, which is also every new render object (doHideShowSubObjs),
+		 and another module's sub-object orders or a load (updateSubObjects). */
+	ProjectileShown &shown = m_projectileShown[slot];
+	// a later slot that stopped asking (its weapon gone from the set) no longer has the last word on
+	// a part it shares with this one, so this one applies again, as it did when every ask applied
+	const UnsignedInt now = TheGameLogic->getFrame();
+	for (Int later = slot + 1; later < WEAPONSLOT_COUNT; ++later)
+	{
+		if (m_projectileShown[later].state != NULL && m_projectileShown[later].askedFrame + 1 < now)
+		{
+			m_projectileShown[later].state = NULL;
+			shown.state = NULL;
+		}
+	}
+	shown.askedFrame = now;
+	if (shown.state != NULL && shown.state == m_curState && shown.robj == m_renderObject
+			&& shown.showCount == showCount && shown.maxCount == maxCount)
+		return;
+
 	std::vector<ModelConditionInfo::HideShowSubObjInfo> showHideVector;
 	ModelConditionInfo::HideShowSubObjInfo oneEntry;
 	if (m_curState->m_weaponProjectileHideShowName[slot].isEmpty())
@@ -4773,11 +5045,28 @@ void W3DModelDraw::doHideShowProjectileObjects( UnsignedInt showCount, UnsignedI
 	}
 
 	// Rather than duplicate recursive utility stuff, I will build a vector like those used by the main ShowHide setting
-	doHideShowSubObjs(&showHideVector);
+	applyHideShowSubObjs(&showHideVector);
+	shown.state = m_curState;
+	shown.robj = m_renderObject;
+	shown.showCount = showCount;
+	shown.maxCount = maxCount;
+	// the slots after this one ask after it each tick and used to have the last word on a part they
+	// share with it (the Scud Launcher's one missile on both slots), so they apply again
+	for (Int later = slot + 1; later < WEAPONSLOT_COUNT; ++later)
+		m_projectileShown[later].state = NULL;
 }
 
 //-------------------------------------------------------------------------------------------------
 void W3DModelDraw::updateSubObjects()
+{
+	// another module's hide/show (an upgrade's pods, a horde's flags, a payload, a load) can take in
+	// the projectile parts or the bones under them, so they are applied again after it
+	forgetProjectileShown();
+	applySubObjectVec();
+}
+
+//-------------------------------------------------------------------------------------------------
+void W3DModelDraw::applySubObjectVec()
 {
 	if (!m_renderObject)
 		return;
@@ -4786,24 +5075,7 @@ void W3DModelDraw::updateSubObjects()
 	{
 		for (std::vector<ModelConditionInfo::HideShowSubObjInfo>::const_iterator it = m_subObjectVec.begin(); it != m_subObjectVec.end(); ++it)
 		{
-			Int objIndex;
-			RenderObjClass* subObj;
-
-			if ((subObj = m_renderObject->Get_Sub_Object_By_Name(it->subObjName.str(), &objIndex)) != NULL)
-			{
-				subObj->Set_Hidden(it->hide);
-
-				const HTreeClass *htree = m_renderObject->Get_HTree();
-				if (htree)
-				{	
-					//get the bone of this subobject so we can hide all other child objects that use this bone
-					//as a parent.
-					Int boneIdx = m_renderObject->Get_Sub_Object_Bone_Index(0, objIndex);
-					doHideShowBoneSubObjs( it->hide, m_renderObject->Get_Num_Sub_Objects(), boneIdx, m_renderObject, htree);
-				}
-				subObj->Release_Ref();
-			}
-			else
+			if (!hideShowSubObject(m_renderObject, it->subObjName.str(), it->hide))
 			{
 				DEBUG_CRASH(("*** ASSET ERROR: SubObject %s not found (%s)!\n",it->subObjName.str(),getDrawable()->getTemplate()->getName().str()));
 			}

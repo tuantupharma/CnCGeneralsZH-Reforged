@@ -174,9 +174,11 @@ public:
 												 IterateFootprintFunc func,
 												 void *funcUserData );
 
-	/// create object from a build and put it in the world now
-	virtual Object *buildObjectNow( Object *constructorObject, const ThingTemplate *what, 
-																	const Coord3D *pos, Real angle, Player *owningPlayer );
+	/// create object from a build and put it in the world now; takeJob FALSE lays a builder's plan
+	/// without sending the builder to it (a placement made with shift, which its order queue sends)
+	virtual Object *buildObjectNow( Object *constructorObject, const ThingTemplate *what,
+																	const Coord3D *pos, Real angle, Player *owningPlayer,
+																	Bool takeJob = TRUE );
 
 	/// using the "line placement" for objects (like walls etc) create that line of objects line
 	virtual void buildObjectLineNow( Object *constructorObject, const ThingTemplate *what, 
@@ -227,6 +229,13 @@ public:
 		the two are reskins of each other: asked for an AmericaVehicleChinook, a Turkiye Supply Center
 		makes its TurkiyeVehicleChinook.  NULL when no button builds it. */
 	const ThingTemplate *findBuildButtonTemplate( Object *builder, const ThingTemplate *whatToBuild ) const;
+
+	/** Whether the builder's own command bar offers the player a button for whatToBuild: a build
+		button for it that is not SCRIPT_ONLY (a mission's script-only build, often in a set's last
+		slots, which have no window) and whose NEED_UPGRADE, if any, is met.  The command bar hides and
+		greys these on the client; a message the player sends is held to the same, since the button is
+		what the player could have pressed.  The computer builds through canMakeUnit and is not asked. */
+	Bool offersPlayerBuildButton( Object *builder, const ThingTemplate *whatToBuild ) const;
 
 	/// sell an object
 	virtual void sellObject( Object *obj );

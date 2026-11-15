@@ -1160,15 +1160,12 @@ void DrawMapListTab(GameWindow *window, WinInstanceData *instData)
 	Int x, y, width, height;
 	window->winGetScreenPosition(&x, &y);
 	window->winGetSize(&width, &height);
-	UIStyle::tab(x, y, width, height);
+	// the radio button keeps WIN_STATE_HILITED while the mouse is on it, and lights as a layout button does
+	const Color color = UIStyle::tab(x, y, width, height, BitTest(window->winGetStatus(), WIN_STATUS_ENABLED),
+		BitTest(instData->getState(), WIN_STATE_SELECTED), BitTest(instData->getState(), WIN_STATE_HILITED));
 	DisplayString *text = instData->getTextDisplayString();
 	if (text->getFont() != window->winGetFont())
 		text->setFont(window->winGetFont());
-	Color color = UIStyle::INK;
-	if (!BitTest(window->winGetStatus(), WIN_STATUS_ENABLED))
-		color = UIStyle::MUTED;
-	else if (BitTest(instData->getState(), WIN_STATE_SELECTED))
-		color = UIStyle::ACTIVE;
 	Int textWidth, textHeight;
 	text->getSize(&textWidth, &textHeight);
 	text->draw(x + (width - textWidth) / 2, y + (height - textHeight) / 2, color, UIStyle::SHADOW);
@@ -1465,6 +1462,53 @@ void InitLobbySeatVisuals(GameWindow *parent, const char *layoutFilename)
 	}
 	theSeatsShowReady = strcmp(layoutFilename, "SkirmishGameOptionsMenu.wnd") != 0;
 	FactionPickerAttach(parent, layoutFilename);
+}
+
+// A rules row is 38 pixels at 1080 and a list row 23, so four entries used to end halfway down the
+// third box under the open one.  Each box's list now grows to whole rows, down to the page's foot;
+// a list with no room left below (the page's last boxes) opens upwards over the rows above, so none
+// spills onto the Play button.  The pitch is the smallest gap
+// between two boxes' tops, so a layout that moves the rows takes it along.
+void SnapLobbyRulesLists(GameWindow *parent, const char *layoutFilename)
+{
+	AsciiString name;
+	name.format("%s:PageLobbySettings", layoutFilename);
+	GameWindow *page = TheWindowManager->winGetWindowFromId(parent, NAMEKEY(name));
+	if (!page)
+		return;	// a layout from before the rules page
+
+	Int x, pageTop, width, pageHeight;
+	page->winGetScreenPosition(&x, &pageTop);
+	page->winGetSize(&width, &pageHeight);
+
+	Int pitch = 0;
+	for (GameWindow *box = page->winGetChild(); box; box = box->winGetNext())
+	{
+		if (!BitTest(box->winGetStyle(), GWS_COMBO_BOX))
+			continue;
+		Int top, otherTop;
+		box->winGetScreenPosition(&x, &top);
+		for (GameWindow *other = page->winGetChild(); other; other = other->winGetNext())
+		{
+			if (!BitTest(other->winGetStyle(), GWS_COMBO_BOX))
+				continue;
+			other->winGetScreenPosition(&x, &otherTop);
+			if (otherTop > top && (pitch == 0 || otherTop - top < pitch))
+				pitch = otherTop - top;
+		}
+	}
+	if (pitch == 0)
+		return;	// one box, no rows to end on
+
+	for (GameWindow *box = page->winGetChild(); box; box = box->winGetNext())
+	{
+		if (!BitTest(box->winGetStyle(), GWS_COMBO_BOX))
+			continue;
+		Int top, height;
+		box->winGetScreenPosition(&x, &top);
+		box->winGetSize(&width, &height);
+		GadgetComboBoxSetDropDownPitch(box, pitch, pageTop + pageHeight - (top + height), top - pageTop);
+	}
 }
 
 void ShutdownLobbySeatVisuals(void)

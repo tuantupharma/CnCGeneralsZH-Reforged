@@ -50,6 +50,8 @@
 #include "GameNetwork/GameDataMatch.h"
 #include "GameNetwork/GameInfo.h"
 #include "Common/PlayerTemplate.h"
+#include "Common/Science.h"
+#include "GameLogic/RankInfo.h"
 #include "GameClient/ChallengeGenerals.h"
 #include "GameClient/FactionPicker.h"
 #include "GameClient/UIStyle.h"
@@ -80,6 +82,7 @@
 #include "GameClient/ClientRandomValue.h"
 #include "Common/ThingTemplate.h"
 #include "Common/ThingFactory.h"
+#include "GameLogic/ObjectTypes.h"
 #include "Common/ModuleFactory.h"
 #include "Common/SpecialPower.h"
 #include "GameLogic/Armor.h"
@@ -140,6 +143,7 @@ static int GetSystemMetrics( int which )
 #include "GameNetwork/NetworkUtil.h"
 #include "Common/Recorder.h"
 #include "Common/RadarShroudCache.h"
+#include "Common/Radar.h"
 #include "GameClient/Gadget.h"
 #include "GameClient/GadgetTabControl.h"
 #include "GameClient/PlayerColorScheme.h"
@@ -148,6 +152,8 @@ static int GetSystemMetrics( int which )
 #include "GameNetwork/NetCommandList.h"
 #include "GameNetwork/NetCommandWrapperList.h"
 #include "GameNetwork/LANAPI.h"
+#include "GameNetwork/NAT.h"
+#include "GameClient/MapUtil.h"
 #include "GameNetwork/NetPacket.h"
 #include "GameNetwork/GameInfo.h"
 #include "GameNetwork/GUIUtil.h"
@@ -162,6 +168,7 @@ static int GetSystemMetrics( int which )
 #include "GameClient/ParticleSys.h"
 #include "GameClient/FXList.h"
 #include "GameClient/ControlBar.h"
+#include "GameClient/GroupPanel.h"
 #include "GameClient/Display.h"
 #include "GameLogic/AI.h"
 #include "GameLogic/Module/ProductionUpdate.h"
@@ -192,6 +199,7 @@ static int GetSystemMetrics( int which )
 #include "GameClient/Drawable.h"
 #include "Common/BuildAssistant.h"
 #include "GameLogic/Object.h"
+#define DEFINE_WEAPONBONUSCONDITION_NAMES	// TheWeaponBonusNames, for weapon_bonus_names_*
 #include "GameLogic/Weapon.h"
 #include "GameLogic/ObjectCreationList.h"
 #include "GameClient/CommandXlat.h"
@@ -759,6 +767,8 @@ TEST(balance_patch_edits_a_weapon_in_place)
 	 PointDefenseLaserUpdate::scanClosestTarget crashed on it.  The weapon is the fork's own now, in
 	 WeaponReforged.ini, loaded the way GameEngine::init loads it: it has to come out whole from a
 	 store that holds none of EA's weapons. */
+ParticleSystemManager *newTestParticleSystemManager();	// below, beside TestParticleSystemManager
+
 TEST(weapon_reforged_ini_makes_the_paladin_infantry_laser_without_eas_weapons)
 {
 	CHECK( bootOnce() );
@@ -783,6 +793,13 @@ TEST(weapon_reforged_ini_makes_the_paladin_infantry_laser_without_eas_weapons)
 	if( savedAudio == NULL )
 		TheAudio = NEW NullAudioManager;
 
+	/* a missile's ProjectileExhaust is looked up in the particle manager, which the test had none of:
+		 the load dereferenced NULL in ParticleSystemManager::findTemplate and the crash dialog held the
+		 run open. An empty manager answers every trail with none, as the game's would for one it lacks */
+	ParticleSystemManager *savedParticles = TheParticleSystemManager;
+	if( savedParticles == NULL )
+		TheParticleSystemManager = newTestParticleSystemManager();
+
 	Bool threw = FALSE;
 	try
 	{
@@ -794,6 +811,12 @@ TEST(weapon_reforged_ini_makes_the_paladin_infantry_laser_without_eas_weapons)
 		threw = TRUE;
 	}
 	CHECK( threw == FALSE );
+
+	if( savedParticles == NULL )
+	{
+		delete TheParticleSystemManager;
+		TheParticleSystemManager = NULL;
+	}
 
 	if( savedAudio == NULL )
 	{
@@ -1263,6 +1286,69 @@ TEST(patch_naming_a_missing_laser_or_list_keeps_what_was_there)
 	}
 }
 
+/* The skirmish scripts ask how many Tanks or Infantry a player owns, lists of forty and fifty names,
+	 and each answer copied the list, looked every name up again and tested every type the player held
+	 against all of them.  A list keeps its templates and its answers now, so it has to forget them the
+	 moment a name goes in or out, and a build variation still counts as the thing it varies. */
+TEST(object_list_keeps_its_templates_until_a_name_changes)
+{
+	CHECK( bootOnce() );
+
+	GlobalData *savedGlobals = TheWritableGlobalData;
+	if( savedGlobals == NULL )
+		TheWritableGlobalData = NEW GlobalData;
+	if( TheModuleFactory == NULL )
+	{
+		TheModuleFactory = NEW ModuleFactory;
+		TheModuleFactory->init();
+	}
+	if( TheThingFactory == NULL )
+		TheThingFactory = NEW ThingFactory;
+
+	writeFile( TEST_INI,
+		"Object ListProbeTank\r\n"
+		"End\r\n"
+		"Object ListProbeTankVariant\r\n"
+		"  BuildVariations = ListProbeTank\r\n"
+		"End\r\n"
+		"Object ListProbeJeep\r\n"
+		"End\r\n" );
+	CHECK( loadIni( TEST_INI ) );
+
+	const ThingTemplate *tank = TheThingFactory->findTemplate( "ListProbeTank" );
+	const ThingTemplate *variant = TheThingFactory->findTemplate( "ListProbeTankVariant" );
+	const ThingTemplate *jeep = TheThingFactory->findTemplate( "ListProbeJeep" );
+	CHECK( tank != NULL && variant != NULL && jeep != NULL );
+	if( tank != NULL && variant != NULL && jeep != NULL )
+	{
+		ObjectTypes *list = newInstance(ObjectTypes)( AsciiString( "ListProbe" ) );
+		list->addObjectType( "ListProbeTank" );
+		list->addObjectType( "ListProbeNothing" );
+		CHECK_EQ( (Int)list->getTemplates().size(), 1 );
+		CHECK( list->hasEquivalent( tank ) );
+		CHECK( list->hasEquivalent( variant ) );
+		CHECK( !list->hasEquivalent( jeep ) );
+
+		list->addObjectType( "ListProbeJeep" );
+		CHECK_EQ( (Int)list->getTemplates().size(), 2 );
+		CHECK( list->hasEquivalent( jeep ) );
+
+		list->removeObjectType( "ListProbeTank" );
+		CHECK_EQ( (Int)list->getTemplates().size(), 1 );
+		CHECK( !list->hasEquivalent( tank ) );
+		CHECK( !list->hasEquivalent( variant ) );
+		CHECK( list->hasEquivalent( jeep ) );
+		list->deleteInstance();
+	}
+
+	remove( TEST_INI );
+	if( savedGlobals == NULL )
+	{
+		delete TheWritableGlobalData;
+		TheWritableGlobalData = NULL;
+	}
+}
+
 /* A third-party Armor.ini had "Armor = INFANTRY_MISSIL 100%".  EA's parse let it through,
 	 264e2180 made it throw and the game stopped at start.  An unknown damage type skips its line; a
 	 line with no percentage is still a syntax error. */
@@ -1335,8 +1421,10 @@ TEST(water_splashes_take_blasts_by_name_and_every_list_that_scorches)
 	 The gunfire pass added 13 of EA's gun FXLists, wider tracers and AtTarget impacts, all of
 	 which already had a muzzle light, and the faster tracers six more, each with EA's own light.
 	 The smoke-trail fragments added two of EA's blasts, the jet missile with its own light and the
-	 Particle Cannon's ground hit with one of the fork's. */
+	 Particle Cannon's ground hit with one of the fork's.  The three wreck impacts, dust and a
+	 shake by how hard an aircraft hits the ground, are dust and carry no light either. */
 static const char *const s_unlitReforgedFXList = "FXList SupW_FX_ParticleUplinkDeathInitial";
+static const char *const s_unlitReforgedImpacts = "FXList FX_Reforged_Impact";
 
 TEST(fxlist_reforged_ini_parses_and_keeps_its_light)
 {
@@ -1352,6 +1440,10 @@ TEST(fxlist_reforged_ini_parses_and_keeps_its_light)
 	CHECK( TheFXListStore->findFXList( "ScudStormMissileDetonation" ) != NULL );
 	CHECK( TheFXListStore->findFXList( "FX_BombExplosion" ) != NULL );
 	CHECK( TheFXListStore->findFXList( "NoSuchFXListIsDeclaredAnywhere" ) == NULL );
+	/* SlowDeathBehavior::doImpactFX looks these three up by name */
+	CHECK( TheFXListStore->findFXList( "FX_Reforged_ImpactLight" ) != NULL );
+	CHECK( TheFXListStore->findFXList( "FX_Reforged_ImpactMedium" ) != NULL );
+	CHECK( TheFXListStore->findFXList( "FX_Reforged_ImpactHeavy" ) != NULL );
 
 	/* and every block in the file still carries the light it exists for */
 	FILE *fp = fopen( FXLIST_REFORGED_INI, "rb" );
@@ -1361,7 +1453,8 @@ TEST(fxlist_reforged_ini_parses_and_keeps_its_light)
 	char line[ 512 ];
 	while( fgets( line, sizeof( line ), fp ) != NULL )
 	{
-		if( strncmp( line, s_unlitReforgedFXList, strlen( s_unlitReforgedFXList ) ) == 0 )
+		if( strncmp( line, s_unlitReforgedFXList, strlen( s_unlitReforgedFXList ) ) == 0 ||
+				strncmp( line, s_unlitReforgedImpacts, strlen( s_unlitReforgedImpacts ) ) == 0 )
 		{
 			open = 0;
 		}
@@ -1390,9 +1483,10 @@ TEST(fxlist_reforged_ini_parses_and_keeps_its_light)
 
 #include "Common/MultiplayerSettings.h"
 
-/* A slot, a replay and a preference hold a colour by its place in the list, so the fork's eight have
-   to follow EA's eight and leave them as they were.  EA's list is in INIZH.big, so it is copied here. */
-TEST(multiplayer_reforged_ini_appends_eight_colours_after_eas_eight)
+/* A slot, a replay and a preference hold a colour by its place in the list, so the fork's colours have
+   to follow EA's eight and leave them as they were.  EA's list is in INIZH.big, so it is copied here.
+   There is one colour per slot: a random colour is drawn until it is one nobody holds. */
+TEST(multiplayer_reforged_ini_appends_its_colours_after_eas_eight)
 {
 	static const struct { const char *tooltip; Int r, g, b, nightR, nightG, nightB; } colours[] =
 	{
@@ -1412,7 +1506,25 @@ TEST(multiplayer_reforged_ini_appends_eight_colours_after_eas_eight)
 		{ "Color:Lavender", 165, 139, 255,  165, 139, 255 },
 		{ "Color:Coral",    240,  90,  69,  240,  90,  69 },
 		{ "Color:Olive",    120, 140,   0,  160, 180,  20 },
+		{ "Color:Maroon",   128,   0,  32,  180,  30,  60 },
+		{ "Color:Mint",     120, 240, 170,  120, 240, 170 },
+		{ "Color:White",    235, 235, 235,  235, 235, 235 },
+		{ "Color:Charcoal",  64,  64,  64,  110, 110, 110 },
+		{ "Color:Silver",   160, 160, 170,  160, 160, 170 },
+		{ "Color:Steel",     90, 120, 160,  120, 150, 195 },
+		{ "Color:Indigo",    75,   0, 130,  125,  60, 210 },
+		{ "Color:Peach",    255, 195, 145,  255, 195, 145 },
+		{ "Color:Forest",    30, 100,  40,   55, 150,  65 },
+		{ "Color:Rose",     255,  90, 140,  255,  90, 140 },
+		{ "Color:Plum",     130,  50, 100,  175,  80, 140 },
+		{ "Color:Rust",     175,  65,  15,  210,  90,  40 },
+		{ "Color:SeaGreen",  40, 150,  95,   60, 180, 120 },
+		{ "Color:Lemon",    250, 245, 130,  250, 245, 130 },
+		{ "Color:Orchid",   215, 110, 215,  215, 110, 215 },
+		{ "Color:Chocolate", 90,  50,  20,  140,  85,  45 },
 	};
+	const Int total = (Int)( sizeof( colours ) / sizeof( colours[ 0 ] ) );
+	CHECK_EQ( total, MAX_SLOTS );
 
 	CHECK( bootOnce() );
 
@@ -1434,9 +1546,9 @@ TEST(multiplayer_reforged_ini_appends_eight_colours_after_eas_eight)
 	CHECK( loadIni( TEST_INI ) );
 	CHECK_EQ( TheMultiplayerSettings->getNumColors(), 8 );
 	CHECK( loadIni( MULTIPLAYER_REFORGED_INI ) );
-	CHECK_EQ( TheMultiplayerSettings->getNumColors(), 16 );
+	CHECK_EQ( TheMultiplayerSettings->getNumColors(), total );
 
-	for( Int i = 0; i < 16 && TheMultiplayerSettings->getNumColors() == 16; ++i )
+	for( Int i = 0; i < total && TheMultiplayerSettings->getNumColors() == total; ++i )
 	{
 		MultiplayerColorDefinition *def = TheMultiplayerSettings->getColor( i );
 		const RGBColor day = def->getRGBValue();
@@ -2142,14 +2254,17 @@ TEST(hotkeys_file_reads_the_launchers_rows_and_leaves_its_defaults_out)
 	CHECK( hold != NULL && hold->barOnly && hold->binding == HotkeyBinding( "", "CTRL" ) && hold->pair == "END_FORCEATTACK" );
 	CHECK( idle != NULL && idle->launcherDefault && idle->binding.key == "KEY_I" );
 	// the signals to the allies start on Alt and Z, X and C, as the launcher writes them (issue 129)
-	static const char *const ASKS[][ 2 ] = { { "SIGNAL_ATTACK", "KEY_Z" }, { "SIGNAL_DEFEND", "KEY_X" },
-		{ "SIGNAL_ATTENTION", "KEY_C" } };
+	// and the bar's command tabs on Ctrl with Q, W and E
+	static const char *const ASKS[][ 4 ] = { { "SIGNAL_ATTACK", "KEY_Z", "ALT", "INFORMATION" },
+		{ "SIGNAL_DEFEND", "KEY_X", "ALT", "INFORMATION" }, { "SIGNAL_ATTENTION", "KEY_C", "ALT", "INFORMATION" },
+		{ "TOGGLE_COMMAND_TAB_BUILDINGS", "KEY_Q", "CTRL", "INTERFACE" }, { "TOGGLE_COMMAND_TAB_GROUND", "KEY_W", "CTRL", "INTERFACE" },
+		{ "TOGGLE_COMMAND_TAB_AIRCRAFT", "KEY_E", "CTRL", "INTERFACE" } };
 	for( size_t ask = 0; ask < sizeof( ASKS ) / sizeof( ASKS[ 0 ] ); ask++ )
 	{
 		Bool found = FALSE;
 		for( size_t each = 0; each < rows.size(); each++ )
 			found = found || ( rows[ each ].id == ASKS[ ask ][ 0 ] && rows[ each ].launcherDefault
-				&& rows[ each ].binding == HotkeyBinding( ASKS[ ask ][ 1 ], "ALT" ) && rows[ each ].category == "INFORMATION" );
+				&& rows[ each ].binding == HotkeyBinding( ASKS[ ask ][ 1 ], ASKS[ ask ][ 2 ] ) && rows[ each ].category == ASKS[ ask ][ 3 ] );
 		CHECK( found );
 	}
 	// request money has no key: Alt+V is evacuate in place
@@ -2453,7 +2568,7 @@ TEST(skirmish_ai_earnings_bonus_weighs_sides)
 	Int own = -1, enemy = -1;
 	/* four teams of two, seats 0-1, 2-3, 4-5, 6-7; the computer is seat 1 and its partner carries it */
 	const Int worth[ 8 ] = { 1000, 0, 3000, 1000, 4000, 0, 500, 500 };
-	const UnsignedInt allies[ 8 ] = { 1u << 1, 1u << 0, 1u << 3, 1u << 2, 1u << 5, 1u << 4, 1u << 7, 1u << 6 };
+	const PlayerMaskType allies[ 8 ] = { 1u << 1, 1u << 0, 1u << 3, 1u << 2, 1u << 5, 1u << 4, 1u << 7, 1u << 6 };
 	IncomeSideWorths( worth, allies, 8, 1, &own, &enemy );
 	CHECK_EQ( own, 500 );
 	CHECK_EQ( enemy, 2000 );
@@ -2461,10 +2576,26 @@ TEST(skirmish_ai_earnings_bonus_weighs_sides)
 	CHECK_EQ( IncomeBonusTarget( own, enemy ), 150 );
 	/* free for all: every enemy is a side of one, the richest counts */
 	const Int ffa[ 3 ] = { 300, 100, 200 };
-	const UnsignedInt none[ 3 ] = { 0, 0, 0 };
+	const PlayerMaskType none[ 3 ] = { 0, 0, 0 };
 	IncomeSideWorths( ffa, none, 3, 1, &own, &enemy );
 	CHECK_EQ( own, 100 );
 	CHECK_EQ( enemy, 300 );
+	/* past seat 31: seat 33 and seat 39 are a side, every other seat is a side of one. With a
+	   32-bit mask 1u << 33 was seat 1's bit, and seat 33 counted seat 1 as its partner. */
+	Int wide[ 40 ];
+	PlayerMaskType wideAllies[ 40 ];
+	for( Int i = 0; i < 40; ++i )
+	{
+		wide[ i ] = 100;
+		wideAllies[ i ] = 0;
+	}
+	wide[ 1 ] = 5000;
+	wide[ 39 ] = 300;
+	wideAllies[ 33 ] = playerIndexToMask( 39 );
+	wideAllies[ 39 ] = playerIndexToMask( 33 );
+	IncomeSideWorths( wide, wideAllies, 40, 33, &own, &enemy );
+	CHECK_EQ( own, 200 );
+	CHECK_EQ( enemy, 5000 );
 }
 
 /* ExperienceTracker.cpp: a kill's experience split by the damage each attacker dealt. */
@@ -3014,6 +3145,32 @@ TEST(jet_runs_out_from_a_target_it_cannot_turn_onto)
 	CHECK( !AIAttackAim_needsRunOut( 60.0f,   60.0f, R, 0.7071068f, 0.0f ) );
 }
 
+/* Locomotor.cpp: a jet that has spent its last round breaks off to the side whose turn, flown from
+   the bank it is already in, passes the target wider. */
+extern Real Locomotor_jetBreakOffSide( Real relX, Real relY, Real speed, Real yawRate, Real maxRate, Real yawAccel );
+
+TEST(jet_breaks_off_to_the_side_that_passes_the_target_wider)
+{
+	/* 270 a second on a 72 circle, rolling into the full bank over half a second */
+	const Real SPEED = 270.0f / LOGICFRAMES_PER_SECONDS_REAL;
+	const Real RATE = SPEED / 72.0f;
+	const Real ACCEL = RATE / ( LOGICFRAMES_PER_SECONDS_REAL * 0.5f );
+
+	/* wings level, target nearly dead ahead: away from it, 92 clear where the other way is 87 */
+	CHECK_EQ( Locomotor_jetBreakOffSide( 200.0f,   5.0f, SPEED, 0.0f, RATE, ACCEL ), -1.0f );
+	CHECK_EQ( Locomotor_jetBreakOffSide( 200.0f,  -5.0f, SPEED, 0.0f, RATE, ACCEL ),  1.0f );
+
+	/* the target ahead and to the right of the nose, wings level: away from it, left, 130 clear */
+	CHECK_EQ( Locomotor_jetBreakOffSide( 121.0f, -113.0f, SPEED, 0.0f, RATE, ACCEL ), 1.0f );
+
+	/* the same target with the jet banked hard right onto it, the bomb just gone: rolling through to
+	   the left carries it over the target (12 clear), carrying on round passes it at 58 */
+	CHECK_EQ( Locomotor_jetBreakOffSide( 121.0f, -113.0f, SPEED, -RATE, RATE, ACCEL ), -1.0f );
+
+	/* no turn to fly: away from it */
+	CHECK_EQ( Locomotor_jetBreakOffSide( 121.0f, -113.0f, SPEED, 0.0f, 0.0f, ACCEL ), 1.0f );
+}
+
 /* JetAIUpdate.cpp: the glide down to a touchdown and the climb from a liftoff are one shape, a
    straight slope that rounds out to level at the runway and stops at the approach height. */
 extern Real JetRunway_slopeHeight( Real dist, Real maxHeight, Real slope, Real roundDist );
@@ -3089,7 +3246,7 @@ extern Bool AIAttackMove_engageWasADud( Bool victimStillAlive, Int ammoAtEngage,
 
 TEST(attack_move_charges_the_reacquire_delay_only_for_a_fight_that_never_happened)
 {
-	const Int DUD = LOGICFRAMES_PER_SECOND / 2;		/* ATTACK_MOVE_DUD_ENGAGE_FRAMES, protected on the state */
+	const Int DUD = LOGICFRAMES_PER_GAME_SECOND / 2;		/* ATTACK_MOVE_DUD_ENGAGE_FRAMES, protected on the state */
 
 	/* stood next to it for a moment, fired nothing, it is still alive: a dud. */
 	CHECK( AIAttackMove_engageWasADud( true, 8, 8, 1000, 1000, DUD ) );
@@ -3132,7 +3289,7 @@ extern Bool AIAttackMove_shouldRetaliate( UnsignedInt lastDamageFrame, UnsignedI
 
 TEST(attack_move_turns_on_whoever_is_shooting_it)
 {
-	const Int WINDOW = LOGICFRAMES_PER_SECOND;		/* ATTACK_MOVE_RETALIATE_FRAMES, protected on the state */
+	const Int WINDOW = LOGICFRAMES_PER_GAME_SECOND;		/* ATTACK_MOVE_RETALIATE_FRAMES, protected on the state */
 
 	/* hit this second, can shoot back, busy with somebody else: turn on the shooter. */
 	CHECK( AIAttackMove_shouldRetaliate( 1000, 1000, WINDOW, false, true ) );
@@ -3398,11 +3555,13 @@ TEST(a_unit_goes_for_the_armour_its_weapon_is_made_for)
 
 TEST(a_unit_shoots_what_its_weapon_kills_best)
 {
+	/* a shot every 0.2 s and every 2 s, a drive at 120 a second: in logic frames at this build's rate,
+	   since the quick-kill window (AI_QUICK_KILL_FRAMES) is ten seconds of them */
 	AIShotPattern humvee;
-	humvee.m_delayFrames = 12.0f;
+	humvee.m_delayFrames = ConvertRetailFrames( 6.0f );
 	AIShotPattern tank;
-	tank.m_delayFrames = 120.0f;
-	const Real SPEED = 2.0f;
+	tank.m_delayFrames = ConvertRetailFrames( 60.0f );
+	const Real SPEED = ConvertRetailPerFrameRate( 4.0f );
 
 	/* a Humvee: the Technical (500, 180 health) over the Battlemaster (800, 400), and a Red Guard
 	   (300, 120) over the Battlemaster too */
@@ -3429,7 +3588,7 @@ TEST(a_unit_shoots_what_its_weapon_kills_best)
 	/* the drive into reach counts: the same Battlemaster 600 units out of reach is worth less, and
 	   one out of reach of a unit that cannot move is worth nothing */
 	const Real tankFrames = aiFramesToKill( 400.0f, tank );
-	CHECK_NEAR( 800.0f / ( tankFrames + 300.0f ), aiTargetKillRate( 800.0f, tankFrames, 600.0f, SPEED ), 0.0001f );
+	CHECK_NEAR( 800.0f / ( tankFrames + 600.0f / SPEED ), aiTargetKillRate( 800.0f, tankFrames, 600.0f, SPEED ), 0.0001f );
 	CHECK_NEAR( 0.0f, aiTargetKillRate( 800.0f, tankFrames, 600.0f, 0.0f ), 0.0001f );
 	CHECK_NEAR( tankOnTank, aiTargetKillRate( 800.0f, tankFrames, 0.0f, 0.0f ), 0.0001f );
 
@@ -3461,8 +3620,8 @@ TEST(a_unit_shoots_what_its_weapon_kills_best)
 	const Real humveeTankFrames = aiFramesToKill( 400.0f, humvee );
 	humvee.m_damagePerShot = 5.0f;
 	const Real humveeTruckFrames = aiFramesToKill( 180.0f, humvee );
-	CHECK_NEAR( 1920.0f, humveeTankFrames, 0.001f );
-	CHECK_NEAR( 432.0f, humveeTruckFrames, 0.001f );
+	CHECK_NEAR( ConvertRetailFrames( 960.0f ), humveeTankFrames, 0.001f );		// 32 s
+	CHECK_NEAR( ConvertRetailFrames( 216.0f ), humveeTruckFrames, 0.001f );		// 7.2 s, inside the quick-kill window
 	CHECK( aiTargetBeats( targetRating( aiTargetTier( TRUE, TRUE, TRUE, TRUE, humveeTankFrames ), HUMVEE_ON_TANK, humveeOnTank, 0.0f, (ObjectID)9 ),
 												targetRating( aiTargetTier( FALSE, TRUE, TRUE, FALSE, humveeTruckFrames ), HUMVEE_ON_TRUCK, humveeOnTruck, 0.0f, (ObjectID)2 ) ) );
 	CHECK( aiTargetBeats( targetRating( aiTargetTier( FALSE, TRUE, TRUE, TRUE, humveeTruckFrames ), HUMVEE_ON_TRUCK, humveeOnTruck, 0.0f, (ObjectID)9 ),
@@ -3470,6 +3629,18 @@ TEST(a_unit_shoots_what_its_weapon_kills_best)
 
 	/* armed beats unarmed whatever the armour or rate: no stopping for the dozer under the artillery */
 	CHECK( aiTargetBeats( targetRating( 1, 0.1f, 0.01f, 0.0f, (ObjectID)9 ), targetRating( 0, 2.0f, 100.0f, 0.0f, (ObjectID)2 ) ) );
+
+	/* ... but only among what it can hurt from where it can get.  A Patriot picked the Tomahawk
+	   launcher outside its ground range, armed and shooting it (tier 2, rate 0), over the incoming
+	   missile it could shoot down (tier 0, an unarmed projectile), and never fired at all */
+	const Real patriotOnMissile = aiTargetKillRate( 1.0f, 30.0f, 0.0f, 0.0f );
+	const Real patriotOnLauncher = aiTargetKillRate( 1200.0f, 90.0f, 75.0f, 0.0f );
+	CHECK( patriotOnMissile > 0.0f );
+	CHECK_NEAR( 0.0f, patriotOnLauncher, 0.0001f );
+	const AITargetRating missile = targetRating( aiTargetTier( FALSE, TRUE, FALSE, TRUE, 30.0f ), 1.0f, patriotOnMissile, 250000.0f, (ObjectID)9 );
+	const AITargetRating launcher = targetRating( aiTargetTier( TRUE, TRUE, TRUE, FALSE, 90.0f ), 1.31f, patriotOnLauncher, 90000.0f, (ObjectID)2 );
+	CHECK( aiTargetBeats( missile, launcher ) );
+	CHECK( !aiTargetBeats( launcher, missile ) );
 
 	/* a total order: tier, armour, rate, distance, then the lower ObjectID, the same whichever is
 	   asked first, so the pick never depends on the order the partition hands candidates out in */
@@ -3546,6 +3717,87 @@ TEST(attack_priority_pick_needs_no_sort)
 		}
 		CHECK_EQ( onePassPick, sortedPick );
 		if (onePassPick != sortedPick)
+			break;
+	}
+}
+
+/* AI.cpp: the same pick made walking out from the hunter, in any order within a distance, stopping
+   as soon as AI_attackPriorityIsSettled says nothing that far off can beat the leader, with a full
+   tie going to the one the gathered list holds first. */
+extern Bool AI_attackPriorityIsSettled( Int bestModPriority, Int bestCurPriority, Real bestDistSqr,
+																				Int maxPriority, Real minDist, Real modifierDist );
+
+TEST(attack_priority_pick_settles_nearest_first)
+{
+	enum { N = 32 };
+	const Real MODIFIER = 100.0f;
+	UnsignedInt seed = 777;
+	for (Int round = 0; round < 4000; ++round)
+	{
+		Int curP[N], modP[N], key[N];
+		Real dist[N];
+		Bool allowed[N];
+		Int maxP = 0;
+		for (Int i = 0; i < N; ++i)
+		{
+			seed = seed * 1664525u + 1013904223u;
+			dist[i] = (Real)((seed >> 16) % 40) * 25.0f;	/* ties, and every step of the falloff */
+			curP[i] = (Int)((seed >> 8) % 7);							/* 0 is never attacked */
+			allowed[i] = ((seed >> 24) & 3) != 0;
+			key[i] = (Int)((seed >> 4) & 0xff);
+			modP[i] = curP[i] - (Int)(dist[i] / MODIFIER);
+			if (modP[i] < 1)
+				modP[i] = 1;
+			if (curP[i] > maxP)
+				maxP = curP[i];
+		}
+
+		Int full = -1, bestMod = 0, bestCur = 0;
+		Real bestDistSqr = 0.0f;
+		for (Int i = 0; i < N; ++i)
+		{
+			if (curP[i] != 0 && AI_attackPriorityTakesLead(modP[i], curP[i], dist[i] * dist[i], bestMod, bestCur, bestDistSqr) && allowed[i])
+			{
+				bestMod = modP[i];
+				bestCur = curP[i];
+				bestDistSqr = dist[i] * dist[i];
+				full = i;
+			}
+		}
+
+		/* near to far, a distance's members in a scrambled order */
+		Int order[N];
+		for (Int i = 0; i < N; ++i)
+		{
+			Int j = i;
+			for ( ; j > 0 && (dist[order[j - 1]] > dist[i] || (dist[order[j - 1]] == dist[i] && key[order[j - 1]] > key[i])); --j)
+				order[j] = order[j - 1];
+			order[j] = i;
+		}
+		Int nearFirst = -1;
+		bestMod = 0;
+		bestCur = 0;
+		bestDistSqr = 0.0f;
+		for (Int k = 0; k < N; ++k)
+		{
+			const Int i = order[k];
+			if (nearFirst >= 0 && dist[i] > 0.0f && AI_attackPriorityIsSettled(bestMod, bestCur, bestDistSqr, maxP, dist[i], MODIFIER))
+				break;
+			if (curP[i] == 0)
+				continue;
+			const Real distSqr = dist[i] * dist[i];
+			if (!AI_attackPriorityTakesLead(modP[i], curP[i], distSqr, bestMod, bestCur, bestDistSqr)
+					&& !(nearFirst >= 0 && modP[i] == bestMod && curP[i] == bestCur && distSqr == bestDistSqr && i < nearFirst))
+				continue;
+			if (!allowed[i])
+				continue;
+			bestMod = modP[i];
+			bestCur = curP[i];
+			bestDistSqr = distSqr;
+			nearFirst = i;
+		}
+		CHECK_EQ( nearFirst, full );
+		if (nearFirst != full)
 			break;
 	}
 }
@@ -3781,12 +4033,15 @@ static void closedFormSetup( ParticleSystemInfo *system, ParticleInfo *info,
 														 ParticleSystemInfo::ParticleShaderType shader, UnsignedInt lifetime )
 {
 	system->m_shaderType = shader;
-	system->m_driftVelocity.set( 0.25f, -0.5f, 0.125f );
-	system->m_gravity = -0.05f;
+	// the template's numbers are as an INI wrote them; both sides below read them converted
+	Coord3D drift;
+	drift.set( 0.25f, -0.5f, 0.125f );
+	system->m_driftVelocity.setRaw( drift );
+	system->m_gravity.setRaw( -0.05f );
 	for( Int i = 0; i < MAX_KEYFRAMES; ++i )
 	{
-		system->m_alphaKey[ i ].frame = 0;
-		system->m_colorKey[ i ].frame = 0;
+		system->m_alphaKey[ i ].frame.setRaw( 0 );
+		system->m_colorKey[ i ].frame.setRaw( 0 );
 		system->m_colorKey[ i ].color.red = system->m_colorKey[ i ].color.green = system->m_colorKey[ i ].color.blue = 0.0f;
 		info->m_alphaKey[ i ].value = 0.0f;
 	}
@@ -3808,12 +4063,12 @@ static void closedFormColorKey( ParticleSystemInfo *system, Int key, Real red, R
 	system->m_colorKey[ key ].color.red = red;
 	system->m_colorKey[ key ].color.green = green;
 	system->m_colorKey[ key ].color.blue = blue;
-	system->m_colorKey[ key ].frame = frame;
+	system->m_colorKey[ key ].frame.setRaw( ConvertFramesToRetail( frame ) );	// the key falls on this frame at the match's speed
 }
 
 static void closedFormAlphaKey( ParticleSystemInfo *system, ParticleInfo *info, Int key, Real value, UnsignedInt frame )
 {
-	system->m_alphaKey[ key ].frame = frame;
+	system->m_alphaKey[ key ].frame.setRaw( ConvertFramesToRetail( frame ) );
 	info->m_alphaKey[ key ].value = value;
 }
 
@@ -4372,6 +4627,66 @@ TEST(command_availability_rank_is_not_the_enum_order)
 }
 
 /*
+ * The command bar's unit tabs and the group panel's tray list a factory's slot only where the
+ * factory's own bar would show it: a unit build button, not SCRIPT_ONLY (a mission's script-only
+ * build), on a slot that has a window.  What the button's availability hides or greys after that
+ * is getCommandAvailability's, which needs a live object.
+ */
+TEST(command_tab_lists_only_the_bars_own_build_buttons)
+{
+	CHECK( GroupPanel_isPlayerBuildButton( GUI_COMMAND_UNIT_BUILD, 0, TRUE ) );
+	CHECK( !GroupPanel_isPlayerBuildButton( GUI_COMMAND_UNIT_BUILD, SCRIPT_ONLY, TRUE ) );
+	CHECK( !GroupPanel_isPlayerBuildButton( GUI_COMMAND_UNIT_BUILD, 0, FALSE ) );
+	CHECK( !GroupPanel_isPlayerBuildButton( GUI_COMMAND_DOZER_CONSTRUCT, 0, TRUE ) );
+	CHECK( !GroupPanel_isPlayerBuildButton( GUI_COMMAND_PLAYER_UPGRADE, 0, TRUE ) );
+	/* another option on the button does not take it off the list; NEED_UPGRADE greys it later */
+	CHECK( GroupPanel_isPlayerBuildButton( GUI_COMMAND_UNIT_BUILD, NEED_UPGRADE, TRUE ) );
+}
+
+/*
+ * A unit tab's scroll on the 14-cell grid, two rows: a list that fits takes every cell and never
+ * scrolls; one that does not gives the rightmost column to the arrows, so twelve show, and scrolls a
+ * column (two units) a step until the view reaches the list's end.
+ */
+TEST(command_tab_scrolls_a_column_at_a_time)
+{
+	Int perView = 0, last = 0;
+	ControlBar_commandTabScroll( 0, 14, 2, TRUE, &perView, &last );
+	CHECK_EQ( perView, 14 );	CHECK_EQ( last, 0 );
+	ControlBar_commandTabScroll( 14, 14, 2, TRUE, &perView, &last );
+	CHECK_EQ( perView, 14 );	CHECK_EQ( last, 0 );
+	/* 15 units: columns 0, 1, 2 show units 1-12, 3-14, 5-15 */
+	ControlBar_commandTabScroll( 15, 14, 2, TRUE, &perView, &last );
+	CHECK_EQ( perView, 12 );	CHECK_EQ( last, 2 );
+	ControlBar_commandTabScroll( 16, 14, 2, TRUE, &perView, &last );
+	CHECK_EQ( perView, 12 );	CHECK_EQ( last, 2 );
+	ControlBar_commandTabScroll( 17, 14, 2, TRUE, &perView, &last );
+	CHECK_EQ( perView, 12 );	CHECK_EQ( last, 3 );
+	/* no arrow seats: every cell a unit, the wheel scrolls */
+	ControlBar_commandTabScroll( 15, 14, 2, FALSE, &perView, &last );
+	CHECK_EQ( perView, 14 );	CHECK_EQ( last, 1 );
+	/* no room for two arrows and a unit */
+	ControlBar_commandTabScroll( 5, 2, 2, TRUE, &perView, &last );
+	CHECK_EQ( perView, 2 );	CHECK_EQ( last, 2 );
+
+	/* a step stops at the ends, and the arrow with nowhere to go is greyed out */
+	Bool back = TRUE, on = FALSE;
+	CHECK_EQ( ControlBar_commandTabStep( 0, 0, 2, &back, &on ), 0 );
+	CHECK( !back );	CHECK( on );
+	CHECK_EQ( ControlBar_commandTabStep( 0, -1, 2, &back, &on ), 0 );
+	CHECK( !back );	CHECK( on );
+	CHECK_EQ( ControlBar_commandTabStep( 0, 1, 2, &back, &on ), 1 );
+	CHECK( back );	CHECK( on );
+	CHECK_EQ( ControlBar_commandTabStep( 1, 1, 2, &back, &on ), 2 );
+	CHECK( back );	CHECK( !on );
+	CHECK_EQ( ControlBar_commandTabStep( 2, 1, 2, &back, &on ), 2 );
+	CHECK( back );	CHECK( !on );
+	/* a list that shrank under the view comes back to its last column */
+	CHECK_EQ( ControlBar_commandTabStep( 3, 0, 1, &back, &on ), 1 );
+	CHECK( back );	CHECK( !on );
+}
+
+/*
  * NudgeBuildPlacement.  The whole promise of the feature is "nearest spot that fits", and the
  * only thing that makes "first candidate that fits" mean that is the order the candidates come
  * out in.  Ring by ring is not that order - from three rings out a ring's own diagonal is
@@ -4642,14 +4957,14 @@ TEST(ai_build_delay_follows_the_players_bank_account)
 {
 	/* A campaign AI runs at the rate the data literally says: 10 seconds flat, faster when it
 	 * is rich, slower when it is broke. */
-	CHECK_EQ(teamDelay(4000, 1.0f), 10 * LOGICFRAMES_PER_SECOND);
-	CHECK_EQ(teamDelay(9000, 1.0f),  5 * LOGICFRAMES_PER_SECOND);
-	CHECK_EQ(teamDelay(1000, 1.0f), (Int)(10.0f / 0.6f * LOGICFRAMES_PER_SECOND));
+	CHECK_EQ(teamDelay(4000, 1.0f), 10 * LOGICFRAMES_PER_GAME_SECOND);
+	CHECK_EQ(teamDelay(9000, 1.0f),  5 * LOGICFRAMES_PER_GAME_SECOND);
+	CHECK_EQ(teamDelay(1000, 1.0f), (Int)(10.0f / 0.6f * LOGICFRAMES_PER_GAME_SECOND));
 
 	/* The thresholds are exclusive on both sides - sitting exactly on Poor or exactly on
 	 * Wealthy is neither. */
-	CHECK_EQ(teamDelay(AIDATA_POOR, 1.0f), 10 * LOGICFRAMES_PER_SECOND);
-	CHECK_EQ(teamDelay(AIDATA_WEALTHY, 1.0f), 10 * LOGICFRAMES_PER_SECOND);
+	CHECK_EQ(teamDelay(AIDATA_POOR, 1.0f), 10 * LOGICFRAMES_PER_GAME_SECOND);
+	CHECK_EQ(teamDelay(AIDATA_WEALTHY, 1.0f), 10 * LOGICFRAMES_PER_GAME_SECOND);
 }
 
 TEST(skirmish_build_rate_keeps_the_old_pace_but_not_the_old_flat_clamp)
@@ -4658,12 +4973,12 @@ TEST(skirmish_build_rate_keeps_the_old_pace_but_not_the_old_flat_clamp)
 	 * counted down.  With the shipped TeamSeconds of 10 that clamp fired for every player at
 	 * every wealth, so TeamsWealthyRate and TeamsPoorRate did nothing at all.  As a rate the
 	 * neutral case still lands on the same 3 seconds... */
-	CHECK_EQ(teamDelay(4000, SKIRMISH_RATE), 3 * LOGICFRAMES_PER_SECOND);
+	CHECK_EQ(teamDelay(4000, SKIRMISH_RATE), 3 * LOGICFRAMES_PER_GAME_SECOND);
 
 	/* ...and the modifiers around it are alive again: rich presses harder, broke backs off.
 	 * Under the clamp all three of these were 90. */
-	CHECK_EQ(teamDelay(9000, SKIRMISH_RATE), (Int)(1.5f * LOGICFRAMES_PER_SECOND));
-	CHECK_EQ(teamDelay(1000, SKIRMISH_RATE), (Int)(5.0f * LOGICFRAMES_PER_SECOND));
+	CHECK_EQ(teamDelay(9000, SKIRMISH_RATE), (Int)(1.5f * LOGICFRAMES_PER_GAME_SECOND));
+	CHECK_EQ(teamDelay(1000, SKIRMISH_RATE), (Int)(5.0f * LOGICFRAMES_PER_GAME_SECOND));
 	CHECK(teamDelay(9000, SKIRMISH_RATE) < teamDelay(4000, SKIRMISH_RATE));
 	CHECK(teamDelay(1000, SKIRMISH_RATE) > teamDelay(4000, SKIRMISH_RATE));
 
@@ -4672,8 +4987,8 @@ TEST(skirmish_build_rate_keeps_the_old_pace_but_not_the_old_flat_clamp)
 	const Int scripted = AIPlayer::computeBuildDelay(30.0f, 4000, AIDATA_POOR, AIDATA_WEALTHY,
 	                                                 AIDATA_TEAM_POOR_MOD, AIDATA_TEAM_RICH_MOD,
 	                                                 SKIRMISH_RATE);
-	CHECK_EQ(scripted, 9 * LOGICFRAMES_PER_SECOND);
-	CHECK(scripted > 3 * LOGICFRAMES_PER_SECOND);
+	CHECK_EQ(scripted, 9 * LOGICFRAMES_PER_GAME_SECOND);
+	CHECK(scripted > 3 * LOGICFRAMES_PER_GAME_SECOND);
 
 	/* StructureSeconds ships as 0, so structures stay on the "as soon as the build delay lets
 	 * you" path they are on today, whatever the rate is. */
@@ -4709,7 +5024,7 @@ TEST(ai_players_do_not_all_check_in_on_the_same_frame)
 	 * its repeating checks re-arms itself from a constant, so seven bots ran their base building,
 	 * team building and bridge repair together for the whole match and the cost of all seven
 	 * landed on one logic frame.  The phase is what pulls them apart. */
-	const Int cycle = 2 * LOGICFRAMES_PER_SECOND;
+	const Int cycle = 2 * LOGICFRAMES_PER_GAME_SECOND;
 	Int seen[ MAX_PLAYER_COUNT ];
 	Int i, j;
 	for (i = 0; i < MAX_PLAYER_COUNT; i++)
@@ -4720,9 +5035,21 @@ TEST(ai_players_do_not_all_check_in_on_the_same_frame)
 		CHECK(seen[i] >= 0);
 		CHECK(seen[i] < cycle);
 	}
-	for (i = 0; i < MAX_PLAYER_COUNT; i++)
-		for (j = i + 1; j < MAX_PLAYER_COUNT; j++)
+	/* 64 reversed slots on a cycle of fewer frames (two game seconds, 32 ticks or more) share a frame only
+	 * between indices 32 apart, so every seat of a full MAX_SLOTS lobby still has its own; a cycle of 64
+	 * or more frames gives every player one. */
+	const Int distinct = cycle >= 64 ? MAX_PLAYER_COUNT : MAX_SLOTS;
+	for (i = 0; i < distinct; i++)
+		for (j = i + 1; j < distinct; j++)
 			CHECK_NE(seen[i], seen[j]);
+
+	/* And a full lobby fills the cycle: index times cycle over MAX_PLAYER_COUNT sat 32 seats in its
+	 * first two thirds, and the last third of every cycle ran no AI at all. */
+	Int latest = 0;
+	for (i = 1; i <= 32; i++)
+		if (seen[i] > latest)
+			latest = seen[i];
+	CHECK(latest >= cycle * 15 / 16);
 
 	/* It is a function of the player index and nothing else - no clock, no random - or the
 	 * lockstep simulation would desync the moment two machines disagreed. */
@@ -4732,9 +5059,9 @@ TEST(ai_players_do_not_all_check_in_on_the_same_frame)
 	 * collide there; what must not happen is a phase outside the cycle. */
 	for (i = 0; i < MAX_PLAYER_COUNT; i++)
 	{
-		const Int shortPhase = AIPlayer::computeUpdatePhase(i, LOGICFRAMES_PER_SECOND);
+		const Int shortPhase = AIPlayer::computeUpdatePhase(i, LOGICFRAMES_PER_GAME_SECOND);
 		CHECK(shortPhase >= 0);
-		CHECK(shortPhase < LOGICFRAMES_PER_SECOND);
+		CHECK(shortPhase < LOGICFRAMES_PER_GAME_SECOND);
 	}
 
 	/* Garbage in stays harmless: an unset index or a zero cycle means "no offset". */
@@ -5805,6 +6132,52 @@ TEST(metamap_bare_arrows_stay_with_the_camera)
 	CHECK_EQ( (Int)next->m_modState, (Int)CTRL );
 	CHECK_EQ( (Int)ctrl->m_modState, (Int)CTRL );
 	CHECK_EQ( (Int)team->m_modState, (Int)NONE );
+
+	// the minimap colours land on a free F11, and stay off an F11 the language file gave away
+	MetaMapRec *colours = map.getMetaMapRec( GameMessage::MSG_META_TOGGLE_RADAR_COLORS );
+	CHECK_EQ( (Int)colours->m_key, (Int)MK_F11 );
+	CHECK_EQ( (Int)colours->m_modState, (Int)NONE );
+
+	MetaRecProbe taken;
+	MetaMapRec *shot = taken.getMetaMapRec( GameMessage::MSG_META_TAKE_SCREENSHOT );
+	shot->m_key = MK_F11;
+	shot->m_usableIn = COMMANDUSABLE_GAME;
+	taken.keepArrowsForCamera();
+	CHECK_EQ( (Int)taken.getMetaMapRec( GameMessage::MSG_META_TOGGLE_RADAR_COLORS )->m_key, (Int)MK_NONE );
+
+	// the command tabs on Ctrl with Q, W and E, and off a Ctrl+W the language file gave away
+	MetaMapRec *ground = map.getMetaMapRec( GameMessage::MSG_META_TOGGLE_COMMAND_TAB_GROUND );
+	CHECK_EQ( (Int)ground->m_key, (Int)MK_W );
+	CHECK_EQ( (Int)ground->m_modState, (Int)CTRL );
+	CHECK_EQ( (Int)ground->m_usableIn, (Int)COMMANDUSABLE_GAME );
+	CHECK_EQ( (Int)map.getMetaMapRec( GameMessage::MSG_META_TOGGLE_COMMAND_TAB_BUILDINGS )->m_key, (Int)MK_Q );
+	CHECK_EQ( (Int)map.getMetaMapRec( GameMessage::MSG_META_TOGGLE_COMMAND_TAB_AIRCRAFT )->m_key, (Int)MK_E );
+	MetaRecProbe ctrlW;
+	MetaMapRec *scatter = ctrlW.getMetaMapRec( GameMessage::MSG_META_SCATTER );
+	scatter->m_key = MK_W;
+	scatter->m_modState = CTRL;
+	scatter->m_usableIn = COMMANDUSABLE_GAME;
+	ctrlW.keepArrowsForCamera();
+	CHECK_EQ( (Int)ctrlW.getMetaMapRec( GameMessage::MSG_META_TOGGLE_COMMAND_TAB_GROUND )->m_key, (Int)MK_NONE );
+	CHECK_EQ( (Int)ctrlW.getMetaMapRec( GameMessage::MSG_META_TOGGLE_COMMAND_TAB_BUILDINGS )->m_key, (Int)MK_Q );
+}
+
+// a command tab's tooltip names the key the map gives its command now: the default, a rebind, none
+TEST(controlbar_command_tab_tooltip_names_its_key)
+{
+	MetaRecProbe map;
+	map.keepArrowsForCamera();
+	MetaMap *const before = TheMetaMap;
+	TheMetaMap = &map;
+	const UnicodeString label( u"Ground units%s: everything" );
+	CHECK( ControlBar_withMetaKey( label, GameMessage::MSG_META_TOGGLE_COMMAND_TAB_GROUND ) == UnicodeString( u"Ground units (Ctrl+W): everything" ) );
+	MetaMapRec *ground = map.getMetaMapRec( GameMessage::MSG_META_TOGGLE_COMMAND_TAB_GROUND );
+	ground->m_key = MK_G;
+	ground->m_modState = ALT;
+	CHECK( ControlBar_withMetaKey( label, GameMessage::MSG_META_TOGGLE_COMMAND_TAB_GROUND ) == UnicodeString( u"Ground units (Alt+G): everything" ) );
+	ground->m_usableIn = COMMANDUSABLE_NONE;
+	CHECK( ControlBar_withMetaKey( label, GameMessage::MSG_META_TOGGLE_COMMAND_TAB_GROUND ) == UnicodeString( u"Ground units: everything" ) );
+	TheMetaMap = before;
 }
 
 TEST(controlbar_stance_key_takes_what_the_buttons_leave)
@@ -5934,53 +6307,94 @@ TEST(controlbar_seconds_round_up_and_never_reach_zero_early)
 	CHECK_EQ( ControlBar_secondsFromFrames( 1.0f ), 1 );
 }
 
-TEST(player_game_speed_is_normal_or_turbo)
+TEST(player_game_speeds_set_the_game_time_of_one_tick)
 {
-	/* A match someone plays runs at normal speed or in turbo mode at twice that, nothing between: a
-	   saved game and the console land on the nearer one, so a save from the old half-speed settings
-	   comes back at normal. */
-	CHECK_EQ( ClampPlayerGameSpeed( LOGICFRAMES_PER_SECOND * 3 ), LOGICFRAMES_PER_SECOND * 2 );
-	CHECK_EQ( ClampPlayerGameSpeed( LOGICFRAMES_PER_SECOND * 2 ), LOGICFRAMES_PER_SECOND * 2 );
-	CHECK_EQ( ClampPlayerGameSpeed( LOGICFRAMES_PER_SECOND * 3 / 2 ), LOGICFRAMES_PER_SECOND * 2 );
-	CHECK_EQ( ClampPlayerGameSpeed( LOGICFRAMES_PER_SECOND ), LOGICFRAMES_PER_SECOND );
-	CHECK_EQ( ClampPlayerGameSpeed( LOGICFRAMES_PER_SECOND / 2 ), LOGICFRAMES_PER_SECOND );
-	CHECK_EQ( ClampPlayerGameSpeed( ConvertRetailFrames( 5 ) ), LOGICFRAMES_PER_SECOND );
+	/* The four player speeds, in percent of retail's pace, are the game time each of the same
+	   LOGICFRAMES_PER_SECOND ticks advances: GameSpeed_set takes one, and a game second is that many
+	   fewer ticks.  The native one is the default.  Anything else lands on the nearest. */
+	CHECK_EQ( (Int)PLAYER_GAME_SPEED_PERCENT_DEFAULT, (Int)NATIVE_GAME_SPEED_PERCENT );
+	for( Int i = 0; i < PLAYER_GAME_SPEED_COUNT; ++i )
+	{
+		const Int percent = PLAYER_GAME_SPEED_PERCENTS[ i ];
+		CHECK_EQ( ClampPlayerGameSpeedPercent( percent ), percent );
+		GameSpeed_set( percent );
+		CHECK_EQ( LOGICFRAMES_PER_GAME_SECOND * percent, LOGICFRAMES_PER_SECOND * 100 );
+		// a retail second of game time takes fewer ticks the faster the speed
+		CHECK_EQ( ConvertRetailFrames( (Int)RETAIL_LOGICFRAMES_PER_SECOND ), (Int)LOGICFRAMES_PER_GAME_SECOND );
+	}
+	GameSpeed_set( NATIVE_GAME_SPEED_PERCENT );
+	CHECK_EQ( ClampPlayerGameSpeedPercent( 10 ), PLAYER_GAME_SPEED_PERCENTS[ 0 ] );
+	CHECK_EQ( ClampPlayerGameSpeedPercent( 1000 ), PLAYER_GAME_SPEED_PERCENTS[ PLAYER_GAME_SPEED_COUNT - 1 ] );
+	CHECK_EQ( ClampPlayerGameSpeedPercent( 140 ), 150 );
+	CHECK_EQ( ClampPlayerGameSpeedPercent( 110 ), 100 );
 }
 
 TEST(mission_cinematic_runs_at_the_speed_its_script_asks_for)
 {
 	/* CHI01's opening asks for 23 of retail's 30 and for 0 when it hands the game back; USA06 hands it
-	   back with 30.  Below 30 is the cinematic's pace, turbo mode or not; the rest is the match's speed. */
-	const Int normal = LOGICFRAMES_PER_SECOND;
-	const Int turbo = LOGICFRAMES_PER_SECOND * 2;
-	CHECK_EQ( GameEngine_missionFramesPerSecond( 23, normal ), 46 );
-	CHECK_EQ( GameEngine_missionFramesPerSecond( 23, turbo ), 46 );
-	CHECK_EQ( GameEngine_missionFramesPerSecond( 0, normal ), normal );
-	CHECK_EQ( GameEngine_missionFramesPerSecond( 0, turbo ), turbo );
-	CHECK_EQ( GameEngine_missionFramesPerSecond( RETAIL_LOGICFRAMES_PER_SECOND, turbo ), turbo );
+	   back with 30.  Below 30 is the cinematic's pace at the mission's game speed, a retail pace in wall
+	   time; the rest is the match's ticks a second, the same at every speed. */
+	const Int match = LOGICFRAMES_PER_SECOND;
+	for( Int i = 0; i < PLAYER_GAME_SPEED_COUNT; ++i )
+	{
+		GameSpeed_set( PLAYER_GAME_SPEED_PERCENTS[ i ] );
+		CHECK_EQ( GameEngine_missionFramesPerSecond( 23, match ), ConvertRetailFrames( 23 ) );
+		CHECK_EQ( GameEngine_missionFramesPerSecond( 0, match ), match );
+		CHECK_EQ( GameEngine_missionFramesPerSecond( RETAIL_LOGICFRAMES_PER_SECOND, match ), match );
+	}
+	GameSpeed_set( NATIVE_GAME_SPEED_PERCENT );
 }
 
-TEST(match_speed_is_frames_per_second_limit_doubled_by_turbo)
+TEST(held_input_cinematic_at_full_rate_paces_at_retail_speed)
 {
-	/* Every MSG_NEW_GAME a player starts passes this: GameData.ini's normal speed, or -fps for a test,
-	   twice that in turbo mode, inside the 1..1000 MSG_NEW_GAME takes. */
+	/* MD_CHI02's intro tail runs at SET_FPS_LIMIT 30 under held input: retail pace, a retail second of
+	   ticks a wall second, which is ConvertRetailFrames of retail's rate at the mission's game speed (30 at
+	   100, 20 at 150, 15 at 200).  A rate a script already slowed is folded once and stays, and nothing
+	   moves outside a cinematic. */
+	for( Int i = 0; i < PLAYER_GAME_SPEED_COUNT; ++i )
+	{
+		GameSpeed_set( PLAYER_GAME_SPEED_PERCENTS[ i ] );
+		const Int retailPace = ConvertRetailFrames( (Int)RETAIL_LOGICFRAMES_PER_SECOND );
+		CHECK_EQ( GameEngine_framesPerSecondForSpeed( 100 ), retailPace );
+		CHECK_EQ( GameEngine_cinematicFramesPerSecond( LOGICFRAMES_PER_SECOND, TRUE ), retailPace );
+		CHECK_EQ( GameEngine_cinematicFramesPerSecond( LOGICFRAMES_PER_SECOND, FALSE ), (Int)LOGICFRAMES_PER_SECOND );
+		const Int slowed = GameEngine_missionFramesPerSecond( 23, LOGICFRAMES_PER_SECOND );
+		CHECK_EQ( GameEngine_cinematicFramesPerSecond( slowed, TRUE ), slowed );
+		// the pace against retail: ticks a wall second times the game time each tick advances
+		CHECK_NEAR( GameEngine_cinematicFramesPerSecond( LOGICFRAMES_PER_SECOND, TRUE ) * ( (Real)GAME_SPEED_PERCENT / 100.0f ),
+			(Real)RETAIL_LOGICFRAMES_PER_SECOND * LOGICFRAMES_PER_RETAIL_FRAME, 0.5f * (Real)GAME_SPEED_PERCENT / 100.0f );
+	}
+	GameSpeed_set( NATIVE_GAME_SPEED_PERCENT );
+}
+
+TEST(match_pace_is_frames_per_second_limit_at_every_game_speed)
+{
+	/* Every MSG_NEW_GAME a player starts passes this and its game speed after it: GameData.ini's native
+	   tick, or -fps for a test, inside the 1..1000 MSG_NEW_GAME takes, the same at every speed. */
 	GlobalData *saved = TheWritableGlobalData;
 	TheWritableGlobalData = NEW GlobalData;
 
 	TheWritableGlobalData->m_framesPerSecondLimit = LOGICFRAMES_PER_SECOND;
-	CHECK_EQ( GameEngine_matchFramesPerSecond( FALSE ), LOGICFRAMES_PER_SECOND );
-	CHECK_EQ( GameEngine_matchFramesPerSecond( TRUE ), LOGICFRAMES_PER_SECOND * 2 );
+	for( Int i = 0; i < PLAYER_GAME_SPEED_COUNT; ++i )
+	{
+		GameSpeed_set( PLAYER_GAME_SPEED_PERCENTS[ i ] );
+		CHECK_EQ( GameEngine_matchFramesPerSecond(), (Int)LOGICFRAMES_PER_SECOND );
+	}
+	GameSpeed_set( NATIVE_GAME_SPEED_PERCENT );
 	TheWritableGlobalData->m_framesPerSecondLimit = 0;	// no FramesPerSecondLimit at all
-	CHECK_EQ( GameEngine_matchFramesPerSecond( TRUE ), LOGICFRAMES_PER_SECOND * 2 );
-	TheWritableGlobalData->m_framesPerSecondLimit = 800;
-	CHECK_EQ( GameEngine_matchFramesPerSecond( TRUE ), 1000 );
+	CHECK_EQ( GameEngine_matchFramesPerSecond(), (Int)LOGICFRAMES_PER_SECOND );
+	TheWritableGlobalData->m_framesPerSecondLimit = 2000;
+	CHECK_EQ( GameEngine_matchFramesPerSecond(), 1000 );
 
 	SkirmishGameInfo game;
 	game.init();
-	CHECK( !game.getTurbo() );
-	game.setTurbo( TRUE );
+	CHECK_EQ( game.getGameSpeedPercent(), (Int)PLAYER_GAME_SPEED_PERCENT_DEFAULT );
+	game.setGameSpeedPercent( 200 );
+	CHECK_EQ( game.getGameSpeedPercent(), 200 );
+	game.setGameSpeedPercent( 130 );
+	CHECK_EQ( game.getGameSpeedPercent(), 125 );
 	game.reset();
-	CHECK( !game.getTurbo() );
+	CHECK_EQ( game.getGameSpeedPercent(), (Int)PLAYER_GAME_SPEED_PERCENT_DEFAULT );
 
 	delete TheWritableGlobalData;
 	TheWritableGlobalData = saved;
@@ -6792,6 +7206,42 @@ TEST(crcagreement_two_players_who_are_both_here_and_disagree_is_a_mismatch)
 	CHECK_EQ( crcAgreement( reported, crc, connected, 4, 3 ), CRC_AGREEMENT_AGREE );
 }
 
+TEST(crcoddones_names_whoever_a_strict_majority_outvotes_and_nobody_without_one)
+{
+	Bool reported[4]  = { TRUE, TRUE, TRUE, TRUE };
+	Bool connected[4] = { TRUE, TRUE, TRUE, TRUE };
+	UnsignedInt crc[4] = { 0x1111u, 0x2222u, 0x1111u, 0x1111u };
+	Bool odd[4];
+
+	CHECK_EQ( crcOddOnes( reported, crc, connected, 4, odd ), 1 );
+	CHECK( !odd[0] ); CHECK( odd[1] ); CHECK( !odd[2] ); CHECK( !odd[3] );
+
+	// the majority found wherever it sits, the first reporter being the odd one included
+	crc[0] = 0x3333u; crc[1] = 0x1111u;
+	CHECK_EQ( crcOddOnes( reported, crc, connected, 4, odd ), 1 );
+	CHECK( odd[0] ); CHECK( !odd[1] );
+
+	// two against two: nothing says which pair is wrong
+	crc[0] = 0x2222u; crc[1] = 0x2222u;
+	CHECK_EQ( crcOddOnes( reported, crc, connected, 4, odd ), 0 );
+	CHECK( !odd[0] && !odd[1] && !odd[2] && !odd[3] );
+
+	// a 1v1 never names anyone
+	CHECK_EQ( crcOddOnes( reported, crc, connected, 2, odd ), 0 );
+
+	// three different CRCs among three: no majority either
+	UnsignedInt three[3] = { 1u, 2u, 3u };
+	CHECK_EQ( crcOddOnes( reported, three, connected, 3, odd ), 0 );
+
+	// somebody gone, or silent, is neither the majority nor odd
+	crc[0] = 0x9999u; crc[1] = 0x1111u; crc[2] = 0x1111u; crc[3] = 0x5555u;
+	connected[3] = FALSE;
+	CHECK_EQ( crcOddOnes( reported, crc, connected, 4, odd ), 1 );
+	CHECK( odd[0] ); CHECK( !odd[3] );
+	reported[0] = FALSE;
+	CHECK_EQ( crcOddOnes( reported, crc, connected, 4, odd ), 0 );
+}
+
 TEST(crcagreement_a_room_with_nobody_left_in_it_is_not_a_mismatch)
 {
 	Bool reported[2]  = { FALSE, FALSE };
@@ -6942,6 +7392,75 @@ TEST(scriptengine_finds_a_script_by_name_wherever_it_lives)
 	TheSidesList = savedSides;
 }
 
+// A skirmish AI's flags and counters carry its player's number, so a 32-player match wants several
+// hundred of each.  At 256 the table ran out near 15 AIs and every later name got slot 0 - all of
+// them the same flag, and _LAUNCH_ATTACK stuck on for the whole back half of the lobby.
+class ScriptVariableTestEngine : public ScriptEngine
+{
+public:
+	using ScriptEngine::allocateFlag;
+	using ScriptEngine::allocateCounter;
+	Bool flag( Int ndx ) const { return m_flags[ ndx ].value; }
+	void raiseFlag( Int ndx ) { m_flags[ ndx ].value = TRUE; }
+};
+
+TEST(scriptengine_gives_every_flag_and_counter_its_own_slot_past_256)
+{
+	SidesList sides;
+	SidesList *savedSides = TheSidesList;
+	TheSidesList = &sides;
+
+	ScriptVariableTestEngine *engine = new ScriptVariableTestEngine;	// the tables are large for a stack
+	engine->newMap();
+
+	// 32 seats' worth, well past the old 256: each name its own slot, in order, and asking again
+	// answers the same slot
+	const Int wanted = 600;
+	Bool allDistinct = TRUE;
+	for( Int i = 0; i < wanted; ++i )
+	{
+		AsciiString name;
+		name.format( "Var%d", i );
+		if( engine->allocateFlag( name ) != i + 1 || engine->allocateCounter( name ) != i + 1 )
+			allDistinct = FALSE;
+	}
+	CHECK( allDistinct );
+	CHECK( engine->allocateFlag( AsciiString( "Var299" ) ) == 300 );
+	CHECK( engine->allocateCounter( AsciiString( "Var599" ) ) == 600 );
+	CHECK( engine->getCounter( AsciiString( "Var599" ) ) != NULL );
+	CHECK( engine->getCounter( AsciiString( "NeverMade" ) ) == NULL );
+
+	// clearTeamFlags clears a team flag for every player number, and nothing else
+	const Int teamFlag = engine->allocateFlag( AsciiString( "GLA Team is Building17" ) );
+	engine->raiseFlag( teamFlag );
+	engine->raiseFlag( 5 );
+	engine->clearTeamFlags();
+	CHECK( !engine->flag( teamFlag ) );
+	CHECK( engine->flag( 5 ) );
+
+	// a full table hands out 0, which no name owns, and says so once per name rather than aliasing
+	for( Int i = wanted; i < ScriptEngine::MAX_FLAGS + ScriptEngine::MAX_COUNTERS; ++i )
+	{
+		AsciiString name;
+		name.format( "Var%d", i );
+		engine->allocateFlag( name );
+		engine->allocateCounter( name );
+	}
+	CHECK( engine->allocateFlag( AsciiString( "Overflow" ) ) == 0 );
+	CHECK( engine->allocateFlag( AsciiString( "Overflow" ) ) == 0 );
+	CHECK( engine->allocateCounter( AsciiString( "Overflow" ) ) == 0 );
+	CHECK( engine->getCounter( AsciiString( "Overflow" ) ) == NULL );
+	CHECK( engine->allocateFlag( AsciiString( "Var0" ) ) == 1 );
+
+	// a new map empties the tables and their index
+	engine->newMap();
+	CHECK( engine->allocateFlag( AsciiString( "Fresh" ) ) == 1 );
+	CHECK( engine->getCounter( AsciiString( "Var0" ) ) == NULL );
+
+	delete engine;
+	TheSidesList = savedSides;
+}
+
 // ---------------------------------------------------------------------------------------------
 // The particle system manager's bookkeeping.  Finding a system by id, and unlinking a dead one,
 // both used to be linear walks of every live system - on paths the renderer and the logic take
@@ -6992,6 +7511,11 @@ public:
 	virtual void queueParticleRender() {}
 	virtual void preloadAssets( TimeOfDay ) {}
 };
+
+ParticleSystemManager *newTestParticleSystemManager()
+{
+	return new TestParticleSystemManager;
+}
 
 TEST(particlesys_find_answers_by_id_and_forgets_a_dead_system)
 {
@@ -7277,17 +7801,17 @@ TEST(selfslug_fires_once_the_margin_eats_into_the_slack)
 
 TEST(selfslug_threshold_has_a_floor_the_shipped_run_ahead_cannot_undercut)
 {
-	/* The run-ahead a real room plays on is a handful of frames - MIN_RUNAHEAD is eight, and
-		 computeRunAhead only clears that above about 240 ms round trip - so NetworkRunAheadSlack's
-		 10 % of it is worth well under a frame.  A brake that waits until less than one frame of
-		 margin is left has already lost: at 60 Hz that is under 17 ms of warning for a hitch that
-		 takes longer than that to signal, let alone correct.  Hence the floor. */
+	/* The run-ahead a real room plays on is a handful of frames - three on a LAN, and a 300 ms round
+		 trip is still only fourteen - so NetworkRunAheadSlack's 10 % of it rounds to nothing, and a
+		 threshold of zero frames is a brake that never fires.  The cushion counts whole frames before
+		 the one about to run, so a threshold of one fires with up to a frame still in hand, the last
+		 moment before the stall.  Hence the floor. */
 	CHECK_EQ( selfSlugThreshold( 10, 10 ), SELFSLUG_MIN_THRESHOLD_FRAMES );
 
 	// the floor holds wherever the arithmetic would land under it, including at zero slack
 	CHECK_EQ( selfSlugThreshold( 10, 0 ), SELFSLUG_MIN_THRESHOLD_FRAMES );
 	CHECK_EQ( selfSlugThreshold( 1, 10 ), SELFSLUG_MIN_THRESHOLD_FRAMES );
-	CHECK_EQ( selfSlugThreshold( 39, 10 ), SELFSLUG_MIN_THRESHOLD_FRAMES );
+	CHECK_EQ( selfSlugThreshold( 19, 10 ), SELFSLUG_MIN_THRESHOLD_FRAMES );
 
 	// and gets out of the way as soon as the configured slack is worth more than it
 	CHECK_EQ( selfSlugThreshold( 60, 10 ), 6 );
@@ -7316,7 +7840,7 @@ TEST(selfslug_threshold_has_a_floor_the_shipped_run_ahead_cannot_undercut)
 TEST(the_run_ahead_covers_the_trip_it_is_sized_for)
 {
 	/* The one thing a run-ahead must never do is come out shorter than the wire.  getMaximumLatency
-		 sums the two worst average round trips, so the trip a command has to survive is half of it,
+		 is the worst round trip in the room, so the trip a command has to survive is half of it,
 		 and the window has to cover that at the rate the room is running.  EA truncated the division:
 		 a 150 ms round trip is 2.25 frames of wire at 30 Hz and truncates to 2 - 66 ms of window for
 		 75 ms of travel, which arrives late every single time. */
@@ -7325,7 +7849,8 @@ TEST(the_run_ahead_covers_the_trip_it_is_sized_for)
 		Real latency = (Real)ms / 1000.0f;
 		for( Int fps = 5; fps <= LOGICFRAMES_PER_SECOND; fps += 5 )
 		{
-			Int runAhead = computeRunAhead( latency, fps, 10, MIN_RUNAHEAD, MAX_FRAMES_AHEAD / 2 );
+			// no jitter at all is the smallest margin the formula gives, so the tightest case
+			Int runAhead = computeRunAhead( latency, 0.0f, fps, 10, MIN_RUNAHEAD, MAX_FRAMES_AHEAD / 2 );
 
 			// the window, in seconds, against the one-way trip it has to cover
 			CHECK( (Real)runAhead / (Real)fps >= (latency / 2.0f) );
@@ -7333,25 +7858,27 @@ TEST(the_run_ahead_covers_the_trip_it_is_sized_for)
 	}
 }
 
-TEST(the_router_is_not_a_leg_of_any_trip)
+TEST(every_trip_is_one_hop_over_the_worst_link)
 {
-	/* Two players, slot 0 the router: both measure the same 0.22 s round trip.  The one trip in the
-		 room is guest to router, half of it.  EA summed both and gave the room a whole round trip. */
+	/* Two players both measure the same 0.22 s round trip.  The one trip in the room is one player
+		 to the other, half of it.  EA summed both and gave the room a whole round trip. */
 	Real two[2] = { 0.22f, 0.22f };
 	Bool twoConnected[2] = { TRUE, TRUE };
-	CHECK_NEAR( roomLatencySum( two, twoConnected, 2, 0 ), 0.22f, 0.0001f );
-	CHECK( computeRunAhead( roomLatencySum( two, twoConnected, 2, 0 ), 30, 10, MIN_RUNAHEAD, MAX_FRAMES_AHEAD / 2 )
-				 < computeRunAhead( 0.44f, 30, 10, MIN_RUNAHEAD, MAX_FRAMES_AHEAD / 2 ) );
+	CHECK_NEAR( roomWorstLatency( two, twoConnected, 2 ), 0.22f, 0.0001f );
+	CHECK( computeRunAhead( roomWorstLatency( two, twoConnected, 2 ), 0.02f, 30, 10, MIN_RUNAHEAD, MAX_FRAMES_AHEAD / 2 )
+				 < computeRunAhead( 0.44f, 0.02f, 30, 10, MIN_RUNAHEAD, MAX_FRAMES_AHEAD / 2 ) );
 
-	/* Three: the worst trip is the two guests through the router, both of their legs.  The router's
-		 own figure is left out even when it is the largest. */
-	Real three[3] = { 0.50f, 0.30f, 0.20f };
+	/* Three: commands go straight from author to player, so the worst trip is the single worst
+		 link, never two of them added.  Slot 0, the router, counts like anybody when it is the worst. */
+	Real three[3] = { 0.30f, 0.50f, 0.20f };
 	Bool threeConnected[3] = { TRUE, TRUE, TRUE };
-	CHECK_NEAR( roomLatencySum( three, threeConnected, 3, 0 ), 0.50f, 0.0001f );
+	CHECK_NEAR( roomWorstLatency( three, threeConnected, 3 ), 0.50f, 0.0001f );
+	three[0] = 0.60f;
+	CHECK_NEAR( roomWorstLatency( three, threeConnected, 3 ), 0.60f, 0.0001f );
 
-	/* a guest who has left is not a leg either */
-	threeConnected[1] = FALSE;
-	CHECK_NEAR( roomLatencySum( three, threeConnected, 3, 0 ), 0.20f, 0.0001f );
+	/* a player who has left is no link at all */
+	threeConnected[0] = FALSE;
+	CHECK_NEAR( roomWorstLatency( three, threeConnected, 3 ), 0.50f, 0.0001f );
 }
 
 /* Measured in a real LAN match: the host lost one FRAMEINFO packet, sat on the frame for twenty
@@ -7377,20 +7904,29 @@ TEST(a_stalled_frame_is_not_filed_as_round_trip_time)
 	/* a clock that ran backwards says nothing; it must not read as a zero-latency link */
 	CHECK_NEAR( sanitizeLatencySample( -3.0f, MAX_PLAUSIBLE_LATENCY_SECONDS ), 0.0f, 0.0001f );
 
+	/* a peer's run-ahead metrics are read off the wire and go through here; a NaN is no link either */
+	volatile Real zero = 0.0f;
+	CHECK_NEAR( sanitizeLatencySample( zero / zero, MAX_PLAUSIBLE_LATENCY_SECONDS ), 0.0f, 0.0001f );
+
 	/* and the point of all of it: what the run-ahead does with the clamped numbers.  Two players at
 		 the ceiling still cost far less than the 2.1 s the raw samples bought. */
 	Real clamped = sanitizeLatencySample( 7.636834f, MAX_PLAUSIBLE_LATENCY_SECONDS )
 								 + sanitizeLatencySample( 1.785224f, MAX_PLAUSIBLE_LATENCY_SECONDS );
 	const Int fps = LOGICFRAMES_PER_SECOND;
-	Int runAhead = computeRunAhead( clamped, fps, 10, MIN_RUNAHEAD, MAX_FRAMES_AHEAD / 2 );
+
+	/* The same stall moves rttvar by a quarter of the sample: 450 ms of "jitter" off the 1.79 s one,
+		 which the jitter ceiling holds to what a playable link can show. */
+	Real stalledJitter = sanitizeLatencySample( 1.785224f / 4.0f, MAX_PLAUSIBLE_JITTER_SECONDS );
+	CHECK_NEAR( stalledJitter, MAX_PLAUSIBLE_JITTER_SECONDS, 0.0001f );
+
+	Int runAhead = computeRunAhead( clamped, stalledJitter, fps, 10, MIN_RUNAHEAD, MAX_FRAMES_AHEAD / 2 );
 	CHECK( runAhead < ConvertRetailFrames( 64 ) );
-	CHECK( runAhead <= 58 );			// 0.97 s at 60 Hz, and only with both players at the ceiling
-	CHECK( runAhead <= (Int)(MAX_PLAUSIBLE_LATENCY_SECONDS * (Real)fps * 1.2f) + RUNAHEAD_JITTER_FRAMES );
+	CHECK( runAhead <= (Int)( 1.15f * fps + 0.5f ) );			// 1.15 s, and only with both players and the jitter at the ceilings
 
 	/* a LAN is untouched by any of this */
 	CHECK_EQ( computeRunAhead( sanitizeLatencySample( 0.051f, MAX_PLAUSIBLE_LATENCY_SECONDS ) * 2.0f,
-														 fps, 10, MIN_RUNAHEAD, MAX_FRAMES_AHEAD / 2 ),
-						computeRunAhead( 0.102f, fps, 10, MIN_RUNAHEAD, MAX_FRAMES_AHEAD / 2 ) );
+														 0.004f, fps, 10, MIN_RUNAHEAD, MAX_FRAMES_AHEAD / 2 ),
+						computeRunAhead( 0.102f, 0.004f, fps, 10, MIN_RUNAHEAD, MAX_FRAMES_AHEAD / 2 ) );
 }
 
 /* The other half of that match: nothing ever asked for the lost frame.  FrameData escalates to
@@ -7428,21 +7964,136 @@ TEST(a_missing_frame_is_asked_for_again_once_the_wire_has_had_its_chance)
 	CHECK( wait < 1000 );
 }
 
-TEST(the_run_ahead_carries_a_margin_the_percentage_alone_cannot_give)
+TEST(a_packet_that_arrives_on_time_never_trips_the_self_slug)
 {
-	/* An average round trip is exceeded half the time, so a window sized to exactly the average is
-		 wrong half the time.  The proportional slack was meant to be that margin and cannot be: 10 %
-		 of a four frame window is zero frames, 10 % of a ten frame window is one.  The fixed
-		 allowance is what actually covers the jitter, and it is what makes a low floor safe. */
+	/* The brake fires when the cushion drops below selfSlugThreshold.  Frame f + run-ahead's FRAMEINFO
+		 leaves when frame f has run, so a packet that is trip frames on the wire lands with
+		 run-ahead - trip frames of real time to spare, and the cushion, the frame it completes minus
+		 the frame about to run, is the whole frames of that: run-ahead - 1 - floor(trip).  A margin no
+		 bigger than the threshold has the room running 10 % slow on a link that never drops or delays
+		 a packet.  So whatever the latency and the jitter, that packet arrives with the brake still off,
+		 and so does one late by the jitter the window is sized for, with the other machine's frame
+		 clock up to RUNAHEAD_PHASE_MARGIN_FRAMES ahead. */
 	for( Int ms = 0; ms <= 800; ms += 5 )
 	{
 		Real latency = (Real)ms / 1000.0f;
-		Int runAhead = computeRunAhead( latency, LOGICFRAMES_PER_SECOND, 10, MIN_RUNAHEAD, MAX_FRAMES_AHEAD / 2 );
+		Real tripFrames = ( latency / 2.0f ) * LOGICFRAMES_PER_SECONDS_REAL;
+		for( Int jitterMS = 0; jitterMS <= 100; jitterMS += 5 )
+		{
+			Int runAhead = computeRunAhead( latency, (Real)jitterMS / 1000.0f, LOGICFRAMES_PER_SECOND, 10,
+																			MIN_RUNAHEAD, MAX_FRAMES_AHEAD / 2 );
+			Int cushion = runAhead - 1 - (Int)floorf( tripFrames );
+			CHECK( !shouldSelfSlug( cushion, runAhead, 10 ) );
 
-		// at least RUNAHEAD_JITTER_FRAMES of room beyond the trip itself, at every latency
-		Real slackSeconds = ( (Real)runAhead / LOGICFRAMES_PER_SECONDS_REAL ) - ( latency / 2.0f );
-		CHECK( slackSeconds >= ( (Real)RUNAHEAD_JITTER_FRAMES / LOGICFRAMES_PER_SECONDS_REAL ) - 0.0005f );
+			// summed in seconds before the frame count, as computeRunAhead sums it, so a whole-frame total rounds alike
+			Real lateTripFrames = ( ( latency / 2.0f ) + RUNAHEAD_JITTER_DEVIATIONS * ( (Real)jitterMS / 1000.0f ) )
+														* LOGICFRAMES_PER_SECONDS_REAL;
+			Int lateCushion = runAhead - 1 - (Int)floorf( lateTripFrames ) - RUNAHEAD_PHASE_MARGIN_FRAMES;
+			CHECK( !shouldSelfSlug( lateCushion, runAhead, 10 ) );
+		}
 	}
+}
+
+TEST(the_jitter_margin_follows_the_measured_jitter)
+{
+	const Int fps = LOGICFRAMES_PER_SECOND;
+	const Int oldFixedMargin = LOGICFRAMES_PER_SECOND / 10;	// the RUNAHEAD_JITTER_FRAMES this replaced, 100 ms
+	const Real ping = 0.215f;						// -latAvg 100 each way plus the game's own share, as measured
+
+	/* What each window was under the flat margin: trip + 10 % + 100 ms.  At a 215 ms round trip and
+		 60 ticks a second that is 7 + 0 + 6 = 13 frames whatever the link is doing. */
+	Int tripFrames = (Int)ceilf( ( ping / 2.0f ) * (Real)fps );
+	Int oldWindow = tripFrames + oldFixedMargin;
+
+	// the trip and RUNAHEAD_JITTER_DEVIATIONS of spread rounded past to a whole frame
+	struct Late { static Int frames( Real trip, Real jitter, Int rate )
+		{ return (Int)floorf( ( trip / 2.0f + RUNAHEAD_JITTER_DEVIATIONS * jitter ) * (Real)rate ) + 1; } };
+
+	/* A steady link, rttvar a few milliseconds, gets the trip and its spread rounded past to a whole
+		 frame (6.45 + 0.24 frames at 60 a second, so 7), the phase margin and the brake's frame. */
+	Int steady = computeRunAhead( ping, 0.004f, fps, 10, MIN_RUNAHEAD, MAX_FRAMES_AHEAD / 2 );
+	CHECK_EQ( steady, Late::frames( ping, 0.004f, fps ) + RUNAHEAD_PHASE_MARGIN_FRAMES + SELFSLUG_MIN_THRESHOLD_FRAMES );
+	CHECK( steady < oldWindow );
+
+	/* a jittery one, rttvar 40 ms as -latNoise 30 can measure, waits longer: 6.45 + 2.4 frames at 60 a
+		 second, 3.2 + 1.2 at 30, more than a frame of spread either way */
+	Int jittery = computeRunAhead( ping, 0.040f, fps, 10, MIN_RUNAHEAD, MAX_FRAMES_AHEAD / 2 );
+	CHECK_EQ( jittery, Late::frames( ping, 0.040f, fps ) + RUNAHEAD_PHASE_MARGIN_FRAMES + SELFSLUG_MIN_THRESHOLD_FRAMES );
+	CHECK( jittery > steady );
+	CHECK( computeRunAhead( ping, 0.080f, fps, 10, MIN_RUNAHEAD, MAX_FRAMES_AHEAD / 2 ) > jittery );
+
+	// more jitter never shortens the window
+	Int previous = 0;
+	for( Int jitterMS = 0; jitterMS <= 100; ++jitterMS )
+	{
+		Int runAhead = computeRunAhead( ping, (Real)jitterMS / 1000.0f, fps, 10, MIN_RUNAHEAD, MAX_FRAMES_AHEAD / 2 );
+		CHECK( runAhead >= previous );
+		previous = runAhead;
+	}
+
+	// no jitter at all still rounds the trip past to a whole frame and keeps the phase margin
+	CHECK_EQ( computeRunAhead( ping, 0.0f, fps, 10, MIN_RUNAHEAD, MAX_FRAMES_AHEAD / 2 ),
+						tripFrames + RUNAHEAD_PHASE_MARGIN_FRAMES + SELFSLUG_MIN_THRESHOLD_FRAMES );
+}
+
+/* Each frame's cushion is measured once, by the arrival that completes it (arrivalMeasuresCushion).
+	 Three copies at 200 ms of ping ran self-slugged on 80 % of their frames while every redundant copy
+	 of an order, landing 30 and 60 ms after the frame was complete, was measured as well. */
+TEST(each_frame_measures_its_cushion_once_on_completion)
+{
+	static UnsignedInt measured[CUSHION_RING_FRAMES];
+	memset( measured, 0, sizeof(measured) );
+	const Int maxAhead = 256;
+
+	// the arrival that completes frame 1000 measures it; the redundant copies after it do not
+	CHECK( arrivalMeasuresCushion( measured, 1000, 990, maxAhead ) );
+	markCushionMeasured( measured, 1000 );
+	CHECK( !arrivalMeasuresCushion( measured, 1000, 992, maxAhead ) );
+	CHECK( !arrivalMeasuresCushion( measured, 1000, 1000, maxAhead ) );
+
+	/* Out of order: frame 1001 completes first, then 1000's FRAMEINFO arrives late by the second copy
+		 or a resend answer.  The late one is the sample the brake exists for, and it is still taken. */
+	CHECK( arrivalMeasuresCushion( measured, 1101, 1090, maxAhead ) );
+	markCushionMeasured( measured, 1101 );
+	CHECK( arrivalMeasuresCushion( measured, 1100, 1099, maxAhead ) );
+	CHECK( arrivalMeasuresCushion( measured, 1100, 1100, maxAhead ) );		// arriving on its own frame, cushion 0
+
+	// a frame already run is not measured, and neither is one past the window
+	CHECK( !arrivalMeasuresCushion( measured, 1100, 1101, maxAhead ) );
+	CHECK( !arrivalMeasuresCushion( measured, 1100 + maxAhead + 1, 1100, maxAhead ) );
+	CHECK( arrivalMeasuresCushion( measured, 1100 + maxAhead, 1100, maxAhead ) );
+
+	/* A peer's far-future frame aliases a frame in flight: 1200 + CUSHION_RING_FRAMES shares 1200's
+		 slot.  Refused, so it cannot mark 1200 measured, and the window never reaches past the ring. */
+	CHECK( !arrivalMeasuresCushion( measured, 1200 + CUSHION_RING_FRAMES, 1200, 100000 ) );
+	CHECK( arrivalMeasuresCushion( measured, 1200 + CUSHION_RING_FRAMES - 1, 1200, 100000 ) );
+	CHECK( arrivalMeasuresCushion( measured, 1200, 1199, maxAhead ) );
+
+	// a slot reused a whole ring later is a new frame
+	markCushionMeasured( measured, 1300 );
+	CHECK( arrivalMeasuresCushion( measured, 1300 + CUSHION_RING_FRAMES, 1300 + CUSHION_RING_FRAMES - 5, maxAhead ) );
+
+	// the frame counter wrapping changes nothing
+	const UnsignedInt nearWrap = 0xFFFFFFF0u;
+	CHECK( arrivalMeasuresCushion( measured, 5, nearWrap, maxAhead ) );
+	markCushionMeasured( measured, 5 );
+	CHECK( !arrivalMeasuresCushion( measured, 5, nearWrap + 2, maxAhead ) );
+	CHECK( !arrivalMeasuresCushion( measured, nearWrap, 5, maxAhead ) );		// behind us across the wrap
+}
+
+TEST(a_jitter_figure_off_the_wire_cannot_break_the_window)
+{
+	/* A figure that is not a number, negative or absurd must neither shrink the window nor walk it
+		 out of the buffers. */
+	const Int fps = LOGICFRAMES_PER_SECOND;
+	const Real ping = 0.215f;
+	volatile Real zero = 0.0f;
+	CHECK_EQ( computeRunAhead( ping, zero / zero, fps, 10, MIN_RUNAHEAD, MAX_FRAMES_AHEAD / 2 ),
+						computeRunAhead( ping, 0.0f, fps, 10, MIN_RUNAHEAD, MAX_FRAMES_AHEAD / 2 ) );
+	CHECK_EQ( computeRunAhead( ping, -1.0f, fps, 10, MIN_RUNAHEAD, MAX_FRAMES_AHEAD / 2 ),
+						computeRunAhead( ping, 0.0f, fps, 10, MIN_RUNAHEAD, MAX_FRAMES_AHEAD / 2 ) );
+	CHECK_EQ( computeRunAhead( ping, 1.0e30f, fps, 10, MIN_RUNAHEAD, MAX_FRAMES_AHEAD / 2 ), MAX_FRAMES_AHEAD / 2 );
+	CHECK_NEAR( sanitizeLatencySample( 5.0f, MAX_PLAUSIBLE_JITTER_SECONDS ), MAX_PLAUSIBLE_JITTER_SECONDS, 0.0001f );
 }
 
 TEST(the_run_ahead_is_shorter_than_the_shipped_floor_on_the_links_that_do_not_need_it)
@@ -7453,19 +8104,22 @@ TEST(the_run_ahead_is_shorter_than_the_shipped_floor_on_the_links_that_do_not_ne
 	const Int shippedFloor = ConvertRetailFrames( 10 );	// EA's MIN_RUNAHEAD, 333 ms of input delay
 	const Int fps = LOGICFRAMES_PER_SECOND;
 
-	CHECK( computeRunAhead( 0.000f, fps, 10, MIN_RUNAHEAD, 64 ) < shippedFloor );		// LAN
-	CHECK( computeRunAhead( 0.040f, fps, 10, MIN_RUNAHEAD, 64 ) < shippedFloor );		// 40 ms
-	CHECK( computeRunAhead( 0.100f, fps, 10, MIN_RUNAHEAD, 64 ) < shippedFloor );		// 100 ms
-	CHECK( computeRunAhead( 0.160f, fps, 10, MIN_RUNAHEAD, 64 ) < shippedFloor );		// 160 ms
+	// jitter as loopback and a good broadband link measure it, a few milliseconds of rttvar
+	const Real jitter = 0.008f;
+	CHECK( computeRunAhead( 0.000f, jitter, fps, 10, MIN_RUNAHEAD, 64 ) < shippedFloor );		// LAN
+	CHECK( computeRunAhead( 0.040f, jitter, fps, 10, MIN_RUNAHEAD, 64 ) < shippedFloor );		// 40 ms
+	CHECK( computeRunAhead( 0.100f, jitter, fps, 10, MIN_RUNAHEAD, 64 ) < shippedFloor );		// 100 ms
+	CHECK( computeRunAhead( 0.160f, jitter, fps, 10, MIN_RUNAHEAD, 64 ) < shippedFloor );		// 160 ms
 
 	// and the shortest of them is the floor itself, not something under it
-	CHECK_EQ( computeRunAhead( 0.000f, fps, 10, MIN_RUNAHEAD, 64 ), MIN_RUNAHEAD );
+	CHECK_EQ( computeRunAhead( 0.000f, jitter, fps, 10, MIN_RUNAHEAD, 64 ), MIN_RUNAHEAD );
 
 	/* And what it is not: the links that were relying on the floor get more window than the floor
 		 gave them, not less.  600 ms summed round trip is where EA's formula finally reached ten. */
-	CHECK( computeRunAhead( 0.300f, fps, 10, MIN_RUNAHEAD, 64 ) >= ConvertRetailFrames( 7 ) );
-	CHECK( computeRunAhead( 0.600f, fps, 10, MIN_RUNAHEAD, 64 ) > shippedFloor );
-	CHECK( computeRunAhead( 1.000f, fps, 10, MIN_RUNAHEAD, 64 ) > ConvertRetailFrames( 16 ) );
+	CHECK( computeRunAhead( 0.300f, jitter, fps, 10, MIN_RUNAHEAD, 64 )
+				 >= (Int)( 0.150f * fps ) + 1 + RUNAHEAD_PHASE_MARGIN_FRAMES + SELFSLUG_MIN_THRESHOLD_FRAMES );	// 150 ms (9 frames at 60), rounded past
+	CHECK( computeRunAhead( 0.600f, jitter, fps, 10, MIN_RUNAHEAD, 64 ) > shippedFloor );
+	CHECK( computeRunAhead( 1.000f, jitter, fps, 10, MIN_RUNAHEAD, 64 ) > ConvertRetailFrames( 16 ) );
 }
 
 TEST(the_run_ahead_stays_inside_the_bounds_the_network_buffers_are_built_for)
@@ -7473,14 +8127,17 @@ TEST(the_run_ahead_stays_inside_the_bounds_the_network_buffers_are_built_for)
 	// the window indexes frame buffers sized from MAX_FRAMES_AHEAD; it may not walk out of them
 	for( Int ms = 0; ms <= 20000; ms += 25 )
 	{
-		Int runAhead = computeRunAhead( (Real)ms / 1000.0f, 30, 10, MIN_RUNAHEAD, MAX_FRAMES_AHEAD / 2 );
-		CHECK( runAhead >= MIN_RUNAHEAD );
-		CHECK( runAhead <= MAX_FRAMES_AHEAD / 2 );
+		for( Int jitterMS = 0; jitterMS <= 2000; jitterMS += 250 )
+		{
+			Int runAhead = computeRunAhead( (Real)ms / 1000.0f, (Real)jitterMS / 1000.0f, 30, 10, MIN_RUNAHEAD, MAX_FRAMES_AHEAD / 2 );
+			CHECK( runAhead >= MIN_RUNAHEAD );
+			CHECK( runAhead <= MAX_FRAMES_AHEAD / 2 );
+		}
 	}
 
 	// a rate of zero is not a division by zero, and a negative latency is not a negative window
-	CHECK_EQ( computeRunAhead( 0.0f, 0, 10, MIN_RUNAHEAD, 64 ), MIN_RUNAHEAD );
-	CHECK_EQ( computeRunAhead( -1.0f, 30, 10, MIN_RUNAHEAD, 64 ), MIN_RUNAHEAD );
+	CHECK_EQ( computeRunAhead( 0.0f, 0.0f, 0, 10, MIN_RUNAHEAD, 64 ), MIN_RUNAHEAD );
+	CHECK_EQ( computeRunAhead( -1.0f, 0.0f, 30, 10, MIN_RUNAHEAD, 64 ), MIN_RUNAHEAD );
 }
 
 TEST(the_shipped_run_ahead_floor_leaves_the_self_slug_brake_room_to_work)
@@ -7626,7 +8283,7 @@ TEST(room_frame_rate_still_pins_to_a_genuinely_slow_player_without_oscillating)
 TEST(resend_window_is_measured_from_the_start_of_the_match_not_four_billion)
 {
 	/* ConnectionManager::sendSingleFrameToPlayer refuses to resend a frame older than
-		 FRAMES_TO_KEEP, which is (MAX_FRAMES_AHEAD / 2) + 1 = 129 - about two seconds at 60 Hz, and
+		 FRAMES_TO_KEEP, which is (MAX_FRAMES_AHEAD / 2) + 1 = 129 - about two seconds at 60 Hz, four at 30, and
 		 exactly the window a stalled player can be behind by, since nobody advances while the room
 		 is waiting for them. */
 	const Int KEEP = FRAMES_TO_KEEP;
@@ -8000,7 +8657,9 @@ TEST(random_pool_round_trips_and_plain_random_leaves_out_turkiye)
 	CHECK( candidates == std::vector<Int>( four, four + 4 ) );
 	CHECK_EQ( GetDefaultRandomPool(), 0x7u );
 
-	// plain Random never lands on Turkiye, and the old-factions rule narrows it further
+	// plain Random never lands on Turkiye, and the old-factions rule narrows it further; the plain
+	// draw is also Quick Match's army list, so Turkiye is not offered there
+	// (populateQMSideComboBox in WOLQuickMatchMenu.cpp)
 	const Int three[] = { 1, 2, 3 };
 	const Int old[] = { 1, 3 };
 	CHECK( drawIs( PLAYERTEMPLATE_RANDOM, FALSE, std::vector<Int>( three, three + 3 ) ) );
@@ -8440,6 +9099,7 @@ TEST(a_commands_advertised_size_covers_what_its_writer_puts_in_the_buffer)
 
 	NetRunAheadMetricsCommandMsg *metrics = newInstance( NetRunAheadMetricsCommandMsg );
 	metrics->setAverageLatency( 0.125f );
+	metrics->setLatencyJitter( 0.021f );
 	metrics->setAverageFps( 300 );					// wider than a byte, which is the point
 	NetCommandRef *metricsRef = wrapForSend( metrics, NETCOMMANDTYPE_RUNAHEADMETRICS );
 	CHECK( bytesActuallyWritten( metricsRef, &advertised ) <= advertised );
@@ -8454,6 +9114,37 @@ TEST(a_commands_advertised_size_covers_what_its_writer_puts_in_the_buffer)
 	NetCommandRef *timeoutRef = wrapForSend( timeout, NETCOMMANDTYPE_TIMEOUTSTART );
 	CHECK( bytesActuallyWritten( timeoutRef, &advertised ) <= advertised );
 	timeoutRef->deleteInstance();
+}
+
+/* The router sizes the room's jitter margin on what each player reports, so the jitter has to come
+	 out of the packet as it went in, and the frame rate behind it still where the reader looks. */
+TEST(run_ahead_metrics_carry_the_jitter_across_the_wire)
+{
+	NetRunAheadMetricsCommandMsg *metrics = newInstance( NetRunAheadMetricsCommandMsg );
+	metrics->setAverageLatency( 0.215f );
+	metrics->setLatencyJitter( 0.027f );
+	metrics->setAverageFps( 58 );
+	NetCommandRef *ref = wrapForSend( metrics, NETCOMMANDTYPE_RUNAHEADMETRICS );
+
+	NetPacket *packet = newInstance( NetPacket );
+	packet->init();
+	CHECK( packet->addCommand( ref ) );
+
+	NetCommandList *list = packet->getCommandList();
+	NetCommandRef *first = list->getFirstMessage();
+	CHECK( first != NULL );
+	if( first != NULL )
+	{
+		CHECK_EQ( (Int)first->getCommand()->getNetCommandType(), (Int)NETCOMMANDTYPE_RUNAHEADMETRICS );
+		NetRunAheadMetricsCommandMsg *read = (NetRunAheadMetricsCommandMsg *)first->getCommand();
+		CHECK_NEAR( read->getAverageLatency(), 0.215f, 0.00001f );
+		CHECK_NEAR( read->getLatencyJitter(), 0.027f, 0.00001f );
+		CHECK_EQ( read->getAverageFps(), 58 );
+	}
+
+	list->deleteInstance();
+	packet->deleteInstance();
+	ref->deleteInstance();
 }
 
 /* The size of nothing is nothing.  This one hands back a byte count, but its guard against a null
@@ -8500,7 +9191,7 @@ TEST(an_overlong_transfer_filename_is_truncated_instead_of_overflowing)
 TEST(an_overlong_announced_filename_is_truncated_instead_of_overflowing)
 {
 	static const Int NAME_LEN = 400;
-	UnsignedByte buf[3 + NAME_LEN + 1 + sizeof(UnsignedShort) + sizeof(UnsignedByte)];
+	UnsignedByte buf[3 + NAME_LEN + 1 + sizeof(UnsignedShort) + sizeof(SlotMask)];
 	Int at = 0;
 	buf[at++] = 'T';
 	buf[at++] = NETCOMMANDTYPE_FILEANNOUNCE;
@@ -8513,14 +9204,19 @@ TEST(an_overlong_announced_filename_is_truncated_instead_of_overflowing)
 	UnsignedShort fileID = 0x1234;
 	memcpy( buf + at, &fileID, sizeof(fileID) );
 	at += sizeof(fileID);
-	buf[at++] = 0x5A;									// player mask
+	const SlotMask mask = slotBit( 1 ) | slotBit( MAX_SLOTS - 1 );	// the mask is a SlotMask on the wire, past what a byte held
+	memcpy( buf + at, &mask, sizeof(mask) );
+	at += sizeof(mask);
 
 	NetCommandRef *ref = NetPacket::ConstructNetCommandMsgFromRawData( buf, (UnsignedInt)at );
+	CHECK( ref != NULL );
+	if( ref == NULL )
+		return;
 	NetFileAnnounceCommandMsg *announce = (NetFileAnnounceCommandMsg *)ref->getCommand();
 
 	CHECK_EQ( announce->getPortableFilename().getLength(), _MAX_PATH - 1 );
 	CHECK_EQ( (Int)announce->getFileID(), 0x1234 );
-	CHECK_EQ( (Int)announce->getPlayerMask(), 0x5A );
+	CHECK( announce->getPlayerMask() == mask );
 
 	ref->deleteInstance();
 }
@@ -8645,6 +9341,230 @@ TEST(a_datagram_is_one_udp_payload_and_the_payload_is_what_a_packet_holds)
 	CHECK( (Int)sizeof(CommandPacket) <= MAX_PACKET_SIZE );
 	CHECK( (Int)sizeof(LANMessage) <= MAX_LANAPI_PACKET_SIZE );
 	CHECK( MAX_LANAPI_PACKET_SIZE <= MAX_PACKET_SIZE );
+}
+
+/* The relay and a chat's recipients were a byte and an Int, one bit per slot, which held eight
+	 slots and thirty-two.  Both are a SlotMask now, all four bytes on the wire: a slot past the byte,
+	 and the top one, 31, the sign bit of EA's Int, have to come back out of a packet as they went in. */
+TEST(a_relay_and_a_chat_mask_up_to_slot_31_survive_the_packet)
+{
+	CHECK_EQ( MAX_SLOTS - 1, 31 );
+	const SlotMask recipients = slotBit( 0 ) | slotBit( 8 ) | slotBit( MAX_SLOTS - 1 );
+	const SlotMask relay = slotBit( 9 ) | slotBit( MAX_SLOTS - 1 );
+	CHECK( allSlotsBut( 3 ) == ( SLOTMASK_ALL & ~slotBit( 3 ) ) );
+	CHECK( ( SLOTMASK_ALL >> ( MAX_SLOTS - 1 ) ) == 1 );		// one bit per slot, no more
+
+	NetChatCommandMsg *chat = newInstance( NetChatCommandMsg );
+	chat->setText( UnicodeString( u"hi" ) );
+	chat->setPlayerMask( recipients );
+	chat->setPlayerID( MAX_SLOTS - 1 );
+	chat->setID( 1 );
+	chat->setExecutionFrame( 0 );
+	chat->setNetCommandType( NETCOMMANDTYPE_CHAT );
+	NetCommandRef *ref = newInstance( NetCommandRef )( chat );
+	ref->setRelay( relay );
+	chat->detach();
+
+	NetPacket *packet = newInstance( NetPacket );
+	packet->init();
+	CHECK( packet->addCommand( ref ) );
+
+	TransportMessage wire;
+	memset( &wire, 0, sizeof(wire) );
+	wire.length = packet->getLength();
+	memcpy( wire.data, packet->getData(), wire.length );
+	NetPacket *received = newInstance( NetPacket )( &wire );
+	NetCommandList *list = received->getCommandList();
+	NetCommandRef *back = list->getFirstMessage();
+	CHECK( back != NULL );
+	if( back != NULL )
+	{
+		CHECK( back->getRelay() == relay );
+		CHECK_EQ( (Int)back->getCommand()->getPlayerID(), MAX_SLOTS - 1 );
+		CHECK( ((NetChatCommandMsg *)back->getCommand())->getPlayerMask() == recipients );
+	}
+
+	list->deleteInstance();
+	received->deleteInstance();
+	packet->deleteInstance();
+	ref->deleteInstance();
+}
+
+/* NAT negotiation pairs the players off in rounds, so each round's connections are made at once.
+	 EA wrote the schedule out by hand for 2 to 8 nodes; it is generated now.  Every pair has to meet
+	 exactly once, both ends of a pairing have to agree on it, and the rounds are as many as EA's. */
+TEST(nat_rounds_pair_every_two_nodes_exactly_once_for_2_to_32)
+{
+	for( Int n = 2; n <= MAX_SLOTS; ++n )
+	{
+		const Int rounds = NAT::connectionRounds( n );
+		CHECK_EQ( rounds, ( n % 2 == 0 ) ? n - 1 : n );		// EA's table: 2->1, 3->3, 4->3 ... 8->7
+
+		Int met[MAX_SLOTS][MAX_SLOTS];
+		memset( met, 0, sizeof(met) );
+		for( Int r = 0; r < rounds; ++r )
+		{
+			for( Int x = 0; x < n; ++x )
+			{
+				const Int y = NAT::connectionPartner( n, r, x );
+				if( y == -1 )
+					continue;			// a bye, in an odd room
+				CHECK( y >= 0 && y < n && y != x );
+				if( y < 0 || y >= n )
+					continue;
+				CHECK_EQ( NAT::connectionPartner( n, r, y ), x );
+				++met[x][y];
+			}
+		}
+		for( Int x = 0; x < n; ++x )
+			for( Int y = 0; y < n; ++y )
+				CHECK_EQ( met[x][y], x == y ? 0 : 1 );
+
+		// past the schedule, and outside the room, nobody
+		CHECK_EQ( NAT::connectionPartner( n, rounds, 0 ), -1 );
+		CHECK_EQ( NAT::connectionPartner( n, 0, n ), -1 );
+		CHECK_EQ( NAT::connectionPartner( n, -1, 0 ), -1 );
+	}
+	CHECK_EQ( NAT::connectionPartner( 1, 0, 0 ), -1 );
+}
+
+/* A 32-seat room's game options are several times what one LAN datagram holds, so they go out in
+	 numbered parts and the receiver puts them back together.  The probe sends through a Transport
+	 with no socket, which only queues; what it queued is read back the way it would arrive. */
+struct LANOptionsProbe : public LANAPI
+{
+	using LANAPI::sendOptions;
+	using LANAPI::assembleOptions;
+	using LANAPI::m_assembledOptions;
+	Transport *transport() { return m_transport; }
+};
+
+// Transport's xor over whole words (decryptBuf in Transport.cpp), applied to what queueSend left
+static void unXorTransportMessage( TransportMessage &m )
+{
+	UnsignedInt mask = 0x0000Fade;
+	UnsignedInt *word = (UnsignedInt *)&m;
+	const Int words = ( m.length + (Int)sizeof(TransportMessageHeader) ) / 4;
+	for( Int i = 0; i < words; ++i )
+	{
+		const UnsignedInt v = word[i];
+		word[i] = ( ( v >> 24 ) | ( ( v >> 8 ) & 0xFF00 ) | ( ( v << 8 ) & 0xFF0000 ) | ( v << 24 ) ) ^ mask;
+		mask += 0x00000321;
+	}
+}
+
+static std::vector<LANMessage> takeQueuedLANMessages( Transport *transport )
+{
+	std::vector<LANMessage> sent;
+	for( Int i = 0; i < MAX_MESSAGES; ++i )
+	{
+		if( transport->m_outBuffer[i].length <= 0 )
+			continue;
+		TransportMessage m = transport->m_outBuffer[i];
+		const Int length = m.length;	// the xor covers the payload, not the bookkeeping after it
+		unXorTransportMessage( m );
+		LANMessage msg;
+		memset( &msg, 0, sizeof(msg) );
+		memcpy( &msg, m.data, min( length, (Int)sizeof(msg) ) );
+		sent.push_back( msg );
+		transport->m_outBuffer[i].length = 0;
+	}
+	return sent;
+}
+
+TEST(lan_options_go_out_in_parts_and_come_back_whole)
+{
+	LANOptionsProbe *host = new LANOptionsProbe;
+	LANOptionsProbe *guest = new LANOptionsProbe;
+	for( Int i = 0; i < MAX_MESSAGES; ++i )
+	{
+		host->transport()->m_outBuffer[i].length = 0;		// a Transport before init has never cleared them
+		guest->transport()->m_outBuffer[i].length = 0;
+	}
+
+	AsciiString options;
+	for( Int k = 0; k < 2 * g_lanOptionsPartLength + 300; ++k )
+		options.concat( (char)( 'a' + ( k % 26 ) ) );
+	const UnsignedInt hostIP = 0x0A000001, otherIP = 0x0A000002;
+
+	LANMessage announce;
+	memset( &announce, 0, sizeof(announce) );
+	announce.LANMessageType = LANMessage::MSG_GAME_ANNOUNCE;
+	host->sendOptions( &announce, options, hostIP );
+	std::vector<LANMessage> parts = takeQueuedLANMessages( host->transport() );
+	CHECK_EQ( (Int)parts.size(), 3 );
+	if( parts.size() != 3 )
+	{
+		delete host;
+		delete guest;
+		return;
+	}
+	for( Int p = 0; p < 3; ++p )
+	{
+		CHECK_EQ( (Int)parts[p].GameInfo.optionsPart, p );
+		CHECK_EQ( (Int)parts[p].GameInfo.optionsParts, 3 );
+	}
+
+	// in order: the last part completes it, and the string is the one that went out
+	CHECK( !guest->assembleOptions( &parts[0], hostIP ) );
+	CHECK( !guest->assembleOptions( &parts[1], hostIP ) );
+	CHECK( guest->assembleOptions( &parts[2], hostIP ) );
+	CHECK( guest->m_assembledOptions == options );
+
+	// a part lost: the set is dropped, and the next whole send still comes through
+	CHECK( !guest->assembleOptions( &parts[0], hostIP ) );
+	CHECK( !guest->assembleOptions( &parts[2], hostIP ) );
+	CHECK( !guest->assembleOptions( &parts[1], hostIP ) );		// a stray, not the rest of a set
+	CHECK( !guest->assembleOptions( &parts[0], hostIP ) );
+	CHECK( !guest->assembleOptions( &parts[1], hostIP ) );
+	CHECK( guest->assembleOptions( &parts[2], hostIP ) );
+	CHECK( guest->m_assembledOptions == options );
+
+	// out of order: a later part first is nothing, and the set it lands in is spoiled
+	guest->m_assembledOptions.clear();
+	CHECK( !guest->assembleOptions( &parts[1], hostIP ) );
+	CHECK( !guest->assembleOptions( &parts[0], hostIP ) );
+	CHECK( !guest->assembleOptions( &parts[2], hostIP ) );
+	CHECK( guest->m_assembledOptions.isEmpty() );
+
+	// two senders interleaved each get their own set
+	CHECK( !guest->assembleOptions( &parts[0], hostIP ) );
+	CHECK( !guest->assembleOptions( &parts[0], otherIP ) );
+	CHECK( !guest->assembleOptions( &parts[1], otherIP ) );
+	CHECK( !guest->assembleOptions( &parts[1], hostIP ) );
+	CHECK( guest->assembleOptions( &parts[2], hostIP ) );
+	CHECK( guest->m_assembledOptions == options );
+	CHECK( guest->assembleOptions( &parts[2], otherIP ) );
+	CHECK( guest->m_assembledOptions == options );
+
+	// a room that fits is one part, as before, and a GAME_OPTIONS goes the same way
+	LANMessage request;
+	memset( &request, 0, sizeof(request) );
+	request.LANMessageType = LANMessage::MSG_GAME_OPTIONS;
+	host->sendOptions( &request, AsciiString( "Color=3" ), hostIP );
+	parts = takeQueuedLANMessages( host->transport() );
+	CHECK_EQ( (Int)parts.size(), 1 );
+	if( parts.size() == 1 )
+	{
+		CHECK_EQ( (Int)parts[0].GameOptions.optionsParts, 1 );
+		CHECK( guest->assembleOptions( &parts[0], hostIP ) );
+		CHECK( guest->m_assembledOptions == AsciiString( "Color=3" ) );
+	}
+
+	// a part count that no sender writes is refused
+	parts.clear();
+	LANMessage forged = announce;
+	forged.GameInfo.optionsPart = 0;
+	forged.GameInfo.optionsParts = g_lanOptionsParts + 1;
+	forged.GameInfo.options[0] = 0;
+	CHECK( !guest->assembleOptions( &forged, hostIP ) );
+
+	// the whole budget fits the parts
+	CHECK_EQ( m_lanMaxOptionsLength, g_lanOptionsParts * g_lanOptionsPartLength );
+	CHECK( m_lanMaxOptionsLength >= 3000 );		// a 32-seat room of human players with full names
+
+	delete host;
+	delete guest;
 }
 
 /* A chat message's length goes on the wire in one byte, and every site that packed or measured one
@@ -8838,6 +9758,24 @@ TEST(a_player_index_from_outside_this_machine_is_bounded_before_use)
 		if( isValidPlayerIndex( i ) != (i >= 0 && i < MAX_PLAYER_COUNT) )
 			acceptedOnlyTheList = FALSE;
 	CHECK( acceptedOnlyTheList );
+}
+
+/* 32 slots need more than 32 players, and EA's 1 << playerIndex in an Int is undefined from 32 on:
+	 x64 masks the shift to five bits, so player 32 came out as player 0. */
+TEST(every_player_index_has_its_own_mask_bit)
+{
+	PlayerMaskType all = PLAYERMASK_NONE;
+	Bool distinct = TRUE;
+	for( Int i = 0; i < MAX_PLAYER_COUNT; ++i )
+	{
+		const PlayerMaskType bit = playerIndexToMask( i );
+		if( bit == 0 || ( all & bit ) != 0 || ( bit & ( bit - 1 ) ) != 0 )
+			distinct = FALSE;
+		all |= bit;
+	}
+	CHECK( distinct );
+	CHECK( ( all & PLAYERMASK_ALL ) == all );
+	CHECK( playerIndexToMask( 32 ) != playerIndexToMask( 0 ) );
 }
 
 /* Starting a game used to seed only the logic stream.  The client and audio streams kept the
@@ -9157,6 +10095,227 @@ TEST(radar_shroud_cache_clear_owes_the_whole_texture_a_write_again)
 	CHECK_EQ( cache.getDirtyMaxX(), 127 );
 	CHECK_EQ( cache.getDirtyMaxY(), 127 );
 	CHECK_EQ( (Int)cache.getAlpha( 60, 60 ), 0 );
+}
+
+// ---------------------------------------------------------------------------------------------
+// The radar's alarms.  Their rules work on the event array alone, so the probe below reaches them
+// without a game; it is never made, only its statics are called.
+// ---------------------------------------------------------------------------------------------
+struct RadarAlarmProbe : public Radar
+{
+	using Radar::RadarEvent;
+	using Radar::findThrottlingEvent;
+	using Radar::refreshEventLife;
+	using Radar::olderEventIndex;
+	using Radar::markForType;
+	enum { SLOTS = Radar::MAX_RADAR_EVENTS };
+};
+
+static void clearRadarAlarms( RadarAlarmProbe::RadarEvent *events )
+{
+	memset( events, 0, sizeof( RadarAlarmProbe::RadarEvent ) * RadarAlarmProbe::SLOTS );
+	for( Int i = 0; i < RadarAlarmProbe::SLOTS; ++i )
+		events[ i ].type = RADAR_EVENT_INVALID;
+}
+
+static void putRadarAlarm( RadarAlarmProbe::RadarEvent *events, Int slot, RadarEventType type, Real x, Real y,
+													 UnsignedInt created )
+{
+	events[ slot ].type = type;
+	events[ slot ].active = TRUE;
+	events[ slot ].createFrame = created;
+	events[ slot ].dieFrame = created + 4 * LOGICFRAMES_PER_SECOND;
+	events[ slot ].fadeFrame = events[ slot ].dieFrame - LOGICFRAMES_PER_SECOND / 2;
+	events[ slot ].worldLoc.x = x;
+	events[ slot ].worldLoc.y = y;
+	events[ slot ].worldLoc.z = 0.0f;
+	events[ slot ].mark = RADAR_MARK_UNIT;
+}
+
+TEST(radar_alarm_new_type_goes_on_the_end_so_scripts_keep_their_numbers)
+{
+	// a map script stores the type as a number: every type EA shipped keeps its own
+	CHECK_EQ( (Int)RADAR_EVENT_UNDER_ATTACK, 3 );
+	CHECK_EQ( (Int)RADAR_EVENT_STEALTH_NEUTRALIZED, 9 );
+	CHECK_EQ( (Int)RADAR_EVENT_FAKE, 10 );
+	CHECK_EQ( (Int)RADAR_EVENT_STRUCTURE_LOST, 11 );
+	CHECK_EQ( (Int)RADAR_EVENT_NUM_EVENTS, (Int)RADAR_EVENT_STRUCTURE_LOST + 1 );
+	CHECK_EQ( (Int)RadarAlarmProbe::markForType( RADAR_EVENT_STRUCTURE_LOST ), (Int)RADAR_MARK_STRUCTURE );
+	CHECK_EQ( (Int)RadarAlarmProbe::markForType( RADAR_EVENT_UNDER_ATTACK ), (Int)RADAR_MARK_UNIT );
+}
+
+TEST(radar_alarm_a_held_back_hit_keeps_the_alarm_alive)
+{
+	static RadarAlarmProbe::RadarEvent events[ RadarAlarmProbe::SLOTS ];
+	clearRadarAlarms( events );
+	putRadarAlarm( events, 0, RADAR_EVENT_UNDER_ATTACK, 1000.0f, 1000.0f, 600 );
+	const UnsignedInt firstDeath = events[ 0 ].dieFrame;
+
+	// three seconds on, a hit 100 units away is the same fight: held back by the first alarm
+	Coord3D hit = { 1100.0f, 1000.0f, 0.0f };
+	const UnsignedInt later = 600 + 3 * LOGICFRAMES_PER_SECOND;
+	CHECK_EQ( RadarAlarmProbe::findThrottlingEvent( events, RADAR_EVENT_UNDER_ATTACK, &hit, later ), 0 );
+
+	// and it lives four seconds after that hit now, not after the first
+	RadarAlarmProbe::refreshEventLife( &events[ 0 ], later, 4.0f, RADAR_MARK_STRUCTURE );
+	CHECK( events[ 0 ].dieFrame > firstDeath );
+	CHECK_EQ( events[ 0 ].dieFrame, later + 4 * LOGICFRAMES_PER_SECOND );
+	CHECK_EQ( events[ 0 ].fadeFrame, events[ 0 ].dieFrame - LOGICFRAMES_PER_SECOND / 2 );
+	CHECK( events[ 0 ].active );
+	CHECK_EQ( (Int)events[ 0 ].mark, (Int)RADAR_MARK_STRUCTURE );		// grows to the bigger thing hit
+	RadarAlarmProbe::refreshEventLife( &events[ 0 ], later, 4.0f, RADAR_MARK_UNIT );
+	CHECK_EQ( (Int)events[ 0 ].mark, (Int)RADAR_MARK_STRUCTURE );		// and never shrinks back
+
+	// one that had gone out comes back for the next hit
+	events[ 0 ].active = FALSE;
+	RadarAlarmProbe::refreshEventLife( &events[ 0 ], later + 60, 4.0f, RADAR_MARK_BY_TYPE );
+	CHECK( events[ 0 ].active );
+	CHECK_EQ( events[ 0 ].dieFrame, later + 60 + 4 * LOGICFRAMES_PER_SECOND );
+
+	// across the map, or another type, or ten seconds on, nothing holds it back
+	Coord3D across = { 2000.0f, 1000.0f, 0.0f };
+	CHECK_EQ( RadarAlarmProbe::findThrottlingEvent( events, RADAR_EVENT_UNDER_ATTACK, &across, later ), -1 );
+	CHECK_EQ( RadarAlarmProbe::findThrottlingEvent( events, RADAR_EVENT_INFILTRATION, &hit, later ), -1 );
+	CHECK_EQ( RadarAlarmProbe::findThrottlingEvent( events, RADAR_EVENT_UNDER_ATTACK, &hit, 600 + 10 * LOGICFRAMES_PER_SECOND ), -1 );
+}
+
+TEST(radar_alarm_spacebar_walks_back_through_distinct_places)
+{
+	static RadarAlarmProbe::RadarEvent events[ RadarAlarmProbe::SLOTS ];
+	clearRadarAlarms( events );
+	// oldest to newest in slots 62, 63, 0, 1, 2: the ring has wrapped
+	putRadarAlarm( events, 62, RADAR_EVENT_UNDER_ATTACK, 100.0f, 100.0f, 10 );
+	putRadarAlarm( events, 63, RADAR_EVENT_FAKE, 3000.0f, 3000.0f, 20 );
+	putRadarAlarm( events, 0, RADAR_EVENT_BEACON_PULSE, 2000.0f, 100.0f, 30 );		// never a stop
+	putRadarAlarm( events, 1, RADAR_EVENT_UNDER_ATTACK, 3050.0f, 3000.0f, 40 );		// where slot 63 is
+	putRadarAlarm( events, 2, RADAR_EVENT_STRUCTURE_LOST, 1500.0f, 1500.0f, 50 );
+
+	Int visited[ 5 ];
+	Int count = 0;
+	visited[ count++ ] = 2;
+	Int next = RadarAlarmProbe::olderEventIndex( events, 2, 2, visited, count );
+	CHECK_EQ( next, 1 );
+	visited[ count++ ] = next;
+	// slot 0 is a beacon and slot 63 the place slot 1 already showed: the next is slot 62
+	next = RadarAlarmProbe::olderEventIndex( events, 2, next, visited, count );
+	CHECK_EQ( next, 62 );
+	visited[ count++ ] = next;
+	// nothing older; the slots before are empty
+	CHECK_EQ( RadarAlarmProbe::olderEventIndex( events, 2, next, visited, count ), -1 );
+}
+
+// ---------------------------------------------------------------------------------------------
+// The minimap's zoom.  Draw puts a world spot at a pixel and a click takes the pixel back to the
+// world through the same transform, so every pixel of the picture has to come back to itself at
+// every zoom and every part of the map the zoom can show, or a click lands beside the dot under it.
+// ---------------------------------------------------------------------------------------------
+TEST(minimap_zoom_round_trips_every_pixel_through_the_world)
+{
+	const Real mapWidth = 4000.0f, mapHeight = 3000.0f;
+	const ICoord2D ul = { 11, 37 }, lr = { 231, 202 };		// 220 by 165, the map's shape
+	const Real zooms[] = { 1.0f, 1.41421356f, 2.0f, 2.82842712f, 4.0f };
+	const Real places[][ 2 ] = { { 0.0f, 0.0f }, { 1234.5f, 777.0f }, { 1e6f, 1e6f }, { -50.0f, 2999.0f } };
+
+	for( Int z = 0; z < 5; ++z )
+	{
+		for( Int p = 0; p < 4; ++p )
+		{
+			RadarZoomView view;
+			view.zoom = zooms[ z ];
+			view.x = places[ p ][ 0 ];
+			view.y = places[ p ][ 1 ];
+			view.clampTo( mapWidth, mapHeight );
+			CHECK( view.x >= 0.0f && view.x + mapWidth / view.zoom <= mapWidth + 0.01f );
+			CHECK( view.y >= 0.0f && view.y + mapHeight / view.zoom <= mapHeight + 0.01f );
+
+			RadarPictureTransform transform;
+			transform.set( view, mapWidth, mapHeight, ul, lr );
+
+			Int wrong = 0, outside = 0;
+			for( Int y = ul.y; y < lr.y; ++y )
+			{
+				for( Int x = ul.x; x < lr.x; ++x )
+				{
+					ICoord2D pixel = { x, y };
+					Real wx, wy, px, py;
+					transform.toWorld( pixel, &wx, &wy );
+					if( wx < view.x || wx > view.x + mapWidth / view.zoom || wy < view.y || wy > view.y + mapHeight / view.zoom )
+						++outside;
+					transform.toPixel( wx, wy, &px, &py );
+					if( REAL_TO_INT_FLOOR( px ) != x || REAL_TO_INT_FLOOR( py ) != y )
+						++wrong;
+				}
+			}
+			CHECK_EQ( wrong, 0 );
+			CHECK_EQ( outside, 0 );
+		}
+	}
+
+	// at the whole map it is the picture the minimap always drew: x across, +y up from the bottom
+	RadarZoomView whole;
+	whole.reset();
+	RadarPictureTransform transform;
+	transform.set( whole, mapWidth, mapHeight, ul, lr );
+	Real px, py;
+	transform.toPixel( 2000.0f, 0.0f, &px, &py );
+	CHECK_NEAR( px, 121.0f, 0.001f );
+	CHECK_NEAR( py, 202.0f, 0.001f );
+	transform.toPixel( 0.0f, 3000.0f, &px, &py );
+	CHECK_NEAR( px, 11.0f, 0.001f );
+	CHECK_NEAR( py, 37.0f, 0.001f );
+}
+
+TEST(minimap_zoom_keeps_the_cursor_spot_and_stays_on_the_map)
+{
+	const Real mapWidth = 4000.0f, mapHeight = 3000.0f;
+	const ICoord2D ul = { 0, 0 }, lr = { 200, 150 };
+
+	// a notch in the middle: the spot under the cursor stays under it
+	RadarZoomView view;
+	view.reset();
+	RadarPictureTransform before, after;
+	before.set( view, mapWidth, mapHeight, ul, lr );
+	const ICoord2D cursor = { 90, 60 };
+	Real wx, wy, px, py;
+	before.toWorld( cursor, &wx, &wy );
+	view.zoomAround( 2.0f, wx, wy, mapWidth, mapHeight );
+	CHECK_NEAR( view.zoom, 2.0f, 0.0001f );
+	after.set( view, mapWidth, mapHeight, ul, lr );
+	after.toPixel( wx, wy, &px, &py );
+	CHECK_EQ( REAL_TO_INT_FLOOR( px ), cursor.x );
+	CHECK_EQ( REAL_TO_INT_FLOOR( py ), cursor.y );
+
+	// out from the map's corner: kept under the cursor the shown part would hang past the edge, so it
+	// stops at the edge instead
+	view.zoom = 4.0f;
+	view.x = 3000.0f;
+	view.y = 0.0f;
+	view.zoomAround( 2.0f, 3990.0f, 10.0f, mapWidth, mapHeight );
+	CHECK_NEAR( view.x, 2000.0f, 0.01f );
+	CHECK_NEAR( view.y, 0.0f, 0.01f );
+
+	// never past 4 and never under the whole map; out again, the whole map from its corner
+	view.zoomAround( 8.0f, 2000.0f, 1500.0f, mapWidth, mapHeight );
+	CHECK_NEAR( view.zoom, 4.0f, 0.0001f );
+	view.zoomAround( 0.5f, 2000.0f, 1500.0f, mapWidth, mapHeight );
+	CHECK_NEAR( view.zoom, 1.0f, 0.0001f );
+	CHECK_NEAR( view.x, 0.0f, 0.01f );
+	CHECK_NEAR( view.y, 0.0f, 0.01f );
+
+	// following the camera: a look point inside the middle three fifths moves nothing, one past it
+	// pans just enough, and one at the map's far corner leaves the view on the map
+	view.zoom = 4.0f;
+	view.x = 1000.0f;
+	view.y = 1000.0f;
+	view.follow( 1500.0f, 1350.0f, mapWidth, mapHeight );
+	CHECK_NEAR( view.x, 1000.0f, 0.01f );
+	CHECK_NEAR( view.y, 1000.0f, 0.01f );
+	view.follow( 2100.0f, 1350.0f, mapWidth, mapHeight );
+	CHECK_NEAR( view.x, 2100.0f - 1000.0f + 200.0f, 0.01f );
+	CHECK_NEAR( view.y, 1000.0f, 0.01f );
+	view.follow( 4000.0f, 3000.0f, mapWidth, mapHeight );
+	CHECK_NEAR( view.x, 3000.0f, 0.01f );
+	CHECK_NEAR( view.y, 2250.0f, 0.01f );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -9739,6 +10898,21 @@ TEST(a_toxin_or_fire_death_puppet_wears_no_health_bar)
 	CHECK( Drawable_kindShowsHealthBar( healthBarKinds( KINDOF_PROJECTILE, KINDOF_SELECTABLE ) ) == FALSE );
 }
 
+/** The Artillery Barrage's guns are AIRCRAFT UNATTACKABLE IGNORED_IN_GUI with no model, and each
+	 hung an altitude line and ring in the sky. Real planes keep theirs, the power planes included. */
+TEST(artillery_barrage_guns_hang_no_altitude_line)
+{
+	CHECK( Drawable_kindWearsAltitudeLine( healthBarKinds( KINDOF_AIRCRAFT, KINDOF_UNATTACKABLE, KINDOF_IGNORED_IN_GUI ) ) == FALSE );
+	CHECK( Drawable_kindWearsAltitudeLine( healthBarKinds( KINDOF_AIRCRAFT, KINDOF_SELECTABLE ) ) == TRUE );
+	CHECK( Drawable_kindWearsAltitudeLine( healthBarKinds( KINDOF_AIRCRAFT, KINDOF_TRANSPORT, KINDOF_IGNORED_IN_GUI ) ) == TRUE );
+	// the Kargu drone is UNATTACKABLE and a real, drawn aircraft
+	CHECK( Drawable_kindWearsAltitudeLine( healthBarKinds( KINDOF_VEHICLE, KINDOF_AIRCRAFT, KINDOF_UNATTACKABLE ) ) == TRUE );
+	CHECK( Drawable_kindWearsAltitudeLine( healthBarKinds( KINDOF_AIRCRAFT, KINDOF_PROJECTILE ) ) == FALSE );
+	CHECK( Drawable_kindWearsAltitudeLine( healthBarKinds( KINDOF_AIRCRAFT, KINDOF_PARACHUTE ) ) == FALSE );
+	CHECK( Drawable_kindWearsAltitudeLine( healthBarKinds( KINDOF_AIRCRAFT, KINDOF_SMALL_MISSILE ) ) == FALSE );
+	CHECK( Drawable_kindWearsAltitudeLine( healthBarKinds( KINDOF_VEHICLE ) ) == FALSE );
+}
+
 /** The Spy Drone is VEHICLE DRONE SELECTABLE INERT NO_SELECT. INERT kept the toxin fields bare and
 	 took the drone's bar with them, so its owner never saw its health. A field stays bare. */
 TEST(the_spy_drone_wears_a_health_bar_and_a_toxin_field_does_not)
@@ -9841,6 +11015,31 @@ TEST(health_bar_selection_mode_is_what_retail_did)
 /** Smart is selection plus every damaged thing.  A bar over a unit at full health says only what
 	 the absence of a bar would have said, and a base full of those is what makes always-on tiring;
 	 a bar over something that has been hit is the reason to have them at all. */
+/** The seat and round chips grow in whole pixels only, so they never blur: 1920x1080's size up to
+	 1440p, doubled at 4K, never under one pixel on a small window. */
+TEST(load_pip_chips_scale_in_whole_pixels)
+{
+	CHECK_EQ( Drawable_pipPixel( 1.2f ), 1 );		// 1280x720
+	CHECK_EQ( Drawable_pipPixel( 1.8f ), 1 );		// 1920x1080
+	CHECK_EQ( Drawable_pipPixel( 2.4f ), 1 );		// 2560x1440
+	CHECK_EQ( Drawable_pipPixel( 3.6f ), 2 );		// 3840x2160
+	CHECK_EQ( Drawable_pipPixel( 4.8f ), 3 );		// 5120x2880
+	CHECK_EQ( Drawable_pipPixel( 0.5f ), 1 );
+}
+
+/** Who still shows free seats with nobody inside: a transport always, a garrison or a Barracks
+	 never whatever the option says, a Tunnel Network as Empty Building Slots says. */
+TEST(empty_seats_hide_on_a_barracks_whatever_the_option)
+{
+	for( Int option = 0; option < 2; ++option )
+	{
+		CHECK( Drawable_emptySeatsShow( FALSE, FALSE, FALSE, option != 0 ) == TRUE );		// transport
+		CHECK( Drawable_emptySeatsShow( TRUE, TRUE, FALSE, option != 0 ) == FALSE );		// garrison
+		CHECK( Drawable_emptySeatsShow( TRUE, FALSE, TRUE, option != 0 ) == FALSE );		// Barracks
+		CHECK( Drawable_emptySeatsShow( TRUE, FALSE, FALSE, option != 0 ) == ( option != 0 ) );	// tunnel
+	}
+}
+
 TEST(health_bar_smart_mode_marks_the_hurt)
 {
 	CHECK( Drawable_healthBarModeShows( HEALTH_BAR_SMART, FALSE, FALSE, TRUE ) == TRUE );
@@ -12530,13 +13729,15 @@ TEST(map_size_is_chosen_and_then_grows_with_the_players)
 
 	Int size, players;
 
+	// strictly bigger, unless the bigger one has hit the largest map there is
+	#define RMG_GROWS( a, b ) ( (a) < (b) || ( (a) == (b) && (b) == RandomMapGenerator::MAX_CELLS ) )
 	for( size = 0; size < RANDOM_MAP_SIZE_COUNT; size++ )
 	{
 		for( players = RandomMapGenerator::MIN_PLAYERS;
 				 players < RandomMapGenerator::MAX_PLAYERS; players++ )
 		{
-			CHECK( RandomMapGenerator::cellsFor( (RandomMapSize)size, players ) <
-						 RandomMapGenerator::cellsFor( (RandomMapSize)size, players + 1 ) );
+			CHECK( RMG_GROWS( RandomMapGenerator::cellsFor( (RandomMapSize)size, players ),
+						 RandomMapGenerator::cellsFor( (RandomMapSize)size, players + 1 ) ) );
 		}
 	}
 
@@ -12550,13 +13751,19 @@ TEST(map_size_is_chosen_and_then_grows_with_the_players)
 		Int tinyCells = RandomMapGenerator::cellsFor( RANDOM_MAP_SIZE_TINY, players );
 		Int hugeCells = RandomMapGenerator::cellsFor( RANDOM_MAP_SIZE_HUGE, players );
 
-		CHECK( tinyCells < smallCells );
-		CHECK( smallCells < normalCells );
-		CHECK( normalCells < largeCells );
-		CHECK( largeCells < hugeCells );
+		CHECK( RMG_GROWS( tinyCells, smallCells ) );
+		CHECK( RMG_GROWS( smallCells, normalCells ) );
+		CHECK( RMG_GROWS( normalCells, largeCells ) );
+		CHECK( RMG_GROWS( largeCells, hugeCells ) );
 		CHECK( tinyCells >= RandomMapGenerator::MIN_CELLS );
 		CHECK( hugeCells <= RandomMapGenerator::MAX_CELLS );
 	}
+	#undef RMG_GROWS
+
+	// past eight every player keeps an eight-player map's ground: the area grows as players / 8
+	CHECK_EQ( RandomMapGenerator::cellsFor( RANDOM_MAP_SIZE_NORMAL, 8 ), 416 );
+	CHECK_EQ( RandomMapGenerator::cellsFor( RANDOM_MAP_SIZE_NORMAL, 16 ), 588 );		// 416 * sqrt(2)
+	CHECK_EQ( RandomMapGenerator::cellsFor( RANDOM_MAP_SIZE_NORMAL, 32 ), 832 );		// 416 * sqrt(4)
 
 	// A count nobody asked for is the normal size for that many players, and the clamp says so
 	// rather than generating a map the caller cannot describe.
@@ -12575,6 +13782,53 @@ TEST(map_size_is_chosen_and_then_grows_with_the_players)
 	CHECK_EQ( theRMGParse.m_boundaryX, settings.m_playableCells );
 }
 
+/* The headless benchmark seats up to 32 AIs on a generated map: every one needs its own start, apart
+	from the others, and the approach paths may not grow with the square of the seats, since the
+	engine links each path waypoint by walking every waypoint on the map. */
+TEST(a_generated_map_seats_thirty_two)
+{
+	CHECK( bootOnce() );
+
+	RandomMapSettings settings;
+	settings.m_seed = 7;
+	settings.m_numPlayers = RandomMapGenerator::MAX_PLAYERS;
+	settings.m_playableCells = 0;
+	RandomMapGenerator::clampSettings( settings );
+	CHECK_EQ( settings.m_numPlayers, 32 );
+	CHECK_EQ( settings.m_playableCells, 832 );
+
+	std::vector<char> bytes;
+	RandomMapGenerator::generate( settings, bytes );
+	parseGeneratedMap( bytes );
+
+	std::vector<Coord3D> starts( settings.m_numPlayers );
+	Int found = 0;
+	for( size_t i = 0; i < theRMGParse.m_waypointNames.size(); i++ )
+	{
+		Int seat = 0;
+		if( sscanf( theRMGParse.m_waypointNames[i].str(), "Player_%d_Start", &seat ) == 1 && seat >= 1 && seat <= settings.m_numPlayers )
+		{
+			starts[seat - 1] = theRMGParse.m_waypointPositions[i];
+			found++;
+		}
+	}
+	CHECK_EQ( found, settings.m_numPlayers );
+
+	// two bases' levelled discs never meet: 2 * 13 cells + 6, ten world units a cell
+	Real closest = 1.0e9f;
+	for( Int a = 0; a < found; a++ )
+		for( Int b = a + 1; b < found; b++ )
+		{
+			Real dx = starts[a].x - starts[b].x, dy = starts[a].y - starts[b].y;
+			closest = std::min( closest, sqrtf( dx * dx + dy * dy ) );
+		}
+	CHECK( closest >= 32.0f * MAP_XY_FACTOR );
+
+	// seven sources a target, three lanes: an eight-seat map's count per seat, not 31 sources
+	CHECK( !theRMGParse.m_pathWaypointNames.empty() );
+	CHECK( (Int)theRMGParse.m_pathWaypointNames.size() < settings.m_numPlayers * 7 * 3 * 120 );
+}
+
 TEST(a_template_map_gives_each_player_the_ground_a_seat_has_on_the_template)
 {
 	// Twilight Flame: 486 by 469 playable, eight seats
@@ -12589,12 +13843,100 @@ TEST(a_template_map_gives_each_player_the_ground_a_seat_has_on_the_template)
 		RandomMapGenerator::cellsForTemplate( RANDOM_MAP_SIZE_NORMAL, 4, TEMPLATE_X, TEMPLATE_Y, 4 ) );
 	for( Int size = 0; size + 1 < RANDOM_MAP_SIZE_COUNT; size++ )
 		for( Int players = RandomMapGenerator::MIN_PLAYERS; players <= RandomMapGenerator::MAX_PLAYERS; players++ )
-			CHECK( RandomMapGenerator::cellsForTemplate( (RandomMapSize)size, players, TEMPLATE_X, TEMPLATE_Y, TEMPLATE_SEATS ) <
-				RandomMapGenerator::cellsForTemplate( (RandomMapSize)( size + 1 ), players, TEMPLATE_X, TEMPLATE_Y, TEMPLATE_SEATS ) );
+		{
+			Int smaller = RandomMapGenerator::cellsForTemplate( (RandomMapSize)size, players, TEMPLATE_X, TEMPLATE_Y, TEMPLATE_SEATS );
+			Int bigger = RandomMapGenerator::cellsForTemplate( (RandomMapSize)( size + 1 ), players, TEMPLATE_X, TEMPLATE_Y, TEMPLATE_SEATS );
+			CHECK( smaller < bigger || ( smaller == bigger && bigger == RandomMapGenerator::MAX_CELLS ) );
+		}
 
 	// no template, or one this machine does not have, is the plain table
 	CHECK_EQ( RandomMapGenerator::cellsFor( RANDOM_MAP_SIZE_LARGE, 6, AsciiString::TheEmptyString ),
 		RandomMapGenerator::cellsFor( RANDOM_MAP_SIZE_LARGE, 6 ) );
+}
+
+/* The cell cap stays the 768 it always was for eight players or fewer, so no map an eight-seat room
+	 already played changes; only a room past eight may grow to 984. */
+TEST(the_cell_cap_grows_only_past_eight_players)
+{
+	CHECK( bootOnce() );
+
+	CHECK_EQ( RandomMapGenerator::maxCellsFor( 8 ), 768 );
+	CHECK_EQ( RandomMapGenerator::maxCellsFor( 9 ), 984 );
+
+	CHECK_EQ( RandomMapGenerator::cellsForTemplate( RANDOM_MAP_SIZE_HUGE, 8, 550, 550, 8 ), 768 );
+	const Int nine = RandomMapGenerator::cellsForTemplate( RANDOM_MAP_SIZE_HUGE, 9, 550, 550, 8 );
+	CHECK( nine > 768 );
+	CHECK( nine <= 984 );
+
+	RandomMapSettings settings;
+	settings.m_numPlayers = 8;
+	settings.m_playableCells = 900;
+	RandomMapGenerator::clampSettings( settings );
+	CHECK_EQ( settings.m_playableCells, 768 );
+
+	settings = RandomMapSettings();
+	settings.m_numPlayers = 9;
+	settings.m_playableCells = 900;
+	RandomMapGenerator::clampSettings( settings );
+	CHECK_EQ( settings.m_playableCells, 900 );
+
+	settings = RandomMapSettings();
+	settings.m_numPlayers = 32;
+	settings.m_playableCells = 2000;
+	RandomMapGenerator::clampSettings( settings );
+	CHECK_EQ( settings.m_playableCells, 984 );
+}
+
+/* A map cache entry names one Player_N_Start line per start spot.  The reader knew eight, so a
+	 twelve-player map threw on Player_9_Start and the whole cache file failed to load. */
+TEST(a_map_cache_entry_reads_twelve_start_spots)
+{
+	CHECK( bootOnce() );
+
+	AsciiString text( "MapCache maps\\twelve\\twelve.map\r\n"
+		"  isOfficial = No\r\n"
+		"  isMultiplayer = Yes\r\n"
+		"  extentMin = X:0.00 Y:0.00 Z:0.00\r\n"
+		"  extentMax = X:4000.00 Y:4000.00 Z:100.00\r\n"
+		"  numPlayers = 12\r\n"
+		"  fileSize = 1234\r\n"
+		"  fileCRC = 5678\r\n" );
+	for( Int n = 1; n <= 12; ++n )
+	{
+		AsciiString line;
+		line.format( "  Player_%d_Start = X:%d.00 Y:%d.00 Z:0.00\r\n", n, n * 100, n * 10 );
+		text.concat( line );
+	}
+	text.concat( "End\r\n" );
+	writeFile( TEST_INI, text.str() );
+
+	MapCache *savedCache = TheMapCache;
+	TheMapCache = NEW MapCache;
+	CHECK( loadIni( TEST_INI ) );
+
+	MapCache::iterator it = TheMapCache->find( AsciiString( "maps\\twelve\\twelve.map" ) );
+	CHECK( it != TheMapCache->end() );
+	if( it != TheMapCache->end() )
+	{
+		const MapMetaData &md = it->second;
+		CHECK_EQ( md.m_numPlayers, 12 );
+		for( Int n = 1; n <= 12; ++n )
+		{
+			AsciiString name;
+			name.format( "Player_%d_Start", n );
+			WaypointMap::const_iterator spot = md.m_waypoints.find( name );
+			CHECK( spot != md.m_waypoints.end() );
+			if( spot != md.m_waypoints.end() )
+			{
+				CHECK_NEAR( spot->second.x, n * 100.0f, 0.01f );
+				CHECK_NEAR( spot->second.y, n * 10.0f, 0.01f );
+			}
+		}
+	}
+
+	delete TheMapCache;
+	TheMapCache = savedCache;
+	remove( TEST_INI );
 }
 
 //-------------------------------------------------------------------------------------------------
@@ -15352,15 +16694,21 @@ TEST(the_slow_frame_bar_moves_only_for_a_positive_number)
 	TheWritableGlobalData = NEW GlobalData;
 
 	CHECK_NEAR( TheGlobalData->m_slowFrameMS, 20.0f, 0.001f );
+	CHECK( !TheGlobalData->m_logicProfile );	// a player's build carries no per-module clock
 	char exe[] = "generals.exe";
 	char slowFrame[] = "-slowframe";
+	char nonsense[] = "later";
+	char *argvBad[] = { exe, slowFrame, nonsense };
+	parseCommandLine( 3, argvBad );
+	CHECK_NEAR( TheGlobalData->m_slowFrameMS, 20.0f, 0.001f );
+	CHECK( !TheGlobalData->m_logicProfile );
+
 	char three[] = "3";
 	char *argvSlow[] = { exe, slowFrame, three };
 	parseCommandLine( 3, argvSlow );
 	CHECK_NEAR( TheGlobalData->m_slowFrameMS, 3.0f, 0.001f );
+	CHECK( TheGlobalData->m_logicProfile );		// and the hunt switch turns the profile on
 
-	char nonsense[] = "later";
-	char *argvBad[] = { exe, slowFrame, nonsense };
 	parseCommandLine( 3, argvBad );
 	CHECK_NEAR( TheGlobalData->m_slowFrameMS, 3.0f, 0.001f );
 
@@ -16004,7 +17352,7 @@ TEST(retreat_ratio_measures_the_exchange_not_the_health_bar)
 TEST(a_superweapon_does_not_aim_where_one_is_already_falling)
 {
 	const Real RADIUS_SQR = 100.0f * 100.0f;
-	const UnsignedInt WINDOW = 60 * LOGICFRAMES_PER_SECOND;
+	const UnsignedInt WINDOW = 60 * LOGICFRAMES_PER_GAME_SECOND;
 
 	// the spot one is falling on right now is worth nothing to the next one
 	CHECK_NEAR( 0.0f, aiStrikeFade( 0.0f, RADIUS_SQR, 0, WINDOW ), 0.0001f );
@@ -16119,7 +17467,7 @@ TEST(the_ai_buys_ambulances_by_army_and_calls_in_the_hurt_nearby)
 	CHECK( !AIAmbulance_mayBuyMore( 0, AISKILL_EASY ) );
 
 	// two seconds since the last hit is quiet enough
-	const UnsignedInt quiet = 2 * LOGICFRAMES_PER_SECOND;
+	const UnsignedInt quiet = 2 * LOGICFRAMES_PER_GAME_SECOND;
 	CHECK( AIAmbulance_callsPatient( 0.3f, 100.0f, quiet ) );
 	CHECK( AIAmbulance_callsPatient( 0.49f, 900.0f, quiet ) );
 	// half health or more stays in the fight
@@ -16140,7 +17488,7 @@ extern Bool AIAmbulance_rebuyWaits( UnsignedInt now, UnsignedInt lost, Int skill
 
 TEST(the_ai_ambulance_pulls_back_when_hit_and_is_not_rebought_at_once)
 {
-	const UnsignedInt second = LOGICFRAMES_PER_SECOND;
+	const UnsignedInt second = LOGICFRAMES_PER_GAME_SECOND;
 	// the margin: Hard 8% of the base distance between 80 and 200, Medium 6% between 60 and 160
 	CHECK_NEAR( 80.0f, AIAmbulance_gunMargin( 700.0f, AISKILL_BRUTAL ), 0.01f );
 	CHECK_NEAR( 120.0f, AIAmbulance_gunMargin( 1500.0f, AISKILL_BRUTAL ), 0.01f );
@@ -16429,7 +17777,7 @@ TEST(every_rung_answers_fire)
 	}
 	const AIDifficultyProfile &hard = data.m_skill[ AISKILL_BRUTAL ];
 	CHECK_EQ( 1.0f, hard.m_influenceSeconds );
-	CHECK_EQ( 20, (Int)(hard.m_fireLookSeconds * LOGICFRAMES_PER_SECOND + 0.5f) );
+	CHECK_EQ( ConvertRetailFrames( 10 ), (Int)(hard.m_fireLookSeconds * LOGICFRAMES_PER_GAME_SECOND + 0.5f) );
 	// Easy answers each hit alone
 	CHECK_EQ( 0.0f, data.m_skill[ AISKILL_EASY ].m_fireWordRadius );
 }
@@ -16732,6 +18080,62 @@ TEST(ground_flood_goes_round_the_wall_nearest_first)
 	CHECK_EQ( count, 3 );		// the source and its two side neighbours
 }
 
+/** Seven cells in ten open, scattered by a fixed LCG. */
+enum { FIELD_TEST_WIDTH = 61, FIELD_TEST_HEIGHT = 47 };
+static UnsignedByte theFieldTestWalk[ FIELD_TEST_WIDTH * FIELD_TEST_HEIGHT ];
+static Bool fieldTestWalkable( Int x, Int y, void * )
+{
+	return theFieldTestWalk[ y * FIELD_TEST_WIDTH + x ] != 0;
+}
+
+/** The whole-grid field worked in pieces ends with the ground flood's field on the same ground, whatever the
+	 pieces: a source on a wall, one off the grid and one given twice included. */
+TEST(ground_field_matches_the_ground_flood_in_any_pieces)
+{
+	UnsignedInt seed = 12345u;
+	for( Int i = 0; i < FIELD_TEST_WIDTH * FIELD_TEST_HEIGHT; ++i )
+	{
+		seed = seed * 1103515245u + 12345u;
+		theFieldTestWalk[ i ] = ( ( seed >> 16 ) % 100 ) < 70 ? 1 : 0;
+	}
+	theFieldTestWalk[ 0 ] = 0;
+	const Int SOURCES = 5;
+	const Int sources[ SOURCES ][ 2 ] = { { 0, 0 }, { 40, 30 }, { 60, 46 }, { 40, 30 }, { 61, 3 } };
+
+	AIGroundFlood flood( FIELD_TEST_WIDTH, FIELD_TEST_HEIGHT, fieldTestWalkable, NULL );
+	for( Int s = 0; s < SOURCES; ++s )
+		flood.addSource( sources[ s ][ 0 ], sources[ s ][ 1 ] );
+	Int x, y, d;
+	while( flood.next( &x, &y, &d ) )
+		;
+
+	const Int budgets[ 3 ] = { 1, 37, 0x7FFFFFFF };
+	for( Int b = 0; b < 3; ++b )
+	{
+		AIGroundField field;
+		field.start( FIELD_TEST_WIDTH, FIELD_TEST_HEIGHT );
+		for( Int cy = 0; cy < FIELD_TEST_HEIGHT; ++cy )
+			for( Int cx = 0; cx < FIELD_TEST_WIDTH; ++cx )
+				if( fieldTestWalkable( cx, cy, NULL ) )
+					field.setWalkable( cx, cy );
+		for( Int s = 0; s < SOURCES; ++s )
+			field.addSource( sources[ s ][ 0 ], sources[ s ][ 1 ] );
+		Int pieces = 0;
+		for( ;; )
+		{
+			Int budget = budgets[ b ];
+			if( field.step( &budget ) )
+				break;
+			++pieces;
+		}
+		std::vector<UnsignedShort> out;
+		field.takeField( out );
+		CHECK( out == flood.field() );
+		if( budgets[ b ] == 1 )
+			CHECK( pieces > 1000 );
+	}
+}
+
 /** Another factory only when every one standing has stayed busy for the rung's backlog, with no cap on
 	 how many. */
 TEST(extra_factory_follows_the_queue)
@@ -16744,7 +18148,7 @@ TEST(extra_factory_follows_the_queue)
 		if( s > 0 )
 			CHECK( data.m_skill[ s ].m_factoryBacklogSeconds < data.m_skill[ s - 1 ].m_factoryBacklogSeconds );
 	}
-	const Int PASS = 10 * LOGICFRAMES_PER_SECOND;		// the spend pass that samples it
+	const Int PASS = 10 * LOGICFRAMES_PER_GAME_SECOND;		// the spend pass that samples it (ECONOMY_CHECK_RATE)
 	const Int EASY = aiBacklogSamples( data.m_skill[ AISKILL_EASY ].m_factoryBacklogSeconds, PASS );
 	const Int HARD = aiBacklogSamples( data.m_skill[ AISKILL_BRUTAL ].m_factoryBacklogSeconds, PASS );
 	CHECK_EQ( 9, EASY );		// 90 s
@@ -16818,7 +18222,7 @@ TEST(extra_factory_follows_the_queue)
 TEST(extra_airfield_follows_the_parking)
 {
 	TAiData data;
-	const Int HARD = aiBacklogSamples( data.m_skill[ AISKILL_BRUTAL ].m_factoryBacklogSeconds, 10 * LOGICFRAMES_PER_SECOND );
+	const Int HARD = aiBacklogSamples( data.m_skill[ AISKILL_BRUTAL ].m_factoryBacklogSeconds, 10 * LOGICFRAMES_PER_GAME_SECOND );
 
 	// full takes every airfield's parking and an aircraft refused for it
 	CHECK( aiAirfieldsFull( 2, 2, TRUE ) );
@@ -16863,7 +18267,7 @@ TEST(stuck_building_site_is_given_up)
 		}
 	}
 	const AIDifficultyProfile &hard = data.m_skill[ AISKILL_BRUTAL ];
-	const UnsignedInt STALL = (UnsignedInt)REAL_TO_INT( hard.m_siteStallSeconds * LOGICFRAMES_PER_SECOND );
+	const UnsignedInt STALL = (UnsignedInt)REAL_TO_INT( hard.m_siteStallSeconds * LOGICFRAMES_PER_GAME_SECOND );
 	const Int LOST = hard.m_siteBuildersLost;
 	const ObjectID A = (ObjectID)10, B = (ObjectID)11, C = (ObjectID)12;
 
@@ -16918,7 +18322,7 @@ TEST(another_tech_building_until_three_stand)
 	CHECK( !aiWantsAnotherTechBuilding( AI_TECH_BUILDING_COPIES, 0 ) );
 
 	// defences: a big army earns them, and the clock earns one per pace up to two superweapons' worth
-	const UnsignedInt pace = AI_DEFENSE_PACE_SECONDS * LOGICFRAMES_PER_SECOND;
+	const UnsignedInt pace = AI_DEFENSE_PACE_SECONDS * LOGICFRAMES_PER_GAME_SECOND;
 	CHECK_EQ( aiDefenseAllowance( 0, 0 ), 0 );
 	CHECK_EQ( aiDefenseAllowance( 0, pace - 1 ), 0 );
 	CHECK_EQ( aiDefenseAllowance( 0, pace ), 1 );
@@ -17913,6 +19317,96 @@ TEST(an_allocation_inside_a_job_is_counted)
 	TheMemoryPoolCriticalSection = NULL;
 
 	CHECK( JobSystem::workerAllocationCount() > before );
+
+	JobSystem::shutdown();
+}
+
+/* LOGIC-PARALLEL.md: the logic thread forks on a pool of its own, so a tick running beside the render
+	 forks while the render does, and a job the tick hands out reads what the tick reads, not the
+	 render's copies (LogicThread::isInsideWindow, which answers getFrame among others). */
+enum { JOB_LANE_ITEMS = 512 };
+static Int s_laneMainSeen[ JOB_LANE_ITEMS ];		// 1 read live, 2 read the copies, +4 on a worker, 0 outside a job
+static Int s_laneLogicSeen[ JOB_LANE_ITEMS ];
+static std::atomic<Int> s_lanesIn( 0 );
+static std::atomic<Int> s_laneWorkerSeen[ 2 ];		// a worker of the main pool, of the logic pool, has run an item
+
+static void jobLaneRecord( Int *seen, Int index )
+{
+	// both forks hold their first items until the other has begun, so they really overlap
+	if( index == 0 )
+		s_lanesIn.fetch_add( 1 );
+	const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds( 500 );
+	while( s_lanesIn.load() < 2 && std::chrono::steady_clock::now() < deadline )
+		std::this_thread::yield();
+
+	// ...and the forking thread holds its items until a worker of its pool has taken one, so the check
+	// below is not left to the scheduler on a loaded machine (the join waits only for workers that came)
+	std::atomic<Int> &workerSeen = s_laneWorkerSeen[ seen == s_laneLogicSeen ? 1 : 0 ];
+	if( JobSystem::isWorkerThread() )
+		workerSeen.store( 1 );
+	else
+	{
+		const auto wait = std::chrono::steady_clock::now() + std::chrono::milliseconds( 2000 );
+		while( !workerSeen.load() && std::chrono::steady_clock::now() < wait )
+			std::this_thread::yield();
+	}
+
+	Int v = LogicThread::isInsideWindow() ? 2 : 1;
+	if( JobSystem::isWorkerThread() )
+		v += 4;
+	if( !JobSystem::isInsideJob() )
+		v = 0;
+	seen[ index ] += v;
+}
+
+static void jobLaneMain( Int index, void * ) { jobLaneRecord( s_laneMainSeen, index ); }
+static void jobLaneLogic( Int index, void * ) { jobLaneRecord( s_laneLogicSeen, index ); }
+
+TEST(the_logic_thread_forks_on_its_own_pool_and_reads_live_state)
+{
+	JobSystem::shutdown();
+	JobSystem::init( 4 );
+	for( Int i = 0; i < JOB_LANE_ITEMS; ++i )
+	{
+		s_laneMainSeen[ i ] = 0;
+		s_laneLogicSeen[ i ] = 0;
+	}
+	s_lanesIn.store( 0 );
+	s_laneWorkerSeen[ 0 ].store( 0 );
+	s_laneWorkerSeen[ 1 ].store( 0 );
+
+	LogicThread::g_windowOpen.store( 1 );
+	std::thread logic( []
+	{
+		LogicThread::t_isLogicThread = TRUE;
+		JobSystem::parallel_for( JOB_LANE_ITEMS, 1, jobLaneLogic, NULL );
+	} );
+	JobSystem::parallel_for( JOB_LANE_ITEMS, 1, jobLaneMain, NULL );
+	logic.join();
+	LogicThread::g_windowOpen.store( 0 );
+
+	Int mainOnWorker = 0, logicOnWorker = 0;
+	for( Int i = 0; i < JOB_LANE_ITEMS; ++i )
+	{
+		// once each, inside a job, and on its own side of the window
+		CHECK_EQ( 2, s_laneMainSeen[ i ] & ~4 );
+		CHECK_EQ( 1, s_laneLogicSeen[ i ] & ~4 );
+		mainOnWorker += ( s_laneMainSeen[ i ] & 4 ) ? 1 : 0;
+		logicOnWorker += ( s_laneLogicSeen[ i ] & 4 ) ? 1 : 0;
+	}
+	CHECK( mainOnWorker > 0 );
+	CHECK( logicOnWorker > 0 );
+	CHECK( !JobSystem::isInsideJob() );
+
+	// with no workers the inline loop is still a job
+	JobSystem::shutdown();
+	JobSystem::init( 0 );
+	s_lanesIn.store( 2 );
+	s_laneWorkerSeen[ 0 ].store( 1 );		// there is none to wait for
+	s_laneMainSeen[ 0 ] = 0;
+	JobSystem::parallel_for( 1, 1, jobLaneMain, NULL );
+	CHECK_EQ( 1, s_laneMainSeen[ 0 ] );
+	CHECK( !JobSystem::isInsideJob() );
 
 	JobSystem::shutdown();
 }
@@ -19570,6 +21064,41 @@ TEST(option_catalog_clamps_and_leaves_an_absent_key_alone)
 	TheWritableGlobalData = saved;
 }
 
+/** Minimap Size is the bar as it always was until a player moves it, and a hand-edited file cannot
+	 shrink the radar under the bar's own size or blow it past twice that, where ControlBar::fitRadarToMap
+	 stops growing it anyway. */
+TEST(minimap_size_defaults_to_the_bar_and_clamps_to_its_range)
+{
+	GlobalData *saved = TheWritableGlobalData;
+	GlobalData *scratch = NEW GlobalData;
+	TheWritableGlobalData = scratch;
+
+	const OptionDef *size = findOptionDef( "MinimapSize" );
+	CHECK( size != NULL );
+	if( size != NULL )
+	{
+		CHECK_EQ( scratch->m_minimapSize, 100 );
+		CHECK_EQ( size->lo, 100 );
+		CHECK_EQ( size->hi, 200 );
+
+		UserPreferences pref;
+		pref[ AsciiString( "MinimapSize" ) ] = AsciiString( "50" );
+		loadOptionsFromPreferences( pref );
+		CHECK_EQ( scratch->m_minimapSize, 100 );
+
+		pref[ AsciiString( "MinimapSize" ) ] = AsciiString( "900" );
+		loadOptionsFromPreferences( pref );
+		CHECK_EQ( scratch->m_minimapSize, 200 );
+
+		pref[ AsciiString( "MinimapSize" ) ] = AsciiString( "150" );
+		loadOptionsFromPreferences( pref );
+		CHECK_EQ( scratch->m_minimapSize, 150 );
+	}
+
+	delete scratch;					// while it is the current one: a Debug build's ~GlobalData reads TheWritableGlobalData
+	TheWritableGlobalData = saved;
+}
+
 /** Glow (the Bloom key) is picked as a level and stored as one, and the renderer still reads the
 	 percentage it always read.  The mapping is the whole setting: get the two directions out of step
 	 and the combo box shows one thing while the screen does another, which nothing at build time
@@ -20030,21 +21559,27 @@ TEST(no_options_file_is_the_classic_game_with_every_added_row_off)
 	static const char *const off[] =
 	{
 		"CameraBoundaryMargin", "EdgeScrollInWindowedMode", "CameraSnapTo45", "BuildGrid", "BuildSnapTo45",
-		"BuildSnapToNeighbour", "BuildNudge", "WheelZoomToCursor", "IsometricCamera", "OpenAtMaxZoom", "TurboMode",
+		"BuildSnapToNeighbour", "BuildNudge", "WheelZoomToCursor", "IsometricCamera", "OpenAtMaxZoom",
 		"DynamicMusic", "FormationDrag", "BuildWithoutWorker", "ChromaLighting", "TextureFilter", "Bloom", "MSAA",
 		"VSync", "WaterStyle", "CloudStyle", "LightingStyle", "OrderLines", "ShowNetBox", "UseShadowVolumesForSkins",
 		"ShadowsForProjectiles", "ShadowsForProps", "ShadowsForParticles", "VolumetricSmokeShadows", "SmokeFireLighting",
 		"DebrisTrails", "MapLight", "TeamGlow", "WaterFoam", "GroundMarks", "Firelight", "HemiAmbient", "AmbientOcclusion",
-		"Weather", "WaterSplashes", "Atmosphere", "StructureCollapse", "SmoothMotion", "InternalHdr", "Smoke", "ParticleBounce",
+		"Weather", "WaterSplashes", "Atmosphere", "StructureCollapse", "InternalHdr", "Smoke", "ParticleBounce",
 		"HeatHaze", NULL
 	};
 	for( Int i = 0; off[ i ] != NULL; ++i )
 		CHECK_EQ( findOptionDef( off[ i ] )->get(), 0 );
 
+	// on while the logic ticks slower than a 60 Hz screen refreshes, which retail never did
+	CHECK_EQ( findOptionDef( "SmoothMotion" )->get(), LOGICFRAMES_PER_SECOND < 60 ? 1 : 0 );
+
 	CHECK_EQ( findOptionDef( "ClassicGraphics" )->get(), 1 );
+	CHECK_EQ( findOptionDef( "DetailedModels" )->get(), 1 );		// mounts nothing under Classic, and only what was downloaded
+	CHECK_EQ( findOptionDef( "HDTextures" )->get(), 1 );
 	CHECK_EQ( findOptionDef( "LegacySound" )->get(), 1 );
 	CHECK_EQ( findOptionDef( "HealthBars" )->get(), (Int)HEALTH_BAR_SELECTION );
 	CHECK_EQ( findOptionDef( "AmbientVolume" )->get(), 80 );
+	CHECK_EQ( TheGlobalData->m_missionGameSpeedPercent, (Int)PLAYER_GAME_SPEED_PERCENT_DEFAULT );	// a mission plays the native tick
 
 	delete TheWritableGlobalData;
 	TheWritableGlobalData = saved;
@@ -20722,58 +22257,54 @@ TEST(crowd_corridor_steering_point_slides_instead_of_hopping)
 	CHECK_NEAR( ends.x, pts[ 5 ].x, 0.001f );
 }
 
-TEST(a_bridge_keeps_its_width_and_its_approach_funnels_onto_it)
+TEST(crowd_corridor_has_no_band_on_a_bridge_or_at_its_approaches)
 {
-	/* A deck is a road: the band on it is what its own layer measured, so a group goes over three
-		 abreast where the bridge carries three.  The riverbank either side of the ramp is a field, and a
-		 lane held a field's width off the centre arrives beside the entrance, against the end of the
-		 railing.  So for CROWD_BRIDGE_SEAL samples before and after the deck the ground is held to
-		 the deck's width at the ramp. */
+	/* A bridge deck is not road with room either side of it, and the ground beside a bridge is a
+		 riverbank.  A lane held across either one drives the unit off the side, and a lane held on the
+		 approach arrives beside the abutment instead of at the entrance - which is a unit that never
+		 gets onto the bridge and a queue behind it that never gets anywhere.  The band closes over the
+		 deck and for CROWD_BRIDGE_SEAL samples each side of it.  A deck that kept its own width was
+		 tried and lost time over the Kandahar bridge and tanks over the long one (CrowdCorridor::sealBridges). */
 	Coord3D pts[ 20 ];
 	PathfindLayerEnum layers[ 20 ];
-	Real width[ 20 ];
 	for (Int k = 0; k < 20; k++)
 	{
 		pts[ k ].x = (Real)k * 10.0f;
 		pts[ k ].y = 0.0f;
 		pts[ k ].z = 0.0f;
 		layers[ k ] = LAYER_GROUND;
-		width[ k ] = 60.0f;					// open bank
 	}
-	for (Int k = 10; k <= 12; k++)
-	{
-		layers[ k ] = (PathfindLayerEnum)2;		// the deck: three samples of it, out over the water
-		width[ k ] = 10.0f;
-	}
-	width[ 8 ] = 5.0f;						// and a rock on the bank, narrower than the deck
+	layers[ 10 ] = (PathfindLayerEnum)2;		// the deck: three samples of it, out over the water
+	layers[ 11 ] = (PathfindLayerEnum)2;
+	layers[ 12 ] = (PathfindLayerEnum)2;
 
 	CrowdCorridor corr;
-	corr.buildForTest( pts, 20, 0.0f, layers, width );
+	corr.buildForTest( pts, 20, 15.0f, layers );
+	CHECK_EQ( corr.count(), 20 );
+
+	// open road, far from the bridge either side: the band is what it was built with
+	CHECK_NEAR( corr.at( 0 ).left, 15.0f, 0.001f );
+	CHECK_NEAR( corr.at( 5 ).right, 15.0f, 0.001f );
+	CHECK_NEAR( corr.at( 19 ).left, 15.0f, 0.001f );
+
 	corr.sealBridges();
 
-	// the deck keeps its own width
-	for (Int k = 10; k <= 12; k++)
-	{
-		CHECK_NEAR( corr.at( k ).left, 10.0f, 0.001f );
-		CHECK_NEAR( corr.at( k ).right, 10.0f, 0.001f );
-	}
-
-	// the approach at both ends is the deck's width, and a lane on it is cut to that
 	const Int sealLo = 10 - (Int)CROWD_BRIDGE_SEAL;
 	const Int sealHi = 12 + (Int)CROWD_BRIDGE_SEAL;
-	for (Int k = sealLo; k < 10; k++)
-	{
-		if (k != 8)
-			CHECK_NEAR( corr.at( k ).left, 10.0f, 0.001f );
-	}
-	for (Int k = 13; k <= sealHi; k++)
-		CHECK_NEAR( corr.at( k ).right, 10.0f, 0.001f );
-	CHECK_NEAR( corr.clampLat( 9, 40.0f ), 10.0f, 0.001f );
 
-	// it never widens anything, and the bank past the approach keeps its own band
-	CHECK_NEAR( corr.at( 8 ).left, 5.0f, 0.001f );
-	CHECK_NEAR( corr.at( sealLo - 1 ).left, 60.0f, 0.001f );
-	CHECK_NEAR( corr.at( sealHi + 1 ).right, 60.0f, 0.001f );
+	// the deck itself, and the sealed samples each side of it
+	for (Int k = sealLo; k <= sealHi; k++)
+	{
+		CHECK_NEAR( corr.at( k ).left, 0.0f, 0.001f );
+		CHECK_NEAR( corr.at( k ).right, 0.0f, 0.001f );
+		CHECK_NEAR( corr.clampLat( k, 12.0f ), 0.0f, 0.001f );
+		CHECK_NEAR( corr.clampLatAt( corr.at( k ).along, -12.0f ), 0.0f, 0.001f );
+	}
+
+	// and the road on either side of that stretch keeps its band
+	CHECK_NEAR( corr.at( sealLo - 1 ).left, 15.0f, 0.001f );
+	CHECK_NEAR( corr.at( sealHi + 1 ).right, 15.0f, 0.001f );
+	CHECK_NEAR( corr.clampLat( sealLo - 1, 12.0f ), 12.0f, 0.001f );
 
 	// a route with no bridge on it is untouched
 	CrowdCorridor plain;
@@ -20817,6 +22348,51 @@ TEST(the_rescue_ladder_never_runs_out_of_rungs)
 		}
 		// and the ladder always eventually offers something, at every stage including the last
 		CHECK( seen > 0 );
+	}
+}
+
+TEST(the_crowd_scan_stagger_never_delays_the_first_look_after_an_order)
+{
+	/* A route or an order leaves the unit with no scan, and then it looks on that very frame, on
+		 every frame number and for every id: no order waits for its turn in the stagger. */
+	for (UnsignedInt id = 1; id < 64; id++)
+		for (UnsignedInt f = 0; f < 64; f++)
+			CHECK( AIUpdate_crowdScanDue( FALSE, f, id ) );
+
+	/* Between orders it looks again on a fixed period, never left blind past a sixth of a second
+		 (ten logic frames), and the same for every id, so no player's units see more often than
+		 another's. */
+	UnsignedInt period = 0;
+	for (UnsignedInt id = 1; id < 64; id++)
+	{
+		UnsignedInt last = 0, gaps = 0, gap = 0;
+		for (UnsignedInt f = 1000; f < 1200; f++)
+		{
+			if (!AIUpdate_crowdScanDue( TRUE, f, id ))
+				continue;
+			if (last != 0)
+			{
+				gap = f - last;
+				if (gaps == 0 && period == 0)
+					period = gap;
+				CHECK_EQ( gap, period );
+				++gaps;
+			}
+			last = f;
+		}
+		CHECK( gaps > 0 );
+		CHECK( period >= 1 && period <= 10 );
+	}
+
+	/* And a group spreads out over the period: of any run of `period` consecutive ids, one looks on
+		 any given frame. */
+	for (UnsignedInt f = 0; f < 32; f++)
+	{
+		UnsignedInt due = 0;
+		for (UnsignedInt id = 100; id < 100 + period; id++)
+			if (AIUpdate_crowdScanDue( TRUE, f, id ))
+				++due;
+		CHECK_EQ( due, (UnsignedInt)1 );
 	}
 }
 
@@ -21833,6 +23409,11 @@ TEST(supply_pile_limit_starts_off_clamps_and_closes_a_full_pile)
 	CHECK( !SupplyPileLimitCloses( 2, 1u << 2, 3 ) );
 	CHECK(  SupplyPileLimitCloses( 2, ( 1u << 2 ) | ( 1u << 3 ), 4 ) );
 	CHECK( !SupplyPileLimitCloses( 2, ( 1u << 2 ) | ( 1u << 3 ), 3 ) );
+
+	/* a player past index 31 holds the pile like any other */
+	CHECK(  SupplyPileLimitCloses( 1, playerIndexToMask( 40 ), 3 ) );
+	CHECK( !SupplyPileLimitCloses( 1, playerIndexToMask( 40 ), 40 ) );
+	CHECK(  SupplyPileLimitCloses( 1, playerIndexToMask( 40 ), 8 ) );	// 1u << 40 wrapped to player 8's bit
 }
 
 #include "Common/SpecialPowerType.h"
@@ -22031,6 +23612,29 @@ TEST(order_queue_kinds_nest)
 
 	// buying an upgrade without shift must not throw away the list of the unit it is for
 	CHECK( !OrderQueue::isOrder( GameMessage::MSG_QUEUE_UPGRADE ) );
+
+	// going to build an unfinished structure, and unloading a transport, wait their turn too and are
+	// no post: the list goes on once the building stands or the last passenger is out
+	CHECK( OrderQueue::isQueueable( GameMessage::MSG_RESUME_CONSTRUCTION ) );
+	CHECK( OrderQueue::isQueueable( GameMessage::MSG_EVACUATE ) );
+	CHECK( OrderQueue::isQueueable( GameMessage::MSG_EXIT ) );
+	CHECK( !OrderQueue::isTerminal( GameMessage::MSG_RESUME_CONSTRUCTION ) );
+	CHECK( !OrderQueue::isTerminal( GameMessage::MSG_EVACUATE ) );
+
+	// a placement is no order to the selection: the dispatcher picks its builder and queues the
+	// building on that one (OrderQueue::queueConstruction), so the queue reads the mark for it
+	CHECK( !OrderQueue::isOrder( GameMessage::MSG_DOZER_CONSTRUCT ) );
+	CHECK( !OrderQueue::isOrder( GameMessage::MSG_DOZER_CONSTRUCT_LINE ) );
+}
+
+// The mark a placement reads for itself is used up by the read, so a placement refused on the ground
+// does not hand the mark to the player's next click.
+TEST(order_queue_mark_is_used_once)
+{
+	OrderQueue queue;
+	queue.setNextOrderMode( ORDER_QUEUE_APPEND );
+	CHECK_EQ( queue.takeNextOrderMode(), (Int)ORDER_QUEUE_APPEND );
+	CHECK_EQ( queue.takeNextOrderMode(), (Int)ORDER_QUEUE_NONE );
 }
 
 TEST(scenario_parses_the_order_lines)
@@ -22112,6 +23716,12 @@ TEST(scenario_parses_the_order_lines)
 	CHECK_EQ( (Int)action.action, (Int)SCENARIO_ACTION_SHIFTUPGRADE );
 	CHECK_STR( action.name.str(), "Upgrade_ChinaOverlordGattlingCannon" );
 
+	CHECK_EQ( (Int)ScenarioDrill_parseLine( "120 shiftconstruct 0 AmericaPowerPlant 720 550", &action ), (Int)SCENARIO_PARSE_OK );
+	CHECK_EQ( (Int)action.action, (Int)SCENARIO_ACTION_SHIFTCONSTRUCT );
+	CHECK_STR( action.selector.str(), "AmericaPowerPlant" );
+	CHECK_NEAR( action.at.y, 550.0f, 0.01f );
+	CHECK_EQ( (Int)ScenarioDrill_parseLine( "120 shiftconstruct 0 AmericaPowerPlant 720", &action ), (Int)SCENARIO_PARSE_MISSING_ARGS );
+
 	// a line read after one that named something must not carry that name
 	CHECK_EQ( (Int)ScenarioDrill_parseLine( "200 shiftmove 0 * 900 700", &action ), (Int)SCENARIO_PARSE_OK );
 	CHECK( action.name.isEmpty() );
@@ -22122,6 +23732,10 @@ TEST(scenario_parses_the_order_lines)
 	CHECK_EQ( action.count, -1 );
 	CHECK_EQ( (Int)ScenarioDrill_parseLine( "1800 tally 1 ChinaGattlingCannon 0", &action ), (Int)SCENARIO_PARSE_OK );
 	CHECK_EQ( action.count, 0 );
+	CHECK_NEAR( action.radius, 0.0f, 0.001f );		// no widest named, no opinion on it
+	CHECK_EQ( (Int)ScenarioDrill_parseLine( "240 tally 0 GLAInfantryAngryMobPistol01 5 55", &action ), (Int)SCENARIO_PARSE_OK );
+	CHECK_EQ( action.count, 5 );
+	CHECK_NEAR( action.radius, 55.0f, 0.001f );
 	CHECK_EQ( (Int)ScenarioDrill_parseLine( "1800 tally 1 ChinaGattlingCannon some", &action ), (Int)SCENARIO_PARSE_BAD_COUNT );
 	CHECK_EQ( (Int)ScenarioDrill_parseLine( "1800 tally 1", &action ), (Int)SCENARIO_PARSE_MISSING_ARGS );
 
@@ -22969,13 +24583,52 @@ TEST(unsigned_text_parses_as_windows_32_bit_strtoul)
 
 #include "Common/GameState.h"
 
-// A save from before 60 Hz logic is refused, except a mission save (the GameState and campaign
-// blocks only, no frame counts), which carries a campaign over from any earlier build or retail.
-TEST(save_older_than_60hz_loads_only_as_mission_save)
+// The ticks a game second a save's frame counts are in name its game speed, which the load sets before
+// anything of the match is read; a number no speed of this build ticks is refused.
+TEST(save_field_names_the_game_speed_it_was_played_at)
 {
 	SaveGameInfo info;
-	info.version = 4;
+	info.version = 6;
+	for( Int i = 0; i < PLAYER_GAME_SPEED_COUNT; ++i )
+	{
+		const Int percent = PLAYER_GAME_SPEED_PERCENTS[ i ];
+		info.logicFramesPerSecond = LOGICFRAMES_PER_SECOND * 100 / percent;
+		CHECK_EQ( info.gameSpeedPercent(), percent );
+		CHECK( info.isLoadable() );
+	}
+	if( LOGICFRAMES_PER_SECOND == 30 )
+	{
+		CHECK_EQ( GameState_speedForTicksPerGameSecond( 30 ), 100 );
+		CHECK_EQ( GameState_speedForTicksPerGameSecond( 24 ), 125 );
+		CHECK_EQ( GameState_speedForTicksPerGameSecond( 20 ), 150 );		// every save the f3b894bd build wrote
+		CHECK_EQ( GameState_speedForTicksPerGameSecond( 15 ), 200 );
+	}
+	info.logicFramesPerSecond = 18;
+	CHECK_EQ( info.gameSpeedPercent(), 0 );
+	CHECK( !info.isLoadable() );
+	info.logicFramesPerSecond = 60;		// a version 5 save's, read as 60
+	CHECK( !info.isLoadable() );
+}
+
+// A save from before block version 5, or counted at another logic rate than this build's, is refused,
+// except a mission save (the GameState and campaign blocks only, no frame counts), which carries a
+// campaign over from any earlier build, another rate or retail.
+TEST(save_from_an_older_build_or_another_logic_rate_loads_only_as_mission_save)
+{
+	SaveGameInfo info;
+	CHECK_EQ( info.logicFramesPerSecond, (Int)LOGICFRAMES_PER_GAME_SECOND );	// the rate at game speed 100
+	info.version = 6;
 	CHECK( info.isLoadable() );
+	info.logicFramesPerSecond = LOGICFRAMES_PER_SECOND == 60 ? 30 : 60;		// the other rate this source builds at
+	CHECK( !info.isLoadable() );
+	info.saveFileType = SAVE_FILE_TYPE_MISSION;
+	CHECK( info.isLoadable() );
+	info.saveFileType = SAVE_FILE_TYPE_NORMAL;
+	info.logicFramesPerSecond = LOGICFRAMES_PER_GAME_SECOND;
+	info.version = 5;		// loaded as written at 60 (GameState::xfer); here at this build's rate
+	CHECK( info.isLoadable() );
+	info.version = 4;		// 16 players a side of every per-player array
+	CHECK( !info.isLoadable() );
 	info.version = 3;
 	CHECK( !info.isLoadable() );
 	info.saveFileType = SAVE_FILE_TYPE_MISSION;
@@ -22986,6 +24639,272 @@ TEST(save_older_than_60hz_loads_only_as_mission_save)
 	CHECK( !info.isLoadable() );
 }
 
+// The Retail helpers carry GAME_SPEED_PERCENT on top of the logic rate, and their Wall forms only the
+// rate. Every expectation comes from the constants: a retail second of frames is a game second of
+// ticks, an amount added every frame times the frames of a retail second is the retail second's
+// amount, and a factor raised to the ticks of a retail tick's time is the retail factor. At 100 each
+// helper must be its Wall form exactly; at any other speed it must not be.
+/* A script countdown timer counts retail frames, so above the wall's game speed some ticks take two
+	 off it (2,1,2,1 at 150).  "timer == n" has to hold for every n on the way down: either shown at a
+	 tick's end or passed during it.  The ticks a frame are ScriptEngine::update's sum. */
+TEST(countdown_timer_equality_holds_for_every_value_it_passes)
+{
+	CHECK( !ScriptEngine_countdownPassed( 5, 4, 4 ) );		// shown, the plain compare has it
+	CHECK( ScriptEngine_countdownPassed( 5, 3, 4 ) );
+	CHECK( !ScriptEngine_countdownPassed( 5, 3, 5 ) );		// seen at the end of the tick before
+	CHECK( !ScriptEngine_countdownPassed( 5, 3, 3 ) );
+	CHECK( ScriptEngine_countdownPassed( 1, -1, 0 ) );		// running out over a double step still reads 0
+
+	const Int START = 100;
+	Bool hit[ START ] = {};
+	Int value = START;
+	Bool skipped = FALSE;
+	for( UnsignedInt frame = 0; value >= 0; ++frame )
+	{
+		const Int ticks = (Int)( ( (UnsignedInt64)( frame + 1 ) * RETAIL_LOGICFRAMES_PER_SECOND + LOGICFRAMES_PER_GAME_SECOND - 1 ) / LOGICFRAMES_PER_GAME_SECOND
+			- ( (UnsignedInt64)frame * RETAIL_LOGICFRAMES_PER_SECOND + LOGICFRAMES_PER_GAME_SECOND - 1 ) / LOGICFRAMES_PER_GAME_SECOND );
+		const Int before = value;
+		for( Int t = 0; t < ticks && value >= 0; ++t )
+			--value;
+		if( before - value > 1 )
+			skipped = TRUE;
+		for( Int target = 0; target < START; ++target )
+			if( value == target || ScriptEngine_countdownPassed( before, value, target ) )
+				hit[ target ] = TRUE;
+	}
+	for( Int target = 0; target < START; ++target )
+		CHECK( hit[ target ] );
+	// at a game speed above the wall's the plain compare alone would miss some
+	CHECK_EQ( skipped, LOGICFRAMES_PER_GAME_SECOND < RETAIL_LOGICFRAMES_PER_SECOND * LOGICFRAMES_PER_RETAIL_FRAME ? TRUE : FALSE );
+}
+
+TEST(retail_helpers_carry_the_game_speed_and_are_the_identity_at_100)
+{
+	const Bool atHundred = GAME_SPEED_PERCENT == 100;
+	const Int R = LOGICFRAMES_PER_RETAIL_FRAME;
+
+	CHECK_EQ( LOGICFRAMES_PER_GAME_SECOND * GAME_SPEED_PERCENT, LOGICFRAMES_PER_SECOND * 100 );
+	CHECK_EQ( ConvertRetailFramesWall( 90 ), 90 * R );
+	CHECK_EQ( ConvertRetailFrames( (Int)RETAIL_LOGICFRAMES_PER_SECOND ), (Int)LOGICFRAMES_PER_GAME_SECOND );
+	CHECK_EQ( ConvertRetailFrames( (UnsignedInt)RETAIL_LOGICFRAMES_PER_SECOND ), (UnsignedInt)LOGICFRAMES_PER_GAME_SECOND );
+	CHECK_EQ( ConvertRetailFrames( 1000 ), (Int)( ( 1000 * R * 100 + GAME_SPEED_PERCENT / 2 ) / GAME_SPEED_PERCENT ) );
+	CHECK_EQ( ConvertRetailFrames( 1000 ) == ConvertRetailFramesWall( 1000 ), atHundred );
+	CHECK_EQ( ConvertRetailFrames( 1000u ) == ConvertRetailFramesWall( 1000u ), atHundred );
+	CHECK_EQ( ConvertRetailFrames( 1000.0f ) == ConvertRetailFramesWall( 1000.0f ), atHundred );
+	CHECK_NEAR( ConvertRetailFrames( (Real)RETAIL_LOGICFRAMES_PER_SECOND ), LOGICFRAMES_PER_GAME_SECOND_REAL, 0.0001f );
+
+	// nothing nonzero becomes 0, sentinels stay, a Real count above one tick keeps a gain under 1
+	CHECK( ConvertRetailFrames( 1 ) >= 1 );
+	CHECK( ConvertRetailFrames( -1 ) <= -1 );
+	CHECK_EQ( ConvertRetailFrames( 0 ), 0 );
+	CHECK( ConvertRetailFrames( 1u ) >= 1u );
+	CHECK_EQ( ConvertRetailFrames( INT_MAX ), INT_MAX );
+	CHECK_EQ( ConvertRetailFrames( UINT_MAX ), UINT_MAX );
+	CHECK( ConvertRetailFrames( 1.0f ) >= 1.0f );
+	CHECK( 1.0f / ConvertRetailFrames( 2.0f ) < 1.0f );
+
+	// rates and accelerations against the frames of a retail second
+	const Real retailSecond = ConvertRetailFrames( (Real)RETAIL_LOGICFRAMES_PER_SECOND );
+	CHECK_NEAR( ConvertRetailPerFrameRate( 1.0f ) * retailSecond, (Real)RETAIL_LOGICFRAMES_PER_SECOND, 0.001f );
+	CHECK_NEAR( ConvertRetailPerFrameSquared( 1.0f ) * retailSecond * retailSecond,
+		(Real)( RETAIL_LOGICFRAMES_PER_SECOND * RETAIL_LOGICFRAMES_PER_SECOND ), 0.1f );
+	CHECK_EQ( ConvertRetailPerFrameRate( 0.3f ) == 0.3f, atHundred && R == 1 );
+	CHECK_EQ( ConvertRetailPerFrameSquared( 0.3f ) == 0.3f, atHundred && R == 1 );
+	CHECK_NEAR( ConvertRetailPerFrameRate( 1.0f ), ConvertVelocityInSecsToFrames( (Real)RETAIL_LOGICFRAMES_PER_SECOND ), 0.0001f );
+
+	// a factor: g^(100 R) == f^P, both by multiplies
+	const Real f = 0.99f;
+	const Real g = ConvertRetailPerFrameFactor( f );
+	Real gPow = 1.0f, fPow = 1.0f;
+	for( Int i = 0; i < 100 * R; ++i ) gPow *= g;
+	for( Int i = 0; i < GAME_SPEED_PERCENT; ++i ) fPow *= f;
+	CHECK_NEAR( gPow, fPow, 0.0001f );
+	CHECK_EQ( g == f, atHundred && R == 1 );
+
+	// the seconds and msec parsers' conversions take game time too
+	CHECK_NEAR( ConvertDurationFromMsecsToFrames( (Real)MSEC_PER_SECOND ), LOGICFRAMES_PER_GAME_SECOND_REAL, 0.001f );
+	CHECK_EQ( GAME_SECONDS_PER_LOGICFRAME_REAL == SECONDS_PER_LOGICFRAME_REAL, atHundred );
+	CHECK_EQ( GAME_MSEC_PER_LOGICFRAME_REAL == MSEC_PER_LOGICFRAME_REAL, atHundred );
+}
+
+/* The speed is TheGameSpeed's now, set per match.  The old build had it as constants: GAME_SPEED_PERCENT
+	 150 at 30 Hz, LOGICFRAMES_PER_GAME_SECOND 20, and every value below folded by the compiler from those.
+	 Native has to be those numbers bit for bit, or no replay of the old build plays back. */
+static Bool sameBits( Real a, Real b ) { return memcmp( &a, &b, sizeof( Real ) ) == 0; }
+
+TEST(game_speed_native_is_the_old_constants_bit_for_bit)
+{
+	CHECK_EQ( (Int)LOGICFRAMES_PER_SECOND, 30 );		// the old build these numbers are pinned to
+	CHECK_EQ( (Int)NATIVE_GAME_SPEED_PERCENT, 150 );
+	GameSpeed_set( NATIVE_GAME_SPEED_PERCENT );
+	CHECK_EQ( GAME_SPEED_PERCENT, 150 );
+	CHECK_EQ( LOGICFRAMES_PER_GAME_SECOND, 20 );
+	CHECK_EQ( GAME_FACTOR_EXPONENT_EIGHTHS, 12 );
+	const Real OLD_SECONDS = 1.0f / (Real)20;
+	CHECK( sameBits( LOGICFRAMES_PER_GAME_SECOND_REAL, (Real)20 ) );
+	CHECK( sameBits( GAME_SECONDS_PER_LOGICFRAME_REAL, OLD_SECONDS ) );
+	CHECK( sameBits( GAME_MSEC_PER_LOGICFRAME_REAL, ( (Real)1000 ) / ( (Real)20 ) ) );
+	CHECK( sameBits( TheGameSpeed.ticksPerGameMsec, ( (Real)20 ) / ( (Real)1000 ) ) );
+	CHECK( sameBits( TheGameSpeed.gameSecondsPerTickSqr, OLD_SECONDS * OLD_SECONDS ) );
+	const Real RADS_PER_DEGREE = PI / 180.0f;
+	CHECK( sameBits( TheGameSpeed.radsPerTickPerDegPerSec, OLD_SECONDS * RADS_PER_DEGREE ) );
+	CHECK( sameBits( TheGameSpeed.retailFrameRatio, (Real)100 / (Real)150 ) );
+	CHECK( sameBits( TheGameSpeed.perFrameRate, (Real)150 / (Real)100 ) );
+	CHECK( sameBits( TheGameSpeed.perFrameSquared, (Real)( 150 * 150 ) / (Real)10000 ) );
+
+	// worked out at run time from a percent the compiler cannot see, the same bits
+	volatile Int percent = 150;
+	const GameSpeedState runtime = GameSpeed_compute( percent );
+	CHECK( memcmp( &runtime, &TheGameSpeed, sizeof( GameSpeedState ) ) == 0 );
+}
+
+// The old parsers, as they stood at f3b894bd with the constants of that build written in.
+static UnsignedInt oldDurationUnsignedInt( UnsignedInt msec ) { return floatToUnsignedAsMsvc( ceilf( (Real)msec * ( ( (Real)20 ) / ( (Real)1000 ) ) ) ); }
+static Real oldDurationReal( Real msec ) { return msec * ( ( (Real)20 ) / ( (Real)1000 ) ); }
+static Real oldVelocity( Real perSec ) { return perSec * ( 1.0f / (Real)20 ); }
+static Real oldAcceleration( Real perSec2 ) { const Real s = 1.0f / (Real)20; return perSec2 * ( s * s ); }
+static Real oldAngular( Real degPerSec ) { const Real RADS_PER_DEGREE = PI / 180.0f; return degPerSec * ( ( 1.0f / (Real)20 ) * RADS_PER_DEGREE ); }
+static Int oldRetailFramesInt( Int frames )
+{
+	const Int64 n = (Int64)frames * 100;
+	const Int scaled = (Int)( ( n >= 0 ? n + 75 : n - 75 ) / 150 );
+	return scaled != 0 ? scaled : ( frames > 0 ? 1 : frames < 0 ? -1 : 0 );
+}
+static Real oldRetailFramesReal( Real frames )
+{
+	const Real scaled = frames * ( (Real)100 / (Real)150 );
+	const Real least = frames < 1.0f ? frames : 1.0f;
+	return scaled < least ? least : scaled;
+}
+static Real oldPerFrame( Real x ) { return x * ( (Real)150 / (Real)100 ); }
+static Real oldFactor( Real factor )
+{
+	const Real f = factor > 0.0f ? factor : 0.0f;
+	Real result = f;		// 12 eighths: one whole power, then the half
+	Real root = sqrtf( f );
+	result *= root;
+	root = sqrtf( root );
+	root = sqrtf( root );
+	return result;
+}
+
+TEST(speed_scaled_reads_at_native_equal_what_the_old_parsers_stored)
+{
+	GameSpeed_set( NATIVE_GAME_SPEED_PERCENT );
+	// whole msec and counts across the range the data uses, and some awkward Reals
+	const UnsignedInt counts[] = { 0, 1, 2, 3, 33, 34, 49, 50, 51, 66, 67, 100, 133, 150, 250, 333, 500, 999, 1000, 1001,
+		1500, 2500, 3333, 4999, 5000, 7777, 10000, 16640, 30000, 60000, 65535, 100000, 333280, 499999968, 0x7ffffffe };
+	for( Int i = 0; i < (Int)ARRAY_SIZE( counts ); ++i )
+	{
+		const UnsignedInt c = counts[ i ];
+		CHECK_EQ( (UnsignedInt)DurationFrames::fromRaw( c ), oldDurationUnsignedInt( c ) );
+		CHECK_EQ( (Int)DurationFramesInt::fromRaw( (Int)c ), (Int)oldDurationUnsignedInt( c ) );
+		if( c <= 0xFFFF )
+			CHECK_EQ( (UnsignedShort)DurationFramesShort::fromRaw( (UnsignedShort)c ), floatToUnsignedShortAsMsvc( ceilf( (Real)c * ( ( (Real)20 ) / ( (Real)1000 ) ) ) ) );
+		if( c < 0x40000000 )
+		{
+			CHECK_EQ( (Int)RetailFramesInt::fromRaw( (Int)c ), oldRetailFramesInt( (Int)c ) );
+			CHECK_EQ( (Int)RetailFramesInt::fromRaw( -(Int)c ), oldRetailFramesInt( -(Int)c ) );
+			CHECK_EQ( (UnsignedInt)RetailFrames::fromRaw( c ), (UnsignedInt)oldRetailFramesInt( (Int)c ) );
+		}
+	}
+	const Real reals[] = { 0.0f, 0.001f, 0.01f, 0.1f, 0.25f, 0.3f, 0.5f, 0.6f, 0.92f, 0.99f, 1.0f, 1.01f, 1.5f, 2.0f, 3.3f,
+		10.0f, 17.188734f, 30.0f, 32.0f, 64.0f, 133.0f, 171.88734f, 333.3f, 1000.0f, 12345.678f, -1.0f, -64.0f, -399.99997f };
+	for( Int i = 0; i < (Int)ARRAY_SIZE( reals ); ++i )
+	{
+		const Real r = reals[ i ];
+		CHECK( sameBits( DurationFramesReal::fromRaw( r ), oldDurationReal( r ) ) );
+		CHECK( sameBits( VelocityPerFrame::fromRaw( r ), oldVelocity( r ) ) );
+		CHECK( sameBits( AccelerationPerFrame::fromRaw( r ), oldAcceleration( r ) ) );
+		CHECK( sameBits( AngularVelocityPerFrame::fromRaw( r ), oldAngular( r ) ) );
+		CHECK( sameBits( RetailFramesReal::fromRaw( r ), oldRetailFramesReal( r ) ) );
+		CHECK( sameBits( RetailFrameRatio::fromRaw( r ), r * ( (Real)100 / (Real)150 ) ) );
+		CHECK( sameBits( RetailPerFrame::fromRaw( r ), oldPerFrame( r ) ) );
+		CHECK( sameBits( RetailPerFrameSquared::fromRaw( r ), r * ( (Real)( 150 * 150 ) / (Real)10000 ) ) );
+		CHECK( sameBits( RetailPerFrameFactor::fromRaw( r ), oldFactor( r ) ) );
+	}
+
+	// a default written as a raw number reproduces the frame value the old ctor wrote
+	CHECK_EQ( (UnsignedInt)DurationFrames::fromRaw( 133 ), (UnsignedInt)oldRetailFramesInt( 4 ) );		// BunkerBuster
+	CHECK_EQ( (UnsignedInt)DurationFrames::fromRaw( 16640 ), (UnsignedInt)oldRetailFramesInt( 500 ) );	// Particle Uplink double click
+	CHECK_EQ( (UnsignedInt)DurationFrames::fromRaw( 499999968 ), 9999999u );		// TurretAI's idle scan
+	CHECK_EQ( (UnsignedInt)DurationFrames::fromRaw( UINT_MAX ), UINT_MAX );			// a "never" stays one
+	CHECK_EQ( (UnsignedInt)DurationFrames::fromRaw( 0x7fffffff ), 0x7fffffffu );
+	CHECK( sameBits( AngularVelocityPerFrame::fromRaw( 17.188734f ), oldPerFrame( 0.01f ) ) );	// TurretAI.h's DEFAULT_TURN_RATE_DEG_PER_SEC
+	CHECK( sameBits( AccelerationPerFrame::fromRaw( -399.99997f ), -1.0f ) );
+	CHECK( sameBits( VelocityPerFrame::fromRaw( 19999980.0f ), 999999.0f ) );
+	CHECK( sameBits( VelocityPerFrame::fromRaw( 0.19999999f ), 0.01f ) );
+	CHECK( sameBits( DurationFramesReal::fromRaw( 50.0f ), 1.0f ) );
+}
+
+/* An old save kept the converted value; setConverted turns it back into a raw that reads as the same
+	 value at the speed the save loads at, every kind, at every speed. */
+TEST(speed_scaled_set_converted_reads_back_what_the_old_save_held)
+{
+	const Real reals[] = { 0.0f, 0.01f, 0.25f, 0.6f, 0.95f, 0.99f, 1.0f, 1.5f, 3.3f, 17.188734f, 30.0f, 1000.0f };
+	for( Int s = 0; s < PLAYER_GAME_SPEED_COUNT; ++s )
+	{
+		GameSpeed_set( PLAYER_GAME_SPEED_PERCENTS[ s ] );
+		for( Int i = 0; i < (Int)ARRAY_SIZE( reals ); ++i )
+		{
+			const Real r = reals[ i ];
+			RetailPerFrame rate;	rate.setConverted( RetailPerFrame::fromRaw( r ) );
+			CHECK( sameBits( rate, RetailPerFrame::fromRaw( r ) ) );
+			RetailPerFrameFactor factor;	factor.setConverted( RetailPerFrameFactor::fromRaw( r ) );
+			CHECK( sameBits( factor, RetailPerFrameFactor::fromRaw( r ) ) );
+			RetailPerFrameSquared squared;	squared.setConverted( RetailPerFrameSquared::fromRaw( r ) );
+			CHECK( sameBits( squared, RetailPerFrameSquared::fromRaw( r ) ) );
+			AngularVelocityPerFrame turn;	turn.setConverted( AngularVelocityPerFrame::fromRaw( r ) );
+			CHECK( sameBits( turn, AngularVelocityPerFrame::fromRaw( r ) ) );
+		}
+		for( UnsignedInt c = 0; c < 2000; c += 37 )
+		{
+			DurationFrames d;	d.setConverted( DurationFrames::fromRaw( c * 7 ) );
+			CHECK_EQ( (UnsignedInt)d, (UnsignedInt)DurationFrames::fromRaw( c * 7 ) );
+			RetailFrames f;	f.setConverted( RetailFrames::fromRaw( c ) );
+			CHECK_EQ( (UnsignedInt)f, (UnsignedInt)RetailFrames::fromRaw( c ) );
+		}
+		DurationFrames never;	never.setConverted( UINT_MAX );
+		CHECK_EQ( (UnsignedInt)never, UINT_MAX );
+	}
+	GameSpeed_set( NATIVE_GAME_SPEED_PERCENT );
+}
+
+TEST(game_speed_set_to_200_and_back_reads_what_it_read)
+{
+	CHECK( GameSpeed_isAllowed( 100 ) && GameSpeed_isAllowed( 125 ) && GameSpeed_isAllowed( 150 ) && GameSpeed_isAllowed( 200 ) );
+	CHECK( !GameSpeed_isAllowed( 175 ) && !GameSpeed_isAllowed( 50 ) && !GameSpeed_isAllowed( 0 ) );
+
+	GameSpeed_set( NATIVE_GAME_SPEED_PERCENT );
+	const GameSpeedState before = TheGameSpeed;
+	const DurationFrames reload = DurationFrames::fromRaw( 2500 );
+	const VelocityPerFrame speed = VelocityPerFrame::fromRaw( 30.0f );
+	const RetailPerFrameFactor damping = RetailPerFrameFactor::fromRaw( 0.97f );
+	const RetailFrames count = RetailFrames::fromRaw( 37 );
+	const UnsignedInt reloadAt150 = reload;
+	const Real speedAt150 = speed, dampingAt150 = damping;
+	const UnsignedInt countAt150 = count;
+
+	GameSpeed_set( 200 );
+	CHECK_EQ( LOGICFRAMES_PER_GAME_SECOND, 15 );
+	CHECK_EQ( GAME_FACTOR_EXPONENT_EIGHTHS, 16 );
+	CHECK( sameBits( ConvertRetailPerFrameRate( 1.0f ), 2.0f ) );
+	CHECK( sameBits( ConvertRetailPerFrameSquared( 1.0f ), 4.0f ) );
+	CHECK( sameBits( ConvertRetailPerFrameFactor( 0.97f ), 0.97f * 0.97f ) );
+	CHECK_EQ( (UnsignedInt)reload, 38u );		// 2.5 s of 15 ticks, ceil( 2500 * 0.015 ) is 38
+	CHECK_EQ( (UnsignedInt)count, 19u );			// 37 retail frames at twice retail's pace, rounded half up
+	CHECK( (Real)speed != speedAt150 );
+
+	GameSpeed_set( NATIVE_GAME_SPEED_PERCENT );
+	CHECK( memcmp( &before, &TheGameSpeed, sizeof( GameSpeedState ) ) == 0 );
+	CHECK_EQ( (UnsignedInt)reload, reloadAt150 );
+	CHECK( sameBits( speed, speedAt150 ) );
+	CHECK( sameBits( damping, dampingAt150 ) );
+	CHECK_EQ( (UnsignedInt)count, countAt150 );
+	CHECK_EQ( reloadAt150, 50u );
+	CHECK_EQ( countAt150, 25u );
+}
+
 #include "test_minimap_input.inc"
 #include "test_selection_priority.inc"
 #include "test_widechar_width.inc"
@@ -22994,6 +24913,7 @@ TEST(save_older_than_60hz_loads_only_as_mission_save)
 #include "test_game_results.inc"
 #include "test_map_ini_rollback.inc"
 #include "test_hostile_map.inc"
+#include "test_pathfind_slicing.inc"
 
 #include "GameClient/Snow.h"
 
@@ -23192,11 +25112,36 @@ TEST(handicap_rides_the_slot_entry_and_full_health_leaves_the_string_unchanged)
 		CHECK_EQ( guest.getSlot( i )->getHandicap(), (Int)HANDICAP_FULL );
 	CHECK_EQ( guest.getSlot( 2 )->getAIPersonality(), (Int)AIPERSONA_TURTLE );
 	AsciiString odd;
-	odd.format( "US=0;M=00save/test;MC=0;MS=0;SD=7;C=100;SR=0;SC=0;O=N;S=HPlayer,C0A80164,8088,TT,-1,-1,-1,-1,%d,77:CH,-1,-1,-1,-1,0,120:CM,-1,-1,-1,-1:CM,-1,-1,-1,-1:CM,-1,-1,-1,-1:CM,-1,-1,-1,-1:CM,-1,-1,-1,-1:CM,-1,-1,-1,-1:;",
+	odd.format( "US=0;M=00save/test;MC=0;MS=0;SD=7;C=100;SR=0;SC=0;O=N;S=HPlayer,C0A80164,8088,TT,-1,-1,-1,-1,%d,77:CH,-1,-1,-1,-1,0,120:",
 		(Int)slot->getNATBehavior() );
+	for( Int i = 2; i < MAX_SLOTS; ++i )	// the slot list names every seat, MAX_SLOTS of them
+		odd.concat( "CM,-1,-1,-1,-1:" );
+	odd.concat( ';' );
 	CHECK( ParseAsciiStringToGameInfo( &guest, odd ) );
 	CHECK_EQ( guest.getSlot( 0 )->getHandicap(), (Int)HANDICAP_FULL );
 	CHECK_EQ( guest.getSlot( 1 )->getHandicap(), (Int)HANDICAP_FULL );
+
+	/* A replay's slot list as startRecording writes it, the logic rate last: readReplayHeader takes the
+		 rate off and hands the parser the string as it was, so the replay is not refused as bad options. */
+	AsciiString recorded = picked;
+	recorded.concat( RecorderClass::replayLogicRateField( 200 ) );
+	CHECK( !ParseAsciiStringToGameInfo( &guest, recorded ) );		// the parser alone refuses the key
+	CHECK_EQ( RecorderClass::takeReplayGameSpeed( recorded ), 200 );	// the match's speed, written at every speed
+	CHECK_EQ( RecorderClass::takeReplayLogicRate( recorded ), (Int)LOGICFRAMES_PER_SECOND );
+	CHECK_STR( recorded.str(), picked.str() );
+	CHECK( ParseAsciiStringToGameInfo( &guest, recorded ) );
+	CHECK_EQ( guest.getSlot( 0 )->getHandicap(), 50 );
+	// another rate comes back as itself, for the header to refuse; no field is a replay from 60 Hz days
+	AsciiString otherRate = picked;
+	otherRate.concat( LOGICFRAMES_PER_SECOND == 60 ? "HZ=30;" : "HZ=60;" );
+	CHECK_EQ( RecorderClass::takeReplayLogicRate( otherRate ), LOGICFRAMES_PER_SECOND == 60 ? 30 : 60 );
+	AsciiString noField = picked;
+	CHECK_EQ( RecorderClass::takeReplayLogicRate( noField ), 60 );
+	CHECK_STR( noField.str(), picked.str() );
+	CHECK_EQ( RecorderClass::takeReplayGameSpeed( noField ), 0 );	// none written: readReplayHeader refuses it
+	AsciiString atNative = picked;
+	atNative.concat( RecorderClass::replayLogicRateField( NATIVE_GAME_SPEED_PERCENT ) );
+	CHECK_EQ( RecorderClass::takeReplayGameSpeed( atNative ), (Int)NATIVE_GAME_SPEED_PERCENT );
 
 	// the host's answer to a guest's request
 	GameSlot *asker = host.getSlot( 0 );
@@ -23208,14 +25153,16 @@ TEST(handicap_rides_the_slot_entry_and_full_health_leaves_the_string_unchanged)
 	CHECK( !ApplyHandicapRequest( &host, asker, 110 ) );
 	CHECK_EQ( asker->getHandicap(), 60 );
 
-	// a room so full of fixed fields that its last few picks have no room: those do not stand, the
-	// string never empties, and the list still goes round so the guest's box comes back
+	/* A room full of humans and fixed fields.  The LAN budget is m_lanMaxOptionsLength, four packets'
+		 worth since the 32-seat room, and a full room of 32 takes every pick inside it.  Where the
+		 budget does run out, the names shrink to their first letter before the string gives up, and
+		 one byte less than that is an empty string, which ApplyHandicapRequest takes as a pick that
+		 does not stand. */
 	host.setPeaceTime( 30 );
 	host.setIncomeSharing( INCOME_SHARING_ALL );
 	host.setTechRespawn( 300 );
 	host.setSupplyPileLimit( 60000 );
 	host.setUnitLimit( TRUE );
-	host.setTurbo( TRUE );
 	host.setMapCRC( 0xFFFFFFFFu );
 	host.setMapSize( 9999999 );
 	host.setSeed( 2147483647 );
@@ -23235,9 +25182,309 @@ TEST(handicap_rides_the_slot_entry_and_full_health_leaves_the_string_unchanged)
 			++stood;
 	}
 	printf( "    a full room took %d of %d picks\n", stood, MAX_SLOTS );
-	CHECK( stood > 0 );
-	CHECK( stood < MAX_SLOTS );
+	CHECK_EQ( stood, MAX_SLOTS );
 	TheLAN = savedLAN;
+	const Int whole = GameInfoOptionsString( &host, mapPath, 0 ).getLength();
+	const Int shortest = whole - MAX_SLOTS * ( playerName.getLength() - 1 );
+	CHECK( whole <= m_lanMaxOptionsLength );
+	CHECK( !GameInfoOptionsString( &host, mapPath, shortest ).isEmpty() );
+	CHECK( GameInfoOptionsString( &host, mapPath, shortest - 1 ).isEmpty() );
+
+	delete ThePlayerTemplateStore;
+	ThePlayerTemplateStore = savedStore;
+	delete TheMultiplayerSettings;
+	TheMultiplayerSettings = savedSettings;
+	delete TheGameState;
+	TheGameState = savedState;
+	delete TheWritableGlobalData;
+	TheWritableGlobalData = savedData;
+}
+
+#include "GameClient/TankSkin.h"
+
+/* A human seat's skin loadout is one more field after the handicap, ",K1.3", the handicap then
+	 written at full health too, and only when the seat has skins: a string without one stays byte for
+	 byte what it was, an older build stops at the handicap, and a string from before the field reads
+	 as none.  An AI seat never carries one. */
+TEST(skin_loadout_rides_the_slot_entry_and_an_old_string_reads_as_none)
+{
+	CHECK( bootOnce() );
+
+	const SkinLoadout oneAndThree = ( (SkinLoadout)1 << 1 ) | ( (SkinLoadout)1 << 3 );
+	CHECK_STR( TankSkin_slotField( 0 ).str(), "" );
+	CHECK_STR( TankSkin_slotField( oneAndThree ).str(), ",K1.3" );
+	CHECK_STR( TankSkin_slotField( (SkinLoadout)1 << TANK_SKIN_MAX_ID ).str(), ",K63" );
+	CHECK( TankSkin_fromSlotField( "K1.3" ) == oneAndThree );
+	CHECK( TankSkin_fromSlotField( "K63" ) == (SkinLoadout)1 << TANK_SKIN_MAX_ID );
+	static const char *const refused[] = { "", "K", "K0", "K64", "K1..3", "K1.", "K1,3", "x", "100", "k1" };
+	for( Int r = 0; r < (Int)ARRAY_SIZE( refused ); ++r )
+		CHECK( TankSkin_fromSlotField( refused[r] ) == 0 );
+	CHECK( TankSkin_fromSlotField( NULL ) == 0 );
+
+	UnicodeString playerName;
+	playerName.translate( AsciiString( "Player" ) );
+
+	GameSlot seat;
+	CHECK( seat.getSkins() == 0 );
+	seat.setState( SLOT_PLAYER, playerName );
+	seat.setSkins( oneAndThree );
+	GameSlot copy = seat;
+	CHECK( copy.getSkins() == oneAndThree );
+	seat.setState( SLOT_PLAYER, playerName );		// a seat taken again starts plain
+	CHECK( seat.getSkins() == 0 );
+
+	GlobalData *savedData = TheWritableGlobalData;
+	TheWritableGlobalData = NEW GlobalData;
+	GameState *savedState = TheGameState;
+	TheGameState = NEW GameState;
+	MultiplayerSettings *savedSettings = TheMultiplayerSettings;
+	TheMultiplayerSettings = NEW MultiplayerSettings;
+	PlayerTemplateStore *savedStore = ThePlayerTemplateStore;
+	ThePlayerTemplateStore = NEW PlayerTemplateStore;
+	ThePlayerTemplateStore->init();
+
+	const AsciiString mapPath( "Save\\test\\test.map" );
+	SkirmishGameInfo host;
+	host.init();
+	AsciiString mapInSaves = TheGameState->getSaveDirectory();
+	mapInSaves.concat( "test.map" );
+	host.setMap( mapInSaves );
+	host.setSeed( 7 );
+	GameSlot *slot = host.getSlot( 0 );
+	slot->setState( SLOT_PLAYER, playerName, 0xC0A80164u );
+	slot->setPort( 8088 );
+	slot->setPlayerTemplate( PLAYERTEMPLATE_RANDOM );
+	slot->setAccept();
+	slot->setMapAvailability( TRUE );
+	for( Int i = 1; i < MAX_SLOTS; ++i )
+	{
+		host.getSlot( i )->setState( SLOT_MED_AI );
+		host.getSlot( i )->setPlayerTemplate( PLAYERTEMPLATE_RANDOM );
+	}
+
+	const AsciiString untouched = GameInfoOptionsString( &host, mapPath, 0 );
+	AsciiString humanEntry;
+	humanEntry.format( "HPlayer,C0A80164,8088,TT,-1,-1,-1,-1,%d:", (Int)slot->getNATBehavior() );
+	CHECK( strstr( untouched.str(), humanEntry.str() ) != NULL );
+
+	// at full health the handicap is written so the loadout lands in its own field
+	slot->setSkins( oneAndThree );
+	host.getSlot( 1 )->setSkins( oneAndThree );		// an AI seat's is never written
+	const AsciiString skinned = GameInfoOptionsString( &host, mapPath, 0 );
+	humanEntry.format( "HPlayer,C0A80164,8088,TT,-1,-1,-1,-1,%d,100,K1.3:CM,-1,-1,-1,-1:", (Int)slot->getNATBehavior() );
+	CHECK( strstr( skinned.str(), humanEntry.str() ) != NULL );
+
+	SkirmishGameInfo guest;
+	guest.init();
+	CHECK( ParseAsciiStringToGameInfo( &guest, skinned ) );
+	CHECK( guest.getSlot( 0 )->getSkins() == oneAndThree );
+	CHECK_EQ( guest.getSlot( 0 )->getHandicap(), (Int)HANDICAP_FULL );
+	CHECK( guest.getSlot( 1 )->getSkins() == 0 );
+	// a LAN guest reads the same string with the same parser, then ParseGameOptionsString drops every skin
+	GameInfoDropSkins( &guest );
+	for( Int i = 0; i < MAX_SLOTS; ++i )
+		CHECK( guest.getSlot( i )->getSkins() == 0 );
+	CHECK_EQ( guest.getSlot( 0 )->getHandicap(), (Int)HANDICAP_FULL );		// and nothing else
+	CHECK( ParseAsciiStringToGameInfo( &guest, skinned ) );
+
+	// beside a handicap, both come back
+	slot->setHandicap( 50 );
+	const AsciiString both = GameInfoOptionsString( &host, mapPath, 0 );
+	humanEntry.format( "HPlayer,C0A80164,8088,TT,-1,-1,-1,-1,%d,50,K1.3:", (Int)slot->getNATBehavior() );
+	CHECK( strstr( both.str(), humanEntry.str() ) != NULL );
+	CHECK( ParseAsciiStringToGameInfo( &guest, both ) );
+	CHECK( guest.getSlot( 0 )->getSkins() == oneAndThree );
+	CHECK_EQ( guest.getSlot( 0 )->getHandicap(), 50 );
+
+	// a string from before the field
+	CHECK( ParseAsciiStringToGameInfo( &guest, untouched ) );
+	for( Int i = 0; i < MAX_SLOTS; ++i )
+		CHECK( guest.getSlot( i )->getSkins() == 0 );
+
+	// the online host's answer to a guest's "Skins=K1.3"
+	slot->setSkins( 0 );
+	CHECK( ApplySkinRequest( &host, slot, TankSkin_fromSlotField( "K1.3" ) ) );
+	CHECK( slot->getSkins() == oneAndThree );
+	CHECK( !ApplySkinRequest( &host, slot, oneAndThree ) );	// nothing changed, nothing to send round
+	CHECK( !ApplySkinRequest( &host, host.getSlot( 2 ), oneAndThree ) );	// an AI seat
+	CHECK( ApplySkinRequest( &host, slot, 0 ) );
+	CHECK( slot->getSkins() == 0 );
+
+	delete ThePlayerTemplateStore;
+	ThePlayerTemplateStore = savedStore;
+	delete TheMultiplayerSettings;
+	TheMultiplayerSettings = savedSettings;
+	delete TheGameState;
+	TheGameState = savedState;
+	delete TheWritableGlobalData;
+	TheWritableGlobalData = savedData;
+}
+
+/* SkinsReforged.ini as it ships: ids 1, 2 and 3 are the 1K gold Crusader, Battlemaster and Scorpion
+	 (the ids zerohour.gg uses), each on its generals' models (the Laser General's Crusader left out),
+	 the damaged states and the wrecks that are its alone, case ignored, and on nothing else.  Each pairs the rebuilt sheets and retail's with their gold copies, never a house
+	 colour sheet.  A loadout keeps one skin a unit and drops ids past 63. */
+TEST(skins_table_dresses_each_unit_once_with_rebuilt_and_retail_sheets)
+{
+	CHECK( bootOnce() );
+	TankSkin_clearTable();
+	CHECK( loadIni( ZH_CODE_DIR "/Data/INI/SkinsReforged.ini" ) );
+
+	const SkinLoadout all = ( (SkinLoadout)1 << 1 ) | ( (SkinLoadout)1 << 2 ) | ( (SkinLoadout)1 << 3 );
+	static const char *const crusader[] = { "AVLeopard", "avleopard_d" };
+	static const char *const battlemaster[] = { "NVBtMstr", "NVBtMstr_D", "NVBtMstrNG", "nvbtmstrng_d", "NVBtMstr_D1", "NVBtMstr_D2", "NVBtMstr_D3" };
+	static const char *const scorpion[] = { "UVLiteTank", "UVLITETANK_D", "UVLiteTank_D1", "UVScorpion_m" };
+	for( Int i = 0; i < (Int)ARRAY_SIZE( crusader ); ++i )
+		CHECK_EQ( TankSkin_forModel( all, crusader[i] ), 1 );
+	for( Int i = 0; i < (Int)ARRAY_SIZE( battlemaster ); ++i )
+		CHECK_EQ( TankSkin_forModel( all, battlemaster[i] ), 2 );
+	for( Int i = 0; i < (Int)ARRAY_SIZE( scorpion ); ++i )
+		CHECK_EQ( TankSkin_forModel( all, scorpion[i] ), 3 );
+	// AVLeopard_D1 is DeadCrusaderHulk, which crushed vehicles of every kind leave; the Laser General's
+	// Crusader keeps its own paint, the owner's call
+	static const char *const plain[] = { "AVLeopard_D1", "AVLeopard_D2", "AVLaserTnk", "AVLaserTnk_D", "AVLaserTnk_D1",
+		"UVLiteTank_D2", "AVPaladin", "NVOverlord", "" };
+	for( Int i = 0; i < (Int)ARRAY_SIZE( plain ); ++i )
+		CHECK_EQ( TankSkin_forModel( all, plain[i] ), 0 );
+	CHECK_EQ( TankSkin_forModel( (SkinLoadout)1 << 2, "AVLeopard" ), 0 );	// owns the Battlemaster's only
+	CHECK_EQ( TankSkin_forModel( (SkinLoadout)1 << 9, "AVLeopard" ), 0 );	// a newer build's skin
+	CHECK_EQ( TankSkin_forModel( all, NULL ), 0 );
+
+	CHECK_STR( TankSkin_replacementSheet( 1, "AVCrusader_R.tga" ), "Skin1K_AVCrusader_R.tga" );
+	CHECK_STR( TankSkin_replacementSheet( 1, "avcrusaderd_r.dds" ), "Skin1K_AVCrusaderD_R.tga" );
+	CHECK( TankSkin_replacementSheet( 1, "avleopard_R.tga" ) == NULL );		// the Laser Crusader's rebuilt sheet
+	CHECK_STR( TankSkin_replacementSheet( 1, "avleopard.tga" ), "Skin1KC_avleopard.tga" );
+	CHECK_STR( TankSkin_replacementSheet( 2, "NVBtMstr_D.tga" ), "Skin1KC_NVBtMstr_D.tga" );
+	CHECK_STR( TankSkin_replacementSheet( 3, "UVScorpion_m_R.tga" ), "Skin1K_UVScorpion_m_R.tga" );
+	CHECK_STR( TankSkin_replacementSheet( 2, "NVBtMstr_D1.tga" ), "Skin1KC_NVBtMstr_D1.tga" );		// the wrecks
+	CHECK_STR( TankSkin_replacementSheet( 3, "UVLiteTank_D1_R.tga" ), "Skin1K_UVLiteTank_D1_R.tga" );
+	CHECK( TankSkin_replacementSheet( 1, "ZHCA_AVCrusPlate.tga" ) == NULL );
+	CHECK( TankSkin_replacementSheet( 1, "NVTreads.tga" ) == NULL );
+	CHECK( TankSkin_replacementSheet( 2, "AVCrusader_R.tga" ) == NULL );
+	CHECK( TankSkin_replacementSheet( 9, "AVCrusader_R.tga" ) == NULL );
+
+	// the Skins screen's rows: each unit by its own name, the skin by the string table's
+	AsciiString unit, unitLabel, label;
+	CHECK( TankSkin_describe( 2, unit, unitLabel, label ) );
+	CHECK_STR( unit.str(), "Battlemaster" );
+	CHECK_STR( unitLabel.str(), "OBJECT:BattleMaster" );
+	CHECK_STR( label.str(), "SKIN:Gold1K" );
+	CHECK( TankSkin_describe( 3, unit, unitLabel, label ) && unitLabel == "OBJECT:Scorpion" );
+	CHECK( TankSkin_describe( 1, unit, unitLabel, label ) && unitLabel == "OBJECT:Crusader" );
+	CHECK( !TankSkin_describe( 9, unit, unitLabel, label ) );
+
+	CHECK( TankSkin_setLocalLoadout( "1 2 3" ) == all );
+	CHECK( TankSkin_localLoadout() == all );
+	CHECK( TankSkin_setLocalLoadout( "3,99.1" ) == ( ( (SkinLoadout)1 << 1 ) | ( (SkinLoadout)1 << 3 ) ) );
+	CHECK( TankSkin_setLocalLoadout( "9 1" ) == ( ( (SkinLoadout)1 << 9 ) | ( (SkinLoadout)1 << 1 ) ) );	// a newer build's skin rides along
+	CHECK( TankSkin_setLocalLoadout( "" ) == 0 );
+	CHECK( TankSkin_setLocalLoadout( NULL ) == 0 );
+
+	// a second Crusader skin: whichever the loadout names first is the one it keeps
+	writeFile( TEST_INI,
+		"Skin 4\r\n"
+		"  Unit    = Crusader\r\n"
+		"  Model   = AVLeopard\r\n"
+		"  Texture = AVCrusader_R.tga Skin4_AVCrusader_R.tga\r\n"
+		"End\r\n" );
+	CHECK( loadIni( TEST_INI ) );
+	CHECK( TankSkin_setLocalLoadout( "1 4" ) == (SkinLoadout)1 << 1 );
+	CHECK( TankSkin_setLocalLoadout( "4 1 2" ) == ( ( (SkinLoadout)1 << 4 ) | ( (SkinLoadout)1 << 2 ) ) );
+
+	// a skin with an odd texture pair, or no unit, stops the file
+	writeFile( TEST_INI,
+		"Skin 5\r\n"
+		"  Unit    = Paladin\r\n"
+		"  Model   = AVPaladin\r\n"
+		"  Texture = AVPaladin_R.tga\r\n"
+		"End\r\n" );
+	CHECK( loadIni( TEST_INI ) == FALSE );
+	remove( TEST_INI );
+
+	CHECK( TankSkin_ofPlayer( -1 ) == 0 );
+	CHECK_EQ( TankSkin_seenPlayerIndex( NULL ), -1 );
+	TankSkin_setLocalLoadout( "" );
+	TankSkin_clearTable();
+}
+
+/* NickSenseless on v4.0.0: everybody who joined his online room showed in it for a split second and
+	 left.  A joiner builds its copy of the room from the game list (WOLLobbyMenu's PEER_ADD), round-trips
+	 it through the options string (markAsStagingRoomJoiner) and stays only when seat 0's name is among
+	 the server's nicks.  The list carries each seat's profile ID, which an AI seat sets to its SlotState;
+	 the site's account IDs count from 1, so a host whose account ID is 2, 3, 4 or 6 came out of the list
+	 as an AI with no name, and the join's host check failed on every joiner. */
+TEST(lobby_list_reads_a_host_with_a_small_account_id_as_the_host)
+{
+	CHECK( bootOnce() );
+
+	const char *nick = "NickSenseless";
+	const SlotState aiStates[] = { SLOT_EASY_AI, SLOT_MED_AI, SLOT_BRUTAL_AI, SLOT_TAKEOVER };
+	for( Int a = 0; a < (Int)ARRAY_SIZE( aiStates ); ++a )
+	{
+		CHECK( IsAISlotState( aiStates[a] ) );		// what the list read before: the account ID as a state
+		CHECK_EQ( (Int)ListedSeatState( nick, (Int)aiStates[a] ), (Int)SLOT_PLAYER );
+	}
+	CHECK_EQ( (Int)ListedSeatState( nick, 0 ), (Int)SLOT_PLAYER );
+	CHECK_EQ( (Int)ListedSeatState( nick, 48213 ), (Int)SLOT_PLAYER );
+	// an AI seat: "CE"/"CM"/"CH" or nothing as its name, its state as the profile ID
+	CHECK_EQ( (Int)ListedSeatState( "CE", SLOT_EASY_AI ), (Int)SLOT_EASY_AI );
+	CHECK_EQ( (Int)ListedSeatState( "CM", SLOT_MED_AI ), (Int)SLOT_MED_AI );
+	CHECK_EQ( (Int)ListedSeatState( "CH", SLOT_BRUTAL_AI ), (Int)SLOT_BRUTAL_AI );
+	CHECK_EQ( (Int)ListedSeatState( "", SLOT_TAKEOVER ), (Int)SLOT_TAKEOVER );
+	CHECK_EQ( (Int)ListedSeatState( NULL, SLOT_TAKEOVER ), (Int)SLOT_TAKEOVER );
+	CHECK_EQ( (Int)ListedSeatState( "", 0 ), (Int)SLOT_OPEN );
+	CHECK_EQ( (Int)ListedSeatState( "CE", 0 ), (Int)SLOT_PLAYER );		// as before: a name with no AI ID behind it
+
+	GlobalData *savedData = TheWritableGlobalData;
+	TheWritableGlobalData = NEW GlobalData;
+	GameState *savedState = TheGameState;
+	TheGameState = NEW GameState;
+	MultiplayerSettings *savedSettings = TheMultiplayerSettings;
+	TheMultiplayerSettings = NEW MultiplayerSettings;
+	PlayerTemplateStore *savedStore = ThePlayerTemplateStore;
+	ThePlayerTemplateStore = NEW PlayerTemplateStore;
+	ThePlayerTemplateStore->init();
+
+	AsciiString mapInSaves = TheGameState->getSaveDirectory();
+	mapInSaves.concat( "test.map" );
+	const AsciiString mapPath( "Save\\test\\test.map" );
+	UnicodeString hostName;
+	hostName.translate( AsciiString( nick ) );
+
+	/* The joiner's copy of a fresh host's room, seat 0 the host with account ID 2.  The other seats are
+		 AI here only because parsing an open seat asks TheGameText, which the harness does not stand up. */
+	for( Int pass = 0; pass < 2; ++pass )
+	{
+		const Bool fixed = pass == 1;
+		SkirmishGameInfo listed;
+		listed.init();
+		listed.setMap( mapInSaves );
+		GameSlot *seat = listed.getSlot( 0 );
+		const SlotState state = fixed ? ListedSeatState( nick, 2 ) : (IsAISlotState( (SlotState)2 ) ? (SlotState)2 : SLOT_PLAYER);
+		if( IsAISlotState( state ) )
+			seat->setState( state );
+		else
+			seat->setState( SLOT_PLAYER, hostName );
+		seat->setPlayerTemplate( PLAYERTEMPLATE_RANDOM );
+		for( Int i = 1; i < MAX_SLOTS; ++i )
+		{
+			listed.getSlot( i )->setState( SLOT_MED_AI );
+			listed.getSlot( i )->setPlayerTemplate( PLAYERTEMPLATE_RANDOM );
+		}
+
+		const AsciiString options = GameInfoOptionsString( &listed, mapPath, 0 );
+		SkirmishGameInfo joined;
+		joined.init();
+		CHECK( ParseAsciiStringToGameInfo( &joined, options ) );
+		AsciiString seatZero;
+		seatZero.translate( joined.getConstSlot( 0 )->getName() );
+		printf( "    %s: seat 0 '%s' from [%s]\n", fixed ? "fixed" : "v4.0.0", seatZero.str(), options.str() );
+		// the join's host check: seat 0's name has to be one of the server's nicks for the room
+		if( fixed )
+			CHECK_STR( seatZero.str(), nick );
+		else
+			CHECK( strcmp( seatZero.str(), nick ) != 0 );
+	}
 
 	delete ThePlayerTemplateStore;
 	ThePlayerTemplateStore = savedStore;
@@ -23341,4 +25588,662 @@ TEST(file_write_queue_writes_what_the_file_calls_wrote)
 	std::filesystem::remove( queued );
 	std::filesystem::remove( direct );
 	CHECK( ca == cb );
+}
+
+/* The Reforged archives go into the tree each over the ones before it, base art first, then the
+	 model batches by name, case ignored.  A rebuilt bridge's texture in ReforgedNeutral.big has to beat
+	 the 2x upscale ReforgedTextures.big holds under the same name, which plain name order lost. */
+TEST(reforged_archives_mount_base_art_first_then_batches_by_name)
+{
+	const char *const names[] = { "ReforgedUSA.big", "reforgedterrain.big", "ReforgedNeutral.big", "ReforgedTextures.big",
+		"ReforgedChina.big", "ReforgedNormals.big", "ReforgedGLA.big", "ReforgedUI.big" };
+	const char *const mounted[] = { "ReforgedTextures.big", "ReforgedNormals.big", "reforgedterrain.big", "ReforgedChina.big",
+		"ReforgedGLA.big", "ReforgedNeutral.big", "ReforgedUI.big", "ReforgedUSA.big" };
+	std::vector<AsciiString> order( names, names + 8 );
+	std::sort( order.begin(), order.end(), ArchiveFileSystem::reforgedMountsBefore );
+	for( Int i = 0; i < 8; ++i )
+		CHECK_STR( order[i].str(), mounted[i] );
+	// the folder does not move an archive's place, only its name does
+	CHECK( ArchiveFileSystem::reforgedMountsBefore( AsciiString( "C:\\Run\\ReforgedTerrain.big" ), AsciiString( "ReforgedChina.big" ) ) );
+	CHECK( !ArchiveFileSystem::reforgedMountsBefore( AsciiString( "ReforgedUSA.big" ), AsciiString( "C:\\Run\\ReforgedGLA.big" ) ) );
+	CHECK( ArchiveFileSystem::isReforgedBaseArt( AsciiString( "C:\\Run\\reforgedterrain.big" ) ) );
+	CHECK( !ArchiveFileSystem::isReforgedBaseArt( AsciiString( "ReforgedNeutralA.big" ) ) );
+}
+
+/* Classic Graphics shuts every Reforged archive, HD Textures off the base art and Detailed Models off the
+	 model batches.  ReforgedSkins.big holds only the online skins' sheets, a Classic and a Reforged copy
+	 each, and no model, so every combination mounts it: the Classic gold would never load otherwise. */
+TEST(reforged_archives_wanted_by_options_and_the_skins_always)
+{
+	for( Int i = 0; i < 8; ++i )
+	{
+		const Bool classic = ( i & 1 ) != 0, hd = ( i & 2 ) != 0, detailed = ( i & 4 ) != 0;
+		CHECK( ArchiveFileSystem::reforgedArchiveWanted( AsciiString( "ReforgedSkins.big" ), classic, hd, detailed ) );
+		CHECK( ArchiveFileSystem::reforgedArchiveWanted( AsciiString( "C:\\Run\\reforgedskins.BIG" ), classic, hd, detailed ) );
+		CHECK_EQ( ArchiveFileSystem::reforgedArchiveWanted( AsciiString( "ReforgedTextures.big" ), classic, hd, detailed ), !classic && hd );
+		CHECK_EQ( ArchiveFileSystem::reforgedArchiveWanted( AsciiString( "ReforgedUSA.big" ), classic, hd, detailed ), !classic && detailed );
+		CHECK_EQ( ArchiveFileSystem::reforgedArchiveWanted( AsciiString( "ReforgedSkinsExtra.big" ), classic, hd, detailed ), !classic && detailed );
+	}
+}
+
+namespace {
+	// an archive that lists names and opens nothing: all mountOverRetail reads is the listing
+	class ListingOnlyArchive : public ArchiveFile
+	{
+	public:
+		explicit ListingOnlyArchive( const char *const *paths )
+		{
+			m_file = NULL;		// ArchiveFile's constructor leaves it, and its destructor closes it
+			for( ; *paths != NULL; ++paths )
+			{
+				const char *slash = strrchr( *paths, '\\' );
+				ArchivedFileInfo info;
+				info.m_filename = slash + 1;
+				info.m_filename.toLower();
+				addFile( AsciiString( std::string( *paths, slash + 1 ).c_str() ), &info );
+			}
+		}
+		virtual Bool getFileInfo( const AsciiString&, FileInfo * ) const { return FALSE; }
+		virtual File* openFile( const Char *, Int ) { return NULL; }
+		virtual void closeAllFiles( void ) {}
+		virtual AsciiString getName( void ) { return AsciiString::TheEmptyString; }
+		virtual AsciiString getPath( void ) { return AsciiString::TheEmptyString; }
+		virtual void setSearchPriority( Int ) {}
+		virtual void close( void ) {}
+	};
+
+	class MountOrderFileSystem : public ArchiveFileSystem
+	{
+	public:
+		virtual void init( void ) {}
+		virtual void update( void ) {}
+		virtual void reset( void ) {}
+		virtual void postProcessLoad( void ) {}
+		virtual ArchiveFile* openArchiveFile( const Char * ) { return NULL; }
+		virtual void closeArchiveFile( const Char * ) {}
+		virtual void closeAllArchiveFiles( void ) {}
+		virtual void closeAllFiles( void ) {}
+		virtual Bool loadBigFilesFromDirectory( AsciiString, AsciiString, Bool, Bool ) { return FALSE; }
+		void mountRetail( ArchiveFile *art, const char *name, Bool overwrite )
+		{
+			loadIntoDirectoryTree( art, AsciiString( name ), overwrite );
+			m_archiveFileMap[ AsciiString( name ) ] = art;
+		}
+		void mountReforged( ArchiveFile *art, const char *name ) { mountOverRetail( art, AsciiString( name ) ); }
+	};
+}
+
+/* The INI CRC hashes each model as retail resolves it, so a player with the rebuilt models and one
+	 without agree.  The tree answers the batch, the retail lookup the archive it covered; a name no
+	 retail archive holds has no retail answer at all, and a second batch over the first still finds retail. */
+TEST(model_batches_leave_the_crc_its_retail_copy)
+{
+	static const char *const w3dzh[] = { "Art\\W3D\\AVTank.w3d", "Art\\W3D\\NBGattling.w3d", NULL };
+	static const char *const patch[] = { "Art\\W3D\\AVTank.w3d", NULL };
+	static const char *const usa[] = { "Art\\W3D\\AVTank.w3d", "Art\\W3D\\AVNew.w3d", "Art\\Textures\\AVTank.dds", NULL };
+	static const char *const neutral[] = { "Art\\W3D\\AVTank.w3d", NULL };
+	MountOrderFileSystem fs;
+	fs.mountRetail( new ListingOnlyArchive( w3dzh ), "W3DZH.big", FALSE );
+	fs.mountRetail( new ListingOnlyArchive( patch ), "PatchZH.big", TRUE );		// the patch pass overwrites
+	fs.mountReforged( new ListingOnlyArchive( usa ), "ReforgedUSA.big" );
+	fs.mountReforged( new ListingOnlyArchive( neutral ), "ReforgedNeutralA.big" );
+
+	CHECK_STR( fs.getArchiveFilenameForFile( AsciiString( "art\\w3d\\avtank.w3d" ) ).str(), "ReforgedNeutralA.big" );
+	CHECK_STR( fs.getRetailArchiveFilenameForFile( AsciiString( "Art\\W3D\\AVTank.w3d" ) ).str(), "PatchZH.big" );
+	CHECK_STR( fs.getRetailArchiveFilenameForFile( AsciiString( "art\\w3d\\nbgattling.w3d" ) ).str(), "W3DZH.big" );
+	CHECK_STR( fs.getRetailArchiveFilenameForFile( AsciiString( "art\\w3d\\avnew.w3d" ) ).str(), "" );
+	CHECK_STR( fs.getArchiveFilenameForFile( AsciiString( "art\\w3d\\avnew.w3d" ) ).str(), "ReforgedUSA.big" );
+}
+
+#include "Common/RAMFile.h"
+
+namespace {
+	// a listing that also serves the bytes it was given under each name
+	class ServingArchive : public ListingOnlyArchive
+	{
+	public:
+		ServingArchive( const char *const *paths, const std::string *contents ) : ListingOnlyArchive( paths )
+		{
+			for( Int i = 0; paths[i] != NULL; ++i )
+				m_contents[ servedName( paths[i] ) ] = contents[i];
+		}
+		virtual File* openFile( const Char *name, Int )
+		{
+			std::map<std::string, std::string>::const_iterator it = m_contents.find( servedName( name ) );
+			if( it == m_contents.end() )
+				return NULL;
+			RAMFile *file = newInstance( RAMFile );
+			if( !file->openFromMemory( it->second.data(), (Int)it->second.size(), AsciiString( name ) ) )
+			{
+				file->deleteInstance();
+				return NULL;
+			}
+			file->deleteOnClose();
+			return file;
+		}
+	private:
+		static std::string servedName( const char *name )
+		{
+			std::string s( name );
+			for( size_t i = 0; i < s.size(); ++i )
+				s[i] = ( s[i] == '/' ) ? '\\' : (char)tolower( (unsigned char)s[i] );
+			return s;
+		}
+		std::map<std::string, std::string> m_contents;
+	};
+
+	std::string w3dChunk( UnsignedInt type, const std::string &data )
+	{
+		std::string chunk( 8, '\0' );
+		const UnsignedInt length = (UnsignedInt)data.size();
+		memcpy( &chunk[0], &type, 4 );
+		memcpy( &chunk[4], &length, 4 );
+		return chunk + data;
+	}
+
+	std::string readAllAndClose( File *file )
+	{
+		if( file == NULL )
+			return std::string();
+		const Int size = file->size();
+		char *bytes = file->readEntireAndClose();
+		std::string s( bytes, size );
+		delete [] bytes;
+		return s;
+	}
+
+	std::string hlodHeader( const char *name, const char *tree, UnsignedInt levels )
+	{
+		std::string data( 40, '\0' );
+		const UnsignedInt version = 1;
+		memcpy( &data[0], &version, 4 );
+		memcpy( &data[4], &levels, 4 );
+		memcpy( &data[8], name, strlen( name ) );
+		memcpy( &data[24], tree, strlen( tree ) );
+		return w3dChunk( 0x701, data );
+	}
+
+	// one HLOD level: an array header and a (bone, name) record per sub-object
+	std::string hlodLevel( const char *const *names, const UnsignedInt *bones, UnsignedInt count, float maxScreenSize )
+	{
+		std::string header( 8, '\0' );
+		memcpy( &header[0], &count, 4 );
+		memcpy( &header[4], &maxScreenSize, 4 );
+		std::string level = w3dChunk( 0x703, header );
+		for( UnsignedInt i = 0; i < count; ++i )
+		{
+			std::string record( 36, '\0' );
+			memcpy( &record[0], &bones[i], 4 );
+			memcpy( &record[4], names[i], strlen( names[i] ) );
+			level += w3dChunk( 0x704, record );
+		}
+		return w3dChunk( 0x702, level );
+	}
+
+	// the mesh a sub-object record names: a MESH with a MESH_HEADER3 naming it <container>.<mesh>
+	std::string meshPrototype( const char *container, const char *mesh, const char *body )
+	{
+		std::string header( 40, '\0' );
+		memcpy( &header[8], mesh, strlen( mesh ) );
+		memcpy( &header[24], container, strlen( container ) );
+		return w3dChunk( 0x000, w3dChunk( 0x01F, header ) + w3dChunk( 0x002, body ) );
+	}
+
+	std::string pivot( const char *name, Int parent, float x )
+	{
+		std::string record( 60, '\0' );
+		memcpy( &record[0], name, strlen( name ) );
+		memcpy( &record[16], &parent, 4 );
+		memcpy( &record[20], &x, 4 );
+		return record;
+	}
+
+	// a HIERARCHY: its header (version, name, pivot count, centre) and its pivots
+	std::string hierarchy( const std::string &pivots, UnsignedInt count, const char *name = "TRTEST" )
+	{
+		std::string header( 36, '\0' );
+		const UnsignedInt version = 0x40001;
+		memcpy( &header[0], &version, 4 );
+		memcpy( &header[4], name, strlen( name ) );
+		memcpy( &header[20], &count, 4 );
+		return w3dChunk( 0x100, w3dChunk( 0x101, header ) + w3dChunk( 0x102, pivots ) );
+	}
+}
+
+/* A Türkiye model is loose (the master, every player has it) and again in ReforgedTurkiye.big with
+	 its LODs, the full level a high-resolution rebuild.  The batch's copy is drawn only when it changes
+	 nothing the logic reads: the animations byte for byte, the hierarchy too but for WHEEL_[LR]<nn>
+	 pivots hung off the master's, the HLOD's names, every record naming a mesh the file defines, and
+	 every name findSingleSubObj can resolve on the master's bone in every level - it falls back to
+	 sub-objects for muzzle names and searches the coarsest level first.  A name only the copy answers
+	 is a master mesh's <name>_L<digit> or an HD_ mesh.  Mesh counts and MaxScreenSize are free.  A moved
+	 bone, an added pivot that is no wheel, a renamed HLOD, a rebound name in a coarse or the full
+	 level, a copy-only FIREPOINT01, a record to a mesh the copy lacks, no batch, or a retail archive
+	 holding the name all leave the loose master.  The INI CRC reads the master through
+	 TheLocalFileSystem, so it is the same whichever copy is drawn. */
+TEST(reforged_lod_copy_is_drawn_only_when_it_keeps_what_the_logic_reads)
+{
+	CHECK( bootOnce() );
+	const char *const topNames[] = { "TRTEST.HULL", "TRTEST.MUZZLE" };
+	const UnsignedInt topBones[] = { 0, 3 };
+	const char *const hiresNames[] = { "TRTEST.HULL", "TRTEST.HD_HULL", "TRTEST.MUZZLE", "TRTEST.HD_TRACKS" };
+	const UnsignedInt hiresBones[] = { 0, 0, 3, 1 }, hiresReboundBones[] = { 0, 0, 5, 1 };
+	const char *const coarseNames[] = { "TRTEST.HULL_L1", "trtest.muzzle" };
+	const UnsignedInt coarseBones[] = { 0, 3 }, reboundBones[] = { 0, 5 };
+	const char *const firepointNames[] = { "TRTEST.HULL_L1", "TRTEST.FIREPOINT01" };
+	const char *const ghostNames[] = { "TRTEST.HULL_L2", "trtest.muzzle" };
+	const std::string top = hlodLevel( topNames, topBones, 2, 10000.0f );
+	const std::string hires = hlodLevel( hiresNames, hiresBones, 4, 300.0f );
+	const std::string hiresRebound = hlodLevel( hiresNames, hiresReboundBones, 4, 300.0f );
+	const std::string coarse = hlodLevel( coarseNames, coarseBones, 2, 80.0f );
+	const std::string rebound = hlodLevel( coarseNames, reboundBones, 2, 80.0f );
+	const std::string firepoint = hlodLevel( firepointNames, coarseBones, 2, 80.0f );
+	const std::string ghost = hlodLevel( ghostNames, coarseBones, 2, 80.0f );
+
+	const std::string skeleton = pivot( "ROOTTRANSFORM", -1, 0.0f ) + pivot( "CHASSIS", 0, 1.0f ) + pivot( "TURRET", 1, 2.0f )
+		+ pivot( "BARREL", 2, 3.0f );
+	const std::string bones = hierarchy( skeleton, 4 ), anim = w3dChunk( 0x280, "turret" );
+	const std::string movedBones = hierarchy( pivot( "ROOTTRANSFORM", -1, 0.0f ) + pivot( "CHASSIS", 0, 1.5f )
+		+ pivot( "TURRET", 1, 2.0f ) + pivot( "BARREL", 2, 3.0f ), 4 );
+	const std::string wheelPivots = skeleton + pivot( "WHEEL_L01", 1, 4.0f ) + pivot( "WHEEL_R01", 1, 5.0f );
+	const std::string notWheelBones = hierarchy( skeleton + pivot( "TURRET2", 1, 4.0f ), 5 );
+	const std::string master = bones + meshPrototype( "TRTEST", "HULL", "one mesh" ) + meshPrototype( "TRTEST", "MUZZLE", "flash" )
+		+ anim + w3dChunk( 0x700, hlodHeader( "TRTEST", "TRTEST", 1 ) + top );
+	const std::string meshes = meshPrototype( "TRTEST", "HULL", "hull lod0" ) + meshPrototype( "TRTEST", "HD_HULL", "hull detail" )
+		+ meshPrototype( "TRTEST", "MUZZLE", "flash" ) + meshPrototype( "TRTEST", "HD_TRACKS", "tracks" )
+		+ meshPrototype( "TRTEST", "HULL_L1", "hull lod1" ) + meshPrototype( "TRTEST", "FIREPOINT01", "a point" );
+	const std::string lods = bones + meshes + anim + w3dChunk( 0x700, hlodHeader( "TRTEST", "TRTEST", 2 ) + coarse + hires );
+	const std::string moved = movedBones + meshes + anim + w3dChunk( 0x700, hlodHeader( "TRTEST", "TRTEST", 2 ) + coarse + hires );
+	const std::string renamed = bones + meshes + anim + w3dChunk( 0x700, hlodHeader( "TRTEST2", "TRTEST", 2 ) + coarse + hires );
+	const std::string rebind = bones + meshes + anim + w3dChunk( 0x700, hlodHeader( "TRTEST", "TRTEST", 2 ) + rebound + hires );
+	const std::string topRebind = bones + meshes + anim + w3dChunk( 0x700, hlodHeader( "TRTEST", "TRTEST", 2 ) + coarse + hiresRebound );
+	const std::string firepointOn = bones + meshes + anim + w3dChunk( 0x700, hlodHeader( "TRTEST", "TRTEST", 2 ) + firepoint + hires );
+	const std::string ghostOn = bones + meshes + anim + w3dChunk( 0x700, hlodHeader( "TRTEST", "TRTEST", 2 ) + ghost + hires );
+	const std::string notWheeled = notWheelBones + meshes + anim + w3dChunk( 0x700, hlodHeader( "TRTEST", "TRTEST", 2 ) + coarse + hires );
+
+	// Two tree families of their own, a master and a sibling state on each tree: the game keeps the
+	// first tree loaded under a name, so once a file of the family is served plain no copy brings wheels.
+	const std::string plainOf[2] = { hierarchy( skeleton, 4, "TRWHEEL" ), hierarchy( skeleton, 4, "TRLATE" ) };
+	const std::string wheelsOf[2] = { hierarchy( wheelPivots, 6, "TRWHEEL" ), hierarchy( wheelPivots, 6, "TRLATE" ) };
+	std::string familyMaster[2], familyWheeled[2], familyFallback[2];
+	for( Int f = 0; f < 2; ++f )
+	{
+		familyMaster[f] = plainOf[f] + meshPrototype( "TRTEST", "HULL", "one mesh" ) + meshPrototype( "TRTEST", "MUZZLE", "flash" )
+			+ anim + w3dChunk( 0x700, hlodHeader( "TRTEST", "TRTEST", 1 ) + top );
+		familyWheeled[f] = wheelsOf[f] + meshes + anim + w3dChunk( 0x700, hlodHeader( "TRTEST", "TRTEST", 2 ) + coarse + hires );
+		familyFallback[f] = wheelsOf[f] + meshes + anim + w3dChunk( 0x700, hlodHeader( "TRTEST2", "TRTEST", 2 ) + coarse + hires );
+	}
+	const std::string &wheeled = familyWheeled[0];
+
+	const Int LOOSE = 14;
+	const char *const loose[LOOSE] = { "Art/W3D/zhrtest_same.w3d", "Art/W3D/zhrtest_moved.w3d",
+		"Art/W3D/zhrtest_unmounted.w3d", "Art/W3D/zhrtest_retail.w3d",
+		"Art/W3D/zhrtest_renamed.w3d", "Art/W3D/zhrtest_rebound.w3d",
+		"Art/W3D/zhrtest_toprebound.w3d", "Art/W3D/zhrtest_firepoint.w3d",
+		"Art/W3D/zhrtest_ghost.w3d", "Art/W3D/zhrtest_wheels.w3d",
+		"Art/W3D/zhrtest_notwheels.w3d", "Art/W3D/zhrtest_wheels_d.w3d",
+		"Art/W3D/zhrtest_late.w3d", "Art/W3D/zhrtest_late_d.w3d" };
+	const std::string *const looseBytes[LOOSE] = { &master, &master, &master, &master, &master, &master, &master, &master,
+		&master, &familyMaster[0], &master, &familyMaster[0], &familyMaster[1], &familyMaster[1] };
+	std::filesystem::create_directories( "Art/W3D" );
+	for( Int i = 0; i < LOOSE; ++i )
+	{
+		FILE *fp = fopen( loose[i], "wb" );
+		CHECK( fp != NULL );
+		if( fp != NULL )
+		{
+			fwrite( looseBytes[i]->data(), 1, looseBytes[i]->size(), fp );
+			fclose( fp );
+		}
+	}
+
+	static const char *const retail[] = { "Art\\W3D\\zhrtest_retail.w3d", NULL };
+	static const char *const batch[] = { "Art\\W3D\\zhrtest_same.w3d", "Art\\W3D\\zhrtest_moved.w3d",
+		"Art\\W3D\\zhrtest_renamed.w3d", "Art\\W3D\\zhrtest_rebound.w3d",
+		"Art\\W3D\\zhrtest_toprebound.w3d", "Art\\W3D\\zhrtest_firepoint.w3d", "Art\\W3D\\zhrtest_ghost.w3d",
+		"Art\\W3D\\zhrtest_wheels.w3d", "Art\\W3D\\zhrtest_notwheels.w3d", "Art\\W3D\\zhrtest_wheels_d.w3d",
+		"Art\\W3D\\zhrtest_late.w3d", "Art\\W3D\\zhrtest_late_d.w3d", NULL };
+	const std::string retailBytes[] = { lods };
+	const std::string batchBytes[] = { lods, moved, renamed, rebind, topRebind, firepointOn, ghostOn, familyWheeled[0], notWheeled,
+		familyFallback[0], familyWheeled[1], familyFallback[1] };
+	MountOrderFileSystem fs;
+	fs.mountRetail( new ServingArchive( retail, retailBytes ), "W3DZH.big", FALSE );
+	fs.mountReforged( new ServingArchive( batch, batchBytes ), "ReforgedTurkiye.big" );
+
+	ArchiveFileSystem *const before = TheArchiveFileSystem;
+	TheArchiveFileSystem = &fs;
+	TheFileSystem->reset();		// forget any answer a previous run of this test cached
+
+	const Int access = File::READ | File::BINARY;
+	CHECK( readAllAndClose( TheFileSystem->openFile( loose[0], access ) ) == lods );		// a bigger full level of its own
+	CHECK( readAllAndClose( TheFileSystem->openFile( loose[0], access ) ) == lods );		// the cached answer
+	CHECK( readAllAndClose( TheFileSystem->openFile( loose[1], access ) ) == master );		// a bone moved
+	CHECK( readAllAndClose( TheFileSystem->openFile( loose[2], access ) ) == master );		// no batch holds it
+	CHECK( readAllAndClose( TheFileSystem->openFile( loose[3], access ) ) == master );		// retail's copy, not a batch
+	CHECK( readAllAndClose( TheFileSystem->openFile( loose[4], access ) ) == master );		// the HLOD renamed
+	CHECK( readAllAndClose( TheFileSystem->openFile( loose[5], access ) ) == master );		// the muzzle on another bone when far
+	CHECK( readAllAndClose( TheFileSystem->openFile( loose[6], access ) ) == master );		// the muzzle on another bone when near
+	CHECK( readAllAndClose( TheFileSystem->openFile( loose[7], access ) ) == master );		// a FIREPOINT01 only the copy has
+	CHECK( readAllAndClose( TheFileSystem->openFile( loose[8], access ) ) == master );		// a record to a mesh it lacks
+	CHECK( readAllAndClose( TheFileSystem->openFile( loose[9], access ) ) == wheeled );		// road wheels after the master's pivots
+	CHECK( readAllAndClose( TheFileSystem->openFile( loose[10], access ) ) == master );		// an added pivot that is no wheel
+	// the wheeled copy came first; its sibling falls back to the plain tree, and the copy follows it
+	CHECK( readAllAndClose( TheFileSystem->openFile( loose[11], access ) ) == familyMaster[0] );
+	CHECK( readAllAndClose( TheFileSystem->openFile( loose[9], access ) ) == familyMaster[0] );
+	// the sibling first: the wheeled copy of a tree already served plain is refused from the start
+	CHECK( readAllAndClose( TheFileSystem->openFile( loose[13], access ) ) == familyMaster[1] );
+	CHECK( readAllAndClose( TheFileSystem->openFile( loose[12], access ) ) == familyMaster[1] );
+
+	// what checksumModels hashes: the master's bytes, though the renderer was handed the batch's
+	CRC masterCRC, hashedCRC, drawnCRC;
+	masterCRC.computeCRC( master.data(), (Int)master.size() );
+	const std::string hashed = readAllAndClose( TheLocalFileSystem->openFile( loose[0], File::READ ) );
+	hashedCRC.computeCRC( hashed.data(), (Int)hashed.size() );
+	drawnCRC.computeCRC( lods.data(), (Int)lods.size() );
+	CHECK_EQ( hashedCRC.get(), masterCRC.get() );
+	CHECK_NE( drawnCRC.get(), masterCRC.get() );
+
+	TheFileSystem->reset();
+	TheArchiveFileSystem = before;
+	for( Int i = 0; i < LOOSE; ++i )
+		std::filesystem::remove( loose[i] );
+	std::error_code ignored;
+	std::filesystem::remove( "Art/W3D", ignored );		// only when empty: never someone else's folder
+	std::filesystem::remove( "Art", ignored );
+}
+
+//////////////////////////////////////////////////////////////////////////////
+// General's talents: ranks 6 to 10 and the pair rule
+//////////////////////////////////////////////////////////////////////////////
+
+static Bool loadIniAs( const char *name, INILoadType type )
+{
+	INI ini;
+	try
+	{
+		ini.load( AsciiString( name ), type, NULL );
+		return TRUE;
+	}
+	catch( ... )
+	{
+	}
+	return FALSE;
+}
+
+/* A row's two cards are partners, index ^ 1: owning either closes both, and a science outside the
+	 list is never a talent, whatever it owns. */
+TEST(talent_pair_rule_closes_the_partner_and_ignores_other_sciences)
+{
+	ScienceVec talents;
+	for( Int i = 0; i < TALENT_SCIENCE_COUNT; ++i )
+		talents.push_back( (ScienceType)( 1000 + i ) );
+	const ScienceType outside = (ScienceType)999;
+
+	CHECK_EQ( findTalentIndex( talents, (ScienceType)1004 ), 4 );
+	CHECK_EQ( findTalentIndex( talents, outside ), -1 );
+
+	ScienceVec owned;
+	for( Int i = 0; i < TALENT_SCIENCE_COUNT; ++i )
+		CHECK( isTalentOpen( talents, owned, talents[ i ] ) );
+	CHECK( !isTalentOpen( talents, owned, outside ) );
+
+	owned.push_back( (ScienceType)1003 );		// 7B
+	CHECK( !isTalentOpen( talents, owned, (ScienceType)1003 ) );
+	CHECK( !isTalentOpen( talents, owned, (ScienceType)1002 ) );	// 7A, its partner
+	CHECK( isTalentOpen( talents, owned, (ScienceType)1004 ) );		// 8A, another row
+	CHECK( isTalentOpen( talents, owned, (ScienceType)1005 ) );
+
+	owned.push_back( (ScienceType)1008 );		// 10A
+	CHECK( !isTalentOpen( talents, owned, (ScienceType)1009 ) );
+	CHECK( isTalentOpen( talents, owned, (ScienceType)1000 ) );
+
+	CHECK( isValidTalentScienceCount( 0 ) );
+	CHECK( isValidTalentScienceCount( 10 ) );
+	CHECK( !isValidTalentScienceCount( 9 ) );
+	CHECK( !isValidTalentScienceCount( 11 ) );
+}
+
+static std::string talentSciencesIni( Int count )
+{
+	std::string text;
+	for( Int i = 0; i < count; ++i )
+	{
+		char name[ 64 ];
+		snprintf( name, sizeof( name ), " TEST_Talent%d", i );
+		text += name;
+	}
+	return text;
+}
+
+/* TalentSciences holds none or all ten cards: a short list would pair the wrong ones. */
+TEST(talent_sciences_take_none_or_exactly_ten)
+{
+	CHECK( bootOnce() );
+	ScienceStore *savedSciences = TheScienceStore;
+	TheScienceStore = NEW ScienceStore;
+	TheScienceStore->init();
+	PlayerTemplateStore *savedStore = ThePlayerTemplateStore;
+	ThePlayerTemplateStore = NEW PlayerTemplateStore;
+	ThePlayerTemplateStore->init();
+
+	std::string sciences;
+	for( Int i = 0; i < 11; ++i )
+	{
+		char block[ 160 ];
+		snprintf( block, sizeof( block ), "Science TEST_Talent%d\n  SciencePurchasePointCost = 0\nEnd\n", i );
+		sciences += block;
+	}
+	writeFile( TEST_INI, sciences.c_str() );
+	CHECK( loadIni( TEST_INI ) );
+
+	std::string ten = "PlayerTemplate FactionTalentTen\n  Side = America\n  TalentSciences =" + talentSciencesIni( 10 ) + "\nEnd\n";
+	writeFile( TEST_INI, ten.c_str() );
+	CHECK( loadIni( TEST_INI ) );
+	const PlayerTemplate *pt = ThePlayerTemplateStore->findPlayerTemplate( NAMEKEY( "FactionTalentTen" ) );
+	CHECK( pt != NULL );
+	if( pt )
+	{
+		CHECK_EQ( (Int)pt->getTalentSciences().size(), 10 );
+		CHECK_EQ( (Int)pt->getTalentSciences()[ 3 ], (Int)NAMEKEY( "TEST_Talent3" ) );
+	}
+
+	writeFile( TEST_INI, "PlayerTemplate FactionTalentNone\n  Side = America\n  TalentSciences = None\nEnd\n" );
+	CHECK( loadIni( TEST_INI ) );
+
+	static const Int bad[] = { 1, 9, 11 };
+	for( Int b = 0; b < 3; ++b )
+	{
+		char name[ 64 ];
+		snprintf( name, sizeof( name ), "FactionTalentBad%d", bad[ b ] );
+		std::string text = std::string( "PlayerTemplate " ) + name + "\n  Side = America\n  TalentSciences =" + talentSciencesIni( bad[ b ] ) + "\nEnd\n";
+		writeFile( TEST_INI, text.c_str() );
+		CHECK( !loadIniAs( TEST_INI, INI_LOAD_OVERWRITE ) );
+	}
+
+	delete ThePlayerTemplateStore;
+	ThePlayerTemplateStore = savedStore;
+	delete TheScienceStore;
+	TheScienceStore = savedSciences;
+	remove( TEST_INI );
+}
+
+/* A science-keyed power line (UpgradeOCL, UpgradeTargetCount, UpgradeRadiusCursorRadius) matches only
+	 when every science on it is owned, and the first such line in file order wins: a talent with tier 1
+	 of the power gets the talent's tier 1 line, never its tier 3 one. */
+struct FakeScienceOwner
+{
+	ScienceVec owned;
+	Bool hasScience( ScienceType t ) const { return std::find( owned.begin(), owned.end(), t ) != owned.end(); }
+};
+struct FakeKeyedValue
+{
+	ScienceVec m_sciences;
+	Int m_value;
+};
+static FakeKeyedValue keyedValue( ScienceType a, ScienceType b, Int value )
+{
+	FakeKeyedValue v;
+	v.m_sciences.push_back( a );
+	if( b != SCIENCE_INVALID )
+		v.m_sciences.push_back( b );
+	v.m_value = value;
+	return v;
+}
+TEST(power_upgrade_line_needs_every_science_and_first_match_wins)
+{
+	const ScienceType tier2 = (ScienceType)2, tier3 = (ScienceType)3, talent = (ScienceType)9;
+	std::vector<FakeKeyedValue> lines;
+	lines.push_back( keyedValue( talent, tier3, 7 ) );
+	lines.push_back( keyedValue( talent, tier2, 5 ) );
+	lines.push_back( keyedValue( talent, SCIENCE_INVALID, 3 ) );
+	lines.push_back( keyedValue( tier3, SCIENCE_INVALID, 5 ) );
+	lines.push_back( keyedValue( tier2, SCIENCE_INVALID, 3 ) );
+
+	FakeScienceOwner p;
+	CHECK( findFirstOwnedEntry( &p, lines ) == NULL );						// tier 1 only: the default
+	p.owned.push_back( talent );
+	CHECK_EQ( findFirstOwnedEntry( &p, lines )->m_value, 3 );			// talent, tier 1
+	p.owned.push_back( tier2 );
+	CHECK_EQ( findFirstOwnedEntry( &p, lines )->m_value, 5 );			// talent, tier 2
+	p.owned.push_back( tier3 );
+	CHECK_EQ( findFirstOwnedEntry( &p, lines )->m_value, 7 );			// talent, tier 3
+
+	FakeScienceOwner q;
+	q.owned.push_back( tier2 );
+	q.owned.push_back( tier3 );
+	CHECK_EQ( findFirstOwnedEntry( &q, lines )->m_value, 5 );			// tier 3 without the talent
+
+	ScienceVec none;
+	CHECK( !ownsAllSciences( &p, none ) );
+	ScienceVec missing;
+	missing.push_back( talent );
+	missing.push_back( SCIENCE_INVALID );		// a science the loaded data lacks
+	CHECK( !ownsAllSciences( &p, missing ) );
+	CHECK( !ownsAllSciences( (const FakeScienceOwner *)NULL, lines[ 2 ].m_sciences ) );
+}
+
+/* RankReforged.ini as shipped (its RankName lines aside, which need the game's text) appends ranks 6
+	 to 10 after EA's five, and a MULTIFILE block for a rank that exists edits it in place. */
+TEST(rank_reforged_ini_appends_ranks_six_to_ten)
+{
+	CHECK( bootOnce() );
+	ScienceStore *savedSciences = TheScienceStore;
+	TheScienceStore = NEW ScienceStore;
+	TheScienceStore->init();
+	RankInfoStore *savedRanks = TheRankInfoStore;
+	TheRankInfoStore = NEW RankInfoStore;
+	TheRankInfoStore->init();
+
+	std::string sciences;
+	for( Int i = 1; i <= 10; ++i )
+	{
+		char block[ 160 ];
+		snprintf( block, sizeof( block ), "Science SCIENCE_Rank%d\n  SciencePurchasePointCost = 0\n  IsGrantable = No\nEnd\n", i );
+		sciences += block;
+	}
+	writeFile( TEST_INI, sciences.c_str() );
+	CHECK( loadIni( TEST_INI ) );
+
+	static const Int eaPoints[] = { 0, 800, 1500, 2500, 5000 };
+	std::string ea;
+	for( Int i = 1; i <= 5; ++i )
+	{
+		char block[ 200 ];
+		snprintf( block, sizeof( block ), "Rank %d\n  SkillPointsNeeded = %d\n  SciencesGranted = SCIENCE_Rank%d\n  SciencePurchasePointsGranted = 1\nEnd\n",
+			i, eaPoints[ i - 1 ], i );
+		ea += block;
+	}
+	writeFile( TEST_INI, ea.c_str() );
+	CHECK( loadIni( TEST_INI ) );
+	CHECK_EQ( TheRankInfoStore->getRankLevelCount(), 5 );
+
+	std::string reforged;
+	{
+		std::ifstream master( std::string( ZH_CODE_DIR ) + "/Data/INI/RankReforged.ini" );
+		CHECK( master.good() );
+		std::string line;
+		while( std::getline( master, line ) )
+			if( line.find( "RankName" ) == std::string::npos )
+				reforged += line + "\n";
+	}
+	writeFile( TEST_INI, reforged.c_str() );
+	CHECK( loadIniAs( TEST_INI, INI_LOAD_MULTIFILE ) );
+	CHECK_EQ( TheRankInfoStore->getRankLevelCount(), 10 );
+
+	static const Int talentPoints[] = { 12000, 20000, 30000, 42000, 56000 };
+	for( Int i = 6; i <= 10 && TheRankInfoStore->getRankLevelCount() == 10; ++i )
+	{
+		const RankInfo *rank = TheRankInfoStore->getRankInfo( i );
+		char science[ 32 ];
+		snprintf( science, sizeof( science ), "SCIENCE_Rank%d", i );
+		CHECK_EQ( rank->m_skillPointsNeeded, talentPoints[ i - 6 ] );
+		CHECK_EQ( rank->m_sciencePurchasePointsGranted, 0 );
+		CHECK_EQ( (Int)rank->m_sciencesGranted.size(), 1 );
+		CHECK_EQ( (Int)rank->m_sciencesGranted[ 0 ], (Int)NAMEKEY( science ) );
+	}
+	CHECK_EQ( TheRankInfoStore->getRankInfo( 5 )->m_skillPointsNeeded, 5000 );
+
+	// an existing rank edited in place, the count unchanged; a gap still stops the load
+	writeFile( TEST_INI, "Rank 2\n  SkillPointsNeeded = 900\nEnd\n" );
+	CHECK( loadIniAs( TEST_INI, INI_LOAD_MULTIFILE ) );
+	CHECK_EQ( TheRankInfoStore->getRankLevelCount(), 10 );
+	CHECK_EQ( TheRankInfoStore->getRankInfo( 2 )->m_skillPointsNeeded, 900 );
+	CHECK_EQ( (Int)TheRankInfoStore->getRankInfo( 2 )->m_sciencesGranted.size(), 1 );
+	writeFile( TEST_INI, "Rank 12\n  SkillPointsNeeded = 90000\nEnd\n" );
+	CHECK( !loadIniAs( TEST_INI, INI_LOAD_MULTIFILE ) );
+	CHECK_EQ( TheRankInfoStore->getRankLevelCount(), 10 );
+
+	delete TheRankInfoStore;
+	TheRankInfoStore = savedRanks;
+	delete TheScienceStore;
+	TheScienceStore = savedSciences;
+	remove( TEST_INI );
+}
+
+/** The Maroon Beret's designator ends on the face of the target he sees, where its dot shows, not
+	 in the middle of the hull: a Crusader's box (15 by 10) turned any way, and a round building. */
+TEST(a_designator_ends_on_the_face_of_the_target_it_sees)
+{
+	const GeometryInfo box( GEOMETRY_BOX, FALSE, 10.0f, 15.0f, 10.0f );
+	Coord3D center, east, north, edge;
+	center.set( 100.0f, 100.0f, 5.0f );
+	east.set( 1.0f, 0.0f, 0.0f );
+	north.set( 0.0f, 1.0f, 0.0f );
+
+	Coord3D beret;
+	beret.set( 400.0f, 100.0f, 0.0f );		// dead ahead of a tank facing east: the front, 15 out
+	box.getFootprintEdgeToward( center, east, beret, 1.0f, edge );
+	CHECK_NEAR( edge.x, 116.0f, 0.001f );
+	CHECK_NEAR( edge.y, 100.0f, 0.001f );
+	CHECK_NEAR( edge.z, 5.0f, 0.001f );
+	box.getFootprintEdgeToward( center, north, beret, 0.0f, edge );		// the same tank facing north: its side, 10 out
+	CHECK_NEAR( edge.x, 110.0f, 0.001f );
+
+	beret.set( 400.0f, 400.0f, 0.0f );		// off the corner at 45 degrees: the side is met first
+	box.getFootprintEdgeToward( center, east, beret, 0.0f, edge );
+	CHECK_NEAR( edge.x, 110.0f, 0.001f );
+	CHECK_NEAR( edge.y, 110.0f, 0.001f );
+
+	const GeometryInfo round( GEOMETRY_CYLINDER, FALSE, 30.0f, 40.0f, 40.0f );
+	round.getFootprintEdgeToward( center, east, beret, 0.0f, edge );
+	CHECK_NEAR( edge.x - 100.0f, 40.0f * 0.70710678f, 0.001f );
+
+	beret.set( 105.0f, 100.0f, 0.0f );		// standing inside the footprint: never past him
+	box.getFootprintEdgeToward( center, east, beret, 1.0f, edge );
+	CHECK_NEAR( edge.x, 105.0f, 0.001f );
+	box.getFootprintEdgeToward( center, east, center, 1.0f, edge );		// on the middle: the middle
+	CHECK_NEAR( edge.x, 100.0f, 0.001f );
+}
+
+/** Turkiye's two weapon bonuses resolve by the names the INI writes (WeaponBonus = MARK_AND_RAIN ...,
+	 BonusCondition = FORWARD_POST), the name table ends where the enum does, and the enum still fits the
+	 32-bit WeaponBonusConditionFlags. */
+TEST(weapon_bonus_names_resolve_mark_and_rain_and_forward_post)
+{
+	static_assert( WEAPONBONUSCONDITION_COUNT <= 32, "WeaponBonusConditionFlags is an UnsignedInt" );
+	CHECK( WEAPONBONUSCONDITION_COUNT <= 32 );
+	CHECK( TheWeaponBonusNames[ WEAPONBONUSCONDITION_COUNT ] == NULL );
+	CHECK_EQ( INI::scanIndexList( "MARK_AND_RAIN", TheWeaponBonusNames ), (Int)WEAPONBONUSCONDITION_MARK_AND_RAIN );
+	CHECK_EQ( INI::scanIndexList( "FORWARD_POST", TheWeaponBonusNames ), (Int)WEAPONBONUSCONDITION_FORWARD_POST );
+	CHECK_EQ( INI::scanIndexList( "ENTHUSIASTIC", TheWeaponBonusNames ), (Int)WEAPONBONUSCONDITION_ENTHUSIASTIC );
 }

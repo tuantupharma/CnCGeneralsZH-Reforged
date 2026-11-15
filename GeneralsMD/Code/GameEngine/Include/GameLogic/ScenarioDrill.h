@@ -74,7 +74,7 @@ enum ScenarioActionType
 	SCENARIO_ACTION_POWER,					///< power <slot> <building> <position> [powerName]; fire its special powers (or the one named) there now, charged or not
 	SCENARIO_ACTION_PLAYERATTACKMOVE,	///< playerattackmove <slot> <selector> <position>; the player's attack move, not a script's
 	SCENARIO_ACTION_PRODUCE,			///< produce <slot> <building> <template> <count>; queue that many in its first matching building
-	SCENARIO_ACTION_TALLY,				///< tally <slot> <selector>; log how many are alive, their health and what they cost
+	SCENARIO_ACTION_TALLY,				///< tally <slot> <selector> [count] [widest]; log how many are alive, their health and what they cost, and expect that many standing within that distance of their middle
 	SCENARIO_ACTION_RESUME,				///< resume <slot> <selector> <targetSlot> <targetSelector>; a player's right click of builders on a half-built structure
 	SCENARIO_ACTION_PURCHASE,			///< purchase <slot> <science>; the rank needed and the points, then MSG_PURCHASE_SCIENCE as the science button sends it
 	SCENARIO_ACTION_SHIFTMOVE,				///< shiftmove <slot> <selector> <position>; a shift right click, onto the units' order queue
@@ -85,10 +85,12 @@ enum ScenarioActionType
 	SCENARIO_ACTION_SHIFTUPGRADE,			///< shiftupgrade <slot> <selector> <upgrade>; shift on an object upgrade button, bought by every unit that matches
 	SCENARIO_ACTION_DOCK,							///< dock <slot> <selector> <targetSlot> <targetSelector>; a right click on a supply point or a dock
 	SCENARIO_ACTION_CONSTRUCT,				///< construct <slot> <template> <position>; the local player's placement click, whatever is selected, as a message that is recorded and crosses the network
+	SCENARIO_ACTION_SHIFTCONSTRUCT,		///< shiftconstruct <slot> <template> <position>; the same click with shift, onto the builder's order queue
 	SCENARIO_ACTION_STANCE,						///< stance <slot> <selector> aggressive|defensive; the stance key, as MSG_SET_STANCE
 	SCENARIO_ACTION_FORCEATTACK,			///< forceattack <slot> <selector> <targetSlot> <targetSelector>; the attack key's click on one unit, as MSG_DO_FORCE_ATTACK_OBJECT
 	SCENARIO_ACTION_CLICKENTER,				///< clickenter <slot> <selector> <targetSlot> <targetSelector>; a player's click into a building or transport, as MSG_ENTER
 	SCENARIO_ACTION_WEAPONAT,					///< weaponat <slot> <selector> <position> [primary|secondary|tertiary]; a FIRE_WEAPON button's click on the ground, as MSG_DO_WEAPON_AT_LOCATION; tertiary when left out
+	SCENARIO_ACTION_SWITCHWEAPON,			///< switchweapon <slot> <selector> primary|secondary|tertiary; a SWITCH_WEAPON button (the Nuke Cannon's Neutron Shells), as MSG_SWITCH_WEAPONS
 	SCENARIO_ACTION_FORCEGROUND,			///< forceground <slot> <selector> <position>; the attack key's click on the ground, as MSG_DO_FORCE_ATTACK_GROUND
 	SCENARIO_ACTION_REAIM,						///< reaim <slot> <selector> <position>; a right click that moves a running power's aim (the Spectre Gunship's), as MSG_DO_SPECIAL_POWER_OVERRIDE_DESTINATION
 	SCENARIO_ACTION_RESPOND,					///< respond <slot> <selector> <position>; from now, how long each unit takes to point its gun at the position, fire with it pointed there, and get closer to it
@@ -99,6 +101,7 @@ enum ScenarioActionType
 	SCENARIO_ACTION_AUTOGARRISON,			///< autogarrison <slot> <selector>; the auto garrison key, as MSG_DO_AUTO_GARRISON
 	SCENARIO_ACTION_AUTOREPAIR,				///< autorepair <slot> <selector>; the auto repair key, as MSG_DO_AUTO_REPAIR
 	SCENARIO_ACTION_REACHPROOF,				///< reachproof <slot> <selector> <targetSlot> <probe> [samples]; every matching defence's reach overlay against the logic, the probe stood on each sample point (ReachOverlay_prove)
+	SCENARIO_ACTION_HANDOVER,					///< handover <slot> <selector> <position> <targetSlot>; the match nearest the position goes to that seat through setTeam, as a capture does, and each upgrade module's state before and after is logged
 	SCENARIO_ACTION_TOPUP							///< topup <slot> <template> <objects>; from now on, while the world holds fewer objects than that, this line's turn makes one on the road from the seat's start to the map's centre and attack-moves it there
 };
 
@@ -134,7 +137,7 @@ struct ScenarioAction
 	Int atStart;									///< the start position at is measured from, SCENARIO_NO_START for none
 	Int count;										///< how many to spawn; for tally, how many should be standing, -1 for no opinion
 	Real spacing;									///< how far apart to spawn them, in world units
-	Real radius;									///< how close to the target counts as arrived
+	Real radius;									///< how close to the target counts as arrived; for tally, how far from their middle they may stand
 	Int targetSlot;								///< whose units to attack
 	AsciiString targetSelector;		///< which of them
 	AsciiString name;							///< shiftpower's special power, shiftupgrade's upgrade, weaponat's weapon slot

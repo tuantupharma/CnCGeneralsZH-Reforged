@@ -170,7 +170,9 @@ NEW_CONTROLS = [
     (LABEL,  "LabelFrameRateLimit",    "GUI:FrameRateLimit"),
     (COMBO,  "ComboBoxFrameRateLimit", None),
     (CHECK,  "CheckClassicGraphics",   "GUI:ClassicGraphics"),
-    (LABEL,  "LabelWaterStyle",        "GUI:WaterStyle"),
+    (CHECK,  "CheckDetailedModels",    "GUI:DetailedModels"),
+    (CHECK,  "CheckHDTextures",        "GUI:HDTextures"),
+    (LABEL,  "LabelWaterStyle",       "GUI:WaterStyle"),
     (COMBO,  "ComboBoxWaterStyle",      None),
     (LABEL,  "LabelCloudStyle",        "GUI:CloudStyle"),
     (COMBO,  "ComboBoxCloudStyle",      None),
@@ -248,7 +250,10 @@ NEW_CONTROLS = [
     (COMBO,  "ComboBoxHealthBarColors", None),
     (LABEL,  "LabelMenuTransitionSpeed", "GUI:MenuTransitionSpeed"),
     (SLIDER, "SliderMenuTransitionSpeed", None),
-    (CHECK,  "CheckTurboModeMissions", "GUI:TurboModeMissions"),
+    (LABEL,  "LabelMinimapSize",       "GUI:MinimapSize"),
+    (SLIDER, "SliderMinimapSize",      None),
+    (LABEL,  "LabelGameSpeedMissions", "GUI:GameSpeedMissions"),
+    (COMBO,  "ComboGameSpeedMissions", None),
     (CHECK,  "CheckMapLight",          "GUI:MapLight"),
     (CHECK,  "CheckTeamGlow",          "GUI:TeamGlow"),
     (CHECK,  "CheckWaterFoam",         "GUI:WaterFoam"),
@@ -284,7 +289,7 @@ READOUTS = [
     "ValueGamma", "ValueTextureResolution", "ValueParticleCap", "ValueAnisotropy",
     "ValueMusicVolume", "ValueSFXVolume", "ValueVoiceVolume", "ValueScrollSpeed",
     "ValueDragTolerance", "ValueAmbientVolume", "ValueZoomSpeed", "ValueMenuTransitionSpeed",
-    "ValueMasterVolume", "ValueGraphicsQuality",
+    "ValueMasterVolume", "ValueGraphicsQuality", "ValueMinimapSize",
 ]
 
 # Lines of small grey text under a control that say what its current choice does, written by
@@ -310,7 +315,7 @@ NOTE_COLOR = ("ENABLED:  164 170 190 255, ENABLEDBORDER:  0 0 0 255, "
 SLIDER_RANGES = [("SliderAnisotropy", 0, 16), ("SliderDragTolerance", 2, 50),
                  ("SliderAmbientVolume", 0, 100), ("SliderZoomSpeed", 25, 300),
                  ("SliderMenuTransitionSpeed", 25, 400), ("SliderMasterVolume", 0, 100),
-                 ("SliderGraphicsQuality", 0, 10)]
+                 ("SliderGraphicsQuality", 0, 10), ("SliderMinimapSize", 100, 200)]
 
 # EA's captions that do not fit the page: two popup headings written in capitals, and a check box
 # caption that ran 20 pixels past the panel's right edge once it stood in a 268 pixel column.
@@ -372,6 +377,9 @@ GROUP_LAYOUT = [
             ("check", "CheckStructureCollapse"),
             ("check", "CheckSmoothMotion"),
             ("check", "CheckHeatHaze"),
+            # beside Classic Graphics on the Graphics page if there were room
+            ("check", "CheckDetailedModels"),
+            ("check", "CheckHDTextures"),
             # the Screen column is full with the monitor and the resolution note
             setting("LabelFrameRateLimit", "ComboBoxFrameRateLimit")])]),
 
@@ -479,11 +487,10 @@ GROUP_LAYOUT = [
 
     ("PageInterface", [
         ("GUI:OptionsGroupHud", [
-            ("check", "CheckNetBox")]),
+            ("check", "CheckNetBox"),
+            setting("LabelMinimapSize", "SliderMinimapSize", "ValueMinimapSize")]),
         ("GUI:OptionsGroupMenus", [
             setting("LabelMenuTransitionSpeed", "SliderMenuTransitionSpeed", "ValueMenuTransitionSpeed")]),
-        ("GUI:OptionsGroupSpeed", [
-            ("check", "CheckTurboModeMissions")]),
         ("GUI:OptionsGroupBattlefield", [
             setting("LabelHealthBars", "ComboBoxHealthBars"),
             setting("LabelHealthBarColors", "ComboBoxHealthBarColors"),
@@ -491,6 +498,10 @@ GROUP_LAYOUT = [
             ("check", "CheckOrderLines"),
             ("check", "CheckAircraftAltitudeLine"),
             ("check", "CheckEmptyBuildingPips")]),
+        # after the battlefield: a combo row is taller than the box it replaced, and the first column
+        # ran past the page with it there
+        ("GUI:OptionsGroupSpeed", [
+            setting("LabelGameSpeedMissions", "ComboGameSpeedMissions")]),
         ("GUI:OptionsGroupLanguage", [
             setting("LabelLanguage", "ComboBoxLanguage")]),
         ("GUI:OptionsGroupReplays", [
@@ -638,7 +649,7 @@ def make_note(label_template, name):
 def setting_of(name):
     """The setting a control belongs to, which is its name without the kind in front.  A label and
     the combo box under it are two controls for one setting and share one tooltip string."""
-    for prefix in ("ComboBox", "Slider", "Check", "Label"):
+    for prefix in ("ComboBox", "Combo", "Slider", "Check", "Label"):
         if name.startswith(prefix):
             return name[len(prefix):]
     return name

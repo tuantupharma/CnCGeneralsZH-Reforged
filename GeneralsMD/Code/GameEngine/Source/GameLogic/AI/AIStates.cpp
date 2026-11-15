@@ -70,6 +70,7 @@
 #include "GameLogic/Module/ContainModule.h"
 #include "GameLogic/Module/JetAIUpdate.h"
 #include "GameLogic/Module/PhysicsUpdate.h"
+#include "GameLogic/Module/SpawnBehavior.h"
 #include "GameLogic/Module/StealthUpdate.h"
 
 #ifdef _INTERNAL
@@ -267,6 +268,8 @@ void AttackStateMachine::loadPostProcess( void )
 
 //----------------------------------------------------------------------------------------------------------
 static Bool inWeaponRangeObject(State *thisState, void* userData);
+static Bool attackOutOfRangeObject(State *thisState, void* userData);
+static Bool attackOutOfRangePosition(State *thisState, void* userData);
 
 //----------------------------------------------------------------------------------------------------------
 /**
@@ -292,7 +295,7 @@ AttackStateMachine::AttackStateMachine( Object *obj, AIAttackState* att, AsciiSt
 	// we want to use the CONTINUE mode (not NEW) since we already have acquired the target.
 	static const StateConditionInfo objectConditionsNormal[] =
 	{
-		StateConditionInfo(outOfWeaponRangeObject, AttackStateMachine::CHASE_TARGET, NULL),
+		StateConditionInfo(attackOutOfRangeObject, AttackStateMachine::CHASE_TARGET, NULL),
 		StateConditionInfo(wantToSquishTarget, AttackStateMachine::CHASE_TARGET, NULL),
 		StateConditionInfo(cannotPossiblyAttackObject, EXIT_MACHINE_WITH_FAILURE, (void*)ATTACK_CONTINUED_TARGET),
 		StateConditionInfo(NULL, NULL, NULL)	// keep last
@@ -301,7 +304,7 @@ AttackStateMachine::AttackStateMachine( Object *obj, AIAttackState* att, AsciiSt
 	// we want to use the CONTINUE mode (not NEW) since we already have acquired the target.
 	static const StateConditionInfo objectConditionsForced[] =
 	{
-		StateConditionInfo(outOfWeaponRangeObject, AttackStateMachine::CHASE_TARGET, NULL),
+		StateConditionInfo(attackOutOfRangeObject, AttackStateMachine::CHASE_TARGET, NULL),
 		StateConditionInfo(cannotPossiblyAttackObject, EXIT_MACHINE_WITH_FAILURE, (void*)ATTACK_CONTINUED_TARGET_FORCED),
 		StateConditionInfo(wantToSquishTarget, AttackStateMachine::CHASE_TARGET, NULL),
 		StateConditionInfo(NULL, NULL, NULL)	// keep last
@@ -312,7 +315,7 @@ AttackStateMachine::AttackStateMachine( Object *obj, AIAttackState* att, AsciiSt
 	static const StateConditionInfo positionConditions[] =
 	{
 		StateConditionInfo(passengerMayNotFire, EXIT_MACHINE_WITH_FAILURE, NULL),
-		StateConditionInfo(outOfWeaponRangePosition, AttackStateMachine::CHASE_TARGET, NULL),
+		StateConditionInfo(attackOutOfRangePosition, AttackStateMachine::CHASE_TARGET, NULL),
 		StateConditionInfo(NULL, NULL, NULL)	// keep last
 	};
 
@@ -552,7 +555,7 @@ StateReturnType AIRappelState::onEnter()
 		obj->setLayer(layerAtDest);
 
 	AIUpdateInterface *ai = obj->getAI();
-	Real MAX_RAPPEL_RATE = fabs(TheGlobalData->m_gravity) * LOGICFRAMES_PER_SECOND * 2.5f;
+	Real MAX_RAPPEL_RATE = fabs(TheGlobalData->m_gravity) * LOGICFRAMES_PER_GAME_SECOND * 2.5f;
 	m_rappelRate = -min(ai->getDesiredSpeed(), MAX_RAPPEL_RATE);
 
 	return STATE_CONTINUE;
@@ -985,7 +988,7 @@ StateReturnType AIStateMachine::setTemporaryState( StateID newStateID, Int frame
 			m_temporaryState = NULL;
 			return ret;
 		}
-		enum {FRAME_COUNT_MAX = 60*LOGICFRAMES_PER_SECOND};
+		const Int FRAME_COUNT_MAX = 60*LOGICFRAMES_PER_GAME_SECOND;
 		// If you need to up this check, ok, but 1 minute seems overly long for a temporary state override.  jba.
 		DEBUG_ASSERTCRASH(frameLimitCoount<=FRAME_COUNT_MAX, ("Unusually long time to set temporary state."));
 		if (frameLimitCoount>FRAME_COUNT_MAX) {
@@ -1268,6 +1271,47 @@ Bool outOfWeaponRangePosition( State *thisState, void* userData )
 	return false;
 }
 
+//----------------------------------------------------------------------------------------------------------
+/**
+ * A jet on an attack at something on the ground, which AIAttackAimAtTargetState::computeAttackRunGoal flies.
+ * It ends the approach the moment the target comes into reach rather than flying on to the spot halfway
+ * between its reach and its minimum range that the attack path picks: the run fires from the reach and
+ * turns away at the break-off distance, and starting it at that halfway spot put a Raptor's last missile
+ * out a hundred units past where it should have turned.
+ */
+static Bool isJetAttackingGround( const Object *source, const Object *victim )
+{
+	const AIUpdateInterface *ai = source->getAI();
+	const Locomotor *loco = ai ? ai->getCurLocomotor() : NULL;
+	return loco != NULL && loco->isJet(source) && source->isAboveTerrain() && !(victim && victim->isAirborneTarget());
+}
+
+//----------------------------------------------------------------------------------------------------------
+/**
+ * A jet that has just put its last round into something on the ground and is still in the aim state: it
+ * is flying its break-off (computeAttackRunGoal), and the aim state ends the attack once it is clear. Its
+ * empty racks would otherwise end the attack on the frame of that round, before the break-off began:
+ * AIAttackState::update leaves at once on an empty weapon set, an object attack fails cannotPossiblyAttackObject
+ * since an empty weapon estimates no damage, and turning away takes the target out of range.
+ */
+static Bool isEmptyJetBreakingOff( const Object *source, const Object *victim, StateID attackState )
+{
+	return attackState == AttackStateMachine::AIM_AT_TARGET && source->isOutOfAmmo() && isJetAttackingGround(source, victim);
+}
+
+/// out of range, for the attack machine: a jet flying its break-off turns out of range on purpose
+static Bool attackOutOfRangeObject( State *thisState, void* userData )
+{
+	return !isEmptyJetBreakingOff(thisState->getMachineOwner(), thisState->getMachineGoalObject(), thisState->getID()) &&
+		outOfWeaponRangeObject(thisState, userData);
+}
+
+static Bool attackOutOfRangePosition( State *thisState, void* userData )
+{
+	return !isEmptyJetBreakingOff(thisState->getMachineOwner(), NULL, thisState->getID()) &&
+		outOfWeaponRangePosition(thisState, userData);
+}
+
 /**
  * Return true if the machine's owner's cannot attack in any way
  */
@@ -1277,7 +1321,7 @@ static Bool cannotPossiblyAttackObject( State *thisState, void* userData )
 	Object *obj = thisState->getMachineOwner();
 	Object *victim = thisState->getMachineGoalObject();
 
-	if (obj && victim)
+	if (obj && victim && !isEmptyJetBreakingOff(obj, victim, thisState->getID()))
 	{
 		if( !obj->isAbleToAttack() )
 		{
@@ -1298,7 +1342,7 @@ static Bool cannotPossiblyAttackObject( State *thisState, void* userData )
 //----------------------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------------------
 
-const UnsignedInt IDLE_COUNTDOWN_DELAY = (LOGICFRAMES_PER_SECOND * 2);
+#define IDLE_COUNTDOWN_DELAY ((UnsignedInt)((LOGICFRAMES_PER_GAME_SECOND * 2)))
 
 //----------------------------------------------------------------------------------------------
 AIIdleState::AIIdleState( StateMachine *machine, AIIdleState::AIIdleTargetingType shouldLookForTargets ) : 
@@ -1861,7 +1905,7 @@ StateReturnType AIInternalMoveToState::update()
 		forceRecompute = true;
 	}
 	Bool blocked=false;
-	if (ai->isBlockedAndStuck() || ai->getNumFramesBlocked()>2*LOGICFRAMES_PER_SECOND) {
+	if (ai->isBlockedAndStuck() || ai->getNumFramesBlocked()>2*LOGICFRAMES_PER_GAME_SECOND) {
 		forceRecompute = true;
 		blocked = true;
 		m_blockedRepathTimestamp = TheGameLogic->getFrame();
@@ -1888,7 +1932,7 @@ StateReturnType AIInternalMoveToState::update()
 			obj->clearModelConditionState( MODELCONDITION_RAPPELLING );
 		}
 	}
-	if (ai->getNumFramesBlocked()>LOGICFRAMES_PER_SECOND/4) 
+	if (ai->getNumFramesBlocked()>LOGICFRAMES_PER_GAME_SECOND/4) 
 	{
 		obj->clearModelConditionState( MODELCONDITION_MOVING );
 	}	
@@ -2757,12 +2801,11 @@ StateReturnType AIAttackApproachTargetState::updateInternal()
 		ai->setCurrentVictim(NULL);
 		return STATE_FAILURE;
 	}
-	m_stopIfInRange = !ai->isAttackPath();
-
 	StateReturnType code = STATE_FAILURE;
  	Object* source = getMachineOwner();
 	Weapon* weapon = source->getCurrentWeapon();
 	Object *victim = getMachineGoalObject();
+	m_stopIfInRange = !ai->isAttackPath() || isJetAttackingGround(source, victim);
 	if (victim) 
 	{ 
  		if (source->getControllingPlayer()->getPlayerType() == PLAYER_COMPUTER) 
@@ -3637,6 +3680,16 @@ AIAttackMoveToState::~AIAttackMoveToState()
 	m_attackMoveMachine->deleteInstance();
 }
 
+//----------------------------------------------------------------------------------------------------------
+/** For the mood searches run ahead (LOGIC-PARALLEL.md, P2): a temporary state runs instead of the
+	* attack move, and an attack move busy with a fight does not scan. */
+Bool AIStateMachine::attackMoveScansThisFrame( UnsignedInt now )
+{
+	if (m_temporaryState != NULL || getCurrentStateID() != AI_ATTACK_MOVE_TO)
+		return FALSE;
+	return static_cast<const AIAttackMoveToState *>(internalGetState( AI_ATTACK_MOVE_TO ))->scansThisFrame( now );
+}
+
 // ------------------------------------------------------------------------------------------------
 /** CRC */
 // ------------------------------------------------------------------------------------------------
@@ -4234,7 +4287,7 @@ StateReturnType AIAttackMoveToState::update()
 		ret = STATE_CONTINUE;
 		m_retryCount--;
 		// Sleep 3 seconds.  We can attack during these frames, just not move.
-		m_frameToSleepUntil = TheGameLogic->getFrame() + 3*LOGICFRAMES_PER_SECOND;
+		m_frameToSleepUntil = TheGameLogic->getFrame() + 3*LOGICFRAMES_PER_GAME_SECOND;
 	}
 	return ret;
 }
@@ -5664,6 +5717,13 @@ Coord3D AIAttackAimAtTargetState::computeAttackRunGoal( Object *source, const We
 	// A clip already started is finished first, as EA's jets did: a break-off between two rounds turned
 	// the nose out of the cone before the next, and a Stealth Fighter lining up late on a moving Scorpion
 	// put one missile of two out a pass. An unlimited clip still breaks off by distance.
+	// A jet whose racks are empty until it lands (the Raptor, the MiG, the Aurora, the Stealth Fighter)
+	// spends its clip on the frame of its last round, and that used to end the attack there and then:
+	// the break-off never happened, and the flight home went on over the target or turned across it.
+	// It now turns away the moment the last round is gone, wherever that was, and holds the turn until
+	// the target is behind it and the run-out distance away; AIAttackState::update keeps the attack
+	// alive for that.
+	const Bool racksEmpty = source->isOutOfAmmo();
 	const Bool clipSpent = weapon->getClipSize() == 0 || weapon->getRemainingAmmo() == 0;
 	const Real distSqr = dx*dx + dy*dy;
 	const Real along = dx*dir->x + dy*dir->y;
@@ -5672,14 +5732,14 @@ Coord3D AIAttackAimAtTargetState::computeAttackRunGoal( Object *source, const We
 	Real reach = weapon->getAttackRange(source) + source->getGeometryInfo().getBoundingSphereRadius();
 	if (victim)
 		reach += victim->getGeometryInfo().getBoundingSphereRadius();
-	const Bool breaksOff = !m_isRunningOut && clipSpent && fabs(relAngle) < aimDelta && breakOffDist < reach &&
-												 distSqr < sqr(breakOffDist);
+	const Bool breaksOff = !m_isRunningOut && (racksEmpty ? along > 0.0f :
+												 clipSpent && fabs(relAngle) < aimDelta && breakOffDist < reach && distSqr < sqr(breakOffDist));
 
 	if (breaksOff)
 		m_isRunningOut = TRUE;
 	else if (m_isRunningOut)
-		m_isRunningOut = distSqr < sqr(runOutDist);
-	else if (fabs(relAngle) >= aimDelta)
+		m_isRunningOut = distSqr < sqr(runOutDist) || (racksEmpty && along > 0.0f);
+	else if (!racksEmpty && fabs(relAngle) >= aimDelta)
 		m_isRunningOut = AIAttackAim_needsRunOut(along - entryDist, dir->x*dy - dir->y*dx, turnRadius,
 																						 Cos(aimDelta), minRange);
 
@@ -5695,10 +5755,20 @@ Coord3D AIAttackAimAtTargetState::computeAttackRunGoal( Object *source, const We
 		return targetPos;
 
 	// still facing the target: turn away from it, to the side it is not on; once it is behind, hold the
-	// heading until there is room to come back round
+	// heading until there is room to come back round. With the racks empty the side is the one whose turn,
+	// flown from the bank the jet is already in, passes the target wider (Locomotor_jetBreakOffSide), and
+	// the goal is put well round on it so the turn is flown hard that way.
 	Coord3D goal = *pos;
 	const Real dist = sqrt(distSqr);
-	if (along > 0.0f && dist > 0.0f)
+	if (along > 0.0f && dist > 0.0f && racksEmpty)
+	{
+		const Real side = loco->calcJetBreakOffSide(source, along, dir->x*dy - dir->y*dx);
+		const Real COS_BREAK = -0.5f;					// 120 degrees round from the nose
+		const Real SIN_BREAK = 0.8660254f;
+		goal.x += (dir->x*COS_BREAK - side*dir->y*SIN_BREAK) * runOutDist;
+		goal.y += (dir->y*COS_BREAK + side*dir->x*SIN_BREAK) * runOutDist;
+	}
+	else if (along > 0.0f && dist > 0.0f)
 	{
 		goal.x -= dx / dist * runOutDist;
 		goal.y -= dy / dist * runOutDist;
@@ -5831,6 +5901,15 @@ StateReturnType AIAttackAimAtTargetState::update()
 		{
 			const Coord3D &targetPos = m_isAttackingObject ? *victim->getPosition() : *getMachineGoalPosition();
 			sourceAI->setLocomotorGoalPositionExplicit(computeAttackRunGoal(source, weapon, targetPos, relAngle, aimDelta));
+			// A jet with its racks empty is only still here to fly its break-off, and the attack ends with it.
+			// Nothing is shot any more, so nothing takes it for a jet that is attacking: an Aurora stays
+			// supersonic and hard to hit while it is, and the run's end gave that up as soon as the bomb went.
+			if (source->isOutOfAmmo())
+			{
+				source->clearStatus( MAKE_OBJECT_STATUS_MASK2( OBJECT_STATUS_IS_ATTACKING, OBJECT_STATUS_IS_AIMING_WEAPON ) );
+				source->clearModelConditionState( MODELCONDITION_ATTACKING );
+				return m_isRunningOut ? STATE_CONTINUE : STATE_FAILURE;
+			}
 		}
 
 		if (fabs(relAngle) < aimDelta /*&& !m_preAttackFrames*/ )
@@ -6217,7 +6296,8 @@ StateReturnType AIWaitState::update()
 AIAttackState::AIAttackState( StateMachine *machine, Bool follow, Bool attackingObject, Bool forceAttacking, AttackExitConditionsInterface* attackParameters) : 
 	State( machine , "AIAttackState"), 
 	m_attackMachine(NULL),
-	m_attackParameters(attackParameters), 
+	m_victimNexusID(INVALID_ID),
+	m_attackParameters(attackParameters),
 	m_lockedWeaponOnEnter(NULL), 
 	m_follow(follow),
 	m_isAttackingObject(attackingObject),
@@ -6261,14 +6341,17 @@ void AIAttackState::crc( Xfer *xfer )
 void AIAttackState::xfer( Xfer *xfer )
 {
   // version
-  XferVersion currentVersion = 1;
+	// 2: m_victimNexusID
+  XferVersion currentVersion = 2;
   XferVersion version = currentVersion;
   xfer->xferVersion( &version, currentVersion );
 
 	Bool hasMachine = m_attackMachine!=NULL;
-	
+
 	xfer->xferBool(&hasMachine);
 	xfer->xferCoord3D(&m_originalVictimPos);
+	if (version >= 2)
+		xfer->xferObjectID(&m_victimNexusID);
 
 	if (hasMachine && m_attackMachine==NULL)	{
 		// create new state machine for attack behavior
@@ -6344,6 +6427,50 @@ void AIAttackState::notifyNewVictimChosen(Object* victim)
 }
 
 //----------------------------------------------------------------------------------------------------------
+/** The mob nexus a victim is a member of: an Angry Mob, whose members are slaves of an
+	  invisible nexus.  A Stinger Site's soldiers and a hive's drones are slaves too, but of a building,
+	  and each of those is a target on its own. */
+static ObjectID mobNexusOf( const Object *victim )
+{
+	const SlavedUpdateInterface *slaved = victim ? victim->getSlavedUpdateInterface() : NULL;
+	if (slaved == NULL)
+		return INVALID_ID;
+	const Object *nexus = TheGameLogic->findObjectByID( slaved->getSlaverID() );
+	return (nexus != NULL && nexus->isKindOf( KINDOF_MOB_NEXUS )) ? nexus->getID() : INVALID_ID;
+}
+
+//----------------------------------------------------------------------------------------------------------
+/** An order to attack one member of an Angry Mob is an order to attack the mob.  The mob is selected
+	  and ordered as one, and the attacker that killed the one it was pointed at stood idle beside the
+	  other nine.  So the attack carries on to whichever of the victim's mob is nearest, until the nexus has nobody left, by the same means ContinueAttackRange swaps the victim
+	  inside this state.  An attack that ends for any other reason still ends. */
+Bool AIAttackState::carryOnThroughMob()
+{
+	if (!m_isAttackingObject || m_victimNexusID == INVALID_ID || m_attackMachine == NULL)
+		return FALSE;
+
+	Object *nexus = TheGameLogic->findObjectByID( m_victimNexusID );
+	SpawnBehaviorInterface *spawn = (nexus != NULL && !nexus->isEffectivelyDead()) ? nexus->getSpawnBehaviorInterface() : NULL;
+	Object *source = getMachineOwner();
+	Object *mate = spawn ? spawn->getClosestSlave( source->getPosition() ) : NULL;
+	if (mate == NULL || mate->isEffectivelyDead() || mate == source)
+		return FALSE;
+
+	AIUpdateInterface *ai = source->getAI();
+	const CommandSourceType cmdSource = ai ? ai->getLastCommandSource() : CMD_FROM_AI;
+	if (source->getAbleToAttackSpecificObject( m_isForceAttacking ? ATTACK_NEW_TARGET_FORCED : ATTACK_NEW_TARGET, mate, cmdSource ) == ATTACKRESULT_NOT_POSSIBLE)
+		return FALSE;
+
+	m_victimTeam = mate->getTeam();
+	notifyNewVictimChosen( mate );
+	if (ai)
+		ai->setCurrentVictim( mate );
+	// the sub-machine may have finished with the dead one; start it over on the new one
+	m_attackMachine->initDefaultState();
+	return TRUE;
+}
+
+//----------------------------------------------------------------------------------------------------------
 /**
  * Begin an attack on the machine's goal object.
  * To do this complex behavior, instantiate another state machine as a "sub-machine" of 
@@ -6396,6 +6523,7 @@ StateReturnType AIAttackState::onEnter()
 			return STATE_FAILURE;	// we have nothing to attack!
 		}
 		m_victimTeam = victim->getTeam();
+		m_victimNexusID = mobNexusOf( victim );
 		m_attackMachine->setGoalObject( victim );
 		m_originalVictimPos = *victim->getPosition();
 	}
@@ -6451,24 +6579,35 @@ StateReturnType AIAttackState::update()
 	
 	// if all of our weapons are out of ammo, can't attack.
 	// (this can happen for units which never auto-reload, like the Raptor)
+	// ... except to fly the break-off of the run that emptied them (isEmptyJetBreakingOff), which is all
+	// the attack has left to do, so nothing below it applies
 	if (source->isOutOfAmmo() && !source->isKindOf(KINDOF_PROJECTILE))
 	{
-		return STATE_FAILURE;
+		if (!isEmptyJetBreakingOff(source, getMachineGoalObject(), m_attackMachine->getCurrentStateID()))
+			return STATE_FAILURE;
+		return CONVERT_SLEEP_TO_CONTINUE(m_attackMachine->updateStateMachine());
 	}
 
 	if (m_isAttackingObject)
 	{
 		Object* victim = getMachineGoalObject();
 
-		if (victim == NULL || victim->isEffectivelyDead()) 	
+		if (victim == NULL || victim->isEffectivelyDead())
 		{
-			source->getAI()->notifyVictimIsDead();
-			return STATE_SUCCESS;	// my, that was easy
+			if (!carryOnThroughMob())
+			{
+				source->getAI()->notifyVictimIsDead();
+				return STATE_SUCCESS;	// my, that was easy
+			}
+			victim = getMachineGoalObject();
 		}
 
-		if (victim) 
+		if (victim)
 		{
 			source->getAI()->setCurrentVictim(victim);
+			// remembered every frame, since the victim can be swapped from inside too; once it is
+			// dead, and perhaps gone, this is the only way back to its mob
+			m_victimNexusID = mobNexusOf( victim );
 		}
 
 		if( victim->getTeam() != m_victimTeam )
@@ -6548,7 +6687,17 @@ StateReturnType AIAttackState::update()
 	 * Note the use of CONVERT_SLEEP_TO_CONTINUE; even if the sub-machine
 	 * sleeps, we still need to be called every frame.
 	 */
-	return CONVERT_SLEEP_TO_CONTINUE(m_attackMachine->updateStateMachine());
+	StateReturnType subResult = CONVERT_SLEEP_TO_CONTINUE(m_attackMachine->updateStateMachine());
+
+	// the shot that just killed the victim ends the sub-machine on this frame, before the dead-victim
+	// check above can see it; a mob member's attacker carries on to the next of the mob from here as well
+	if (subResult != STATE_CONTINUE && m_isAttackingObject)
+	{
+		Object* victim = getMachineGoalObject();
+		if ((victim == NULL || victim->isEffectivelyDead()) && carryOnThroughMob())
+			return STATE_CONTINUE;
+	}
+	return subResult;
 }
 
 //----------------------------------------------------------------------------------------------------------

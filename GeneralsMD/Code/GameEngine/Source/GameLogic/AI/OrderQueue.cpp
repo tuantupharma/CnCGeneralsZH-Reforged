@@ -31,6 +31,8 @@
 #include "GameLogic/GameLogic.h"
 #include "GameLogic/Object.h"
 #include "GameLogic/Module/AIUpdate.h"
+#include "GameLogic/Module/ContainModule.h"
+#include "GameLogic/Module/DozerAIUpdate.h"
 #include "GameLogic/Module/JetAIUpdate.h"
 #include "GameLogic/Module/SpecialPowerUpdateModule.h"
 
@@ -211,6 +213,29 @@ static Bool OrderQueue_isUsingAbility( const Object *obj )
 }
 
 //-------------------------------------------------------------------------------------------------
+/** A transport or a building emptying out.  Its passengers climb out one at a time while it stands
+	* idle, so an unload is over when the last of them is out, not when it was ordered. */
+//-------------------------------------------------------------------------------------------------
+static Bool OrderQueue_isUnloading( const Object *obj )
+{
+	const ContainModuleInterface *contain = obj->getContain();
+	if( contain == NULL )
+		return FALSE;
+
+	const ContainedItemsList *riders = contain->getContainedItemsList();
+	if( riders == NULL )
+		return FALSE;
+
+	for( ContainedItemsList::const_iterator it = riders->begin(); it != riders->end(); ++it )
+	{
+		const AIUpdateInterface *ai = (*it)->getAIUpdateInterface();
+		if( ai != NULL && ( ai->getCurrentStateID() == AI_EXIT || ai->getCurrentStateID() == AI_EXIT_INSTANTLY ) )
+			return TRUE;
+	}
+	return FALSE;
+}
+
+//-------------------------------------------------------------------------------------------------
 /** Is this unit busy with an order the player gave?  A fight it picked for itself while standing
 	* about is not one: the group is done, and the next order takes it off that fight.  Nor is a
 	* guard, which never ends.  A fight an attack move stopped for is the order itself, though it
@@ -219,7 +244,14 @@ static Bool OrderQueue_isUsingAbility( const Object *obj )
 //-------------------------------------------------------------------------------------------------
 static Bool OrderQueue_isWorking( const Object *obj, const AIUpdateInterface *ai )
 {
-	if( OrderQueue_isUsingAbility( obj ) )
+	if( OrderQueue_isUsingAbility( obj ) || OrderQueue_isUnloading( obj ) )
+		return TRUE;
+
+	// A builder on a site stands idle in its AI while it hammers, and drives there on orders of its
+	// own: the job is its dozer task.  Read as idle, the next step in its list pulled it off a
+	// half-built structure.  The query only reads the task table, so the cast changes nothing.
+	const DozerAIInterface *dozer = ai->getDozerAIInterface();
+	if( dozer != NULL && const_cast<DozerAIInterface *>( dozer )->isAnyTaskPending() )
 		return TRUE;
 
 	if( ai->isIdle() )
@@ -268,6 +300,23 @@ static Bool OrderQueue_isWalking( const AIUpdateInterface *ai )
 }
 
 //-------------------------------------------------------------------------------------------------
+/** Is another builder, one not in this chain, at work on this site?  An idle builder picks up a plan
+	* nobody is building (DozerPrimaryIdleState), the one queued for a busy builder included. */
+//-------------------------------------------------------------------------------------------------
+static Bool OrderQueue_isBuiltByAnother( const Object *site, const OrderChain& chain )
+{
+	Object *builder = TheGameLogic->findObjectByID( site->getBuilderID() );
+	if( builder == NULL || builder->isEffectivelyDead()
+			|| std::binary_search( chain.m_members.begin(), chain.m_members.end(), builder->getID() ) )
+		return FALSE;
+
+	AIUpdateInterface *ai = builder->getAIUpdateInterface();
+	DozerAIInterface *dozer = ai ? ai->getDozerAIInterface() : NULL;
+	return dozer != NULL && dozer->isTaskPending( DOZER_TASK_BUILD )
+		&& dozer->getTaskTarget( DOZER_TASK_BUILD ) == site->getID();
+}
+
+//-------------------------------------------------------------------------------------------------
 /** A special power that names the object firing it - a superweapon off the shortcut bar - goes to
 	* that object whatever is selected, so it is no order to the selection at all. */
 //-------------------------------------------------------------------------------------------------
@@ -297,6 +346,14 @@ static void OrderQueue_log( const char *what, const OrderChain& chain, const Pla
 }
 
 //-------------------------------------------------------------------------------------------------
+static Int s_dispatchDepth = 0;		// logic thread only, like everything in here
+
+Bool OrderQueue_isDispatching( void )
+{
+	return s_dispatchDepth > 0;
+}
+
+//-------------------------------------------------------------------------------------------------
 /** Hand an order to the units, as if the player had selected exactly them and given it. */
 //-------------------------------------------------------------------------------------------------
 static void OrderQueue_dispatch( GameMessage *msg, const std::vector<ObjectID>& members )
@@ -310,7 +367,9 @@ static void OrderQueue_dispatch( GameMessage *msg, const std::vector<ObjectID>& 
 	}
 
 	// the dispatcher destroys the group when it is done with it
+	++s_dispatchDepth;
 	TheGameLogic->logicMessageDispatcher( msg, group );
+	--s_dispatchDepth;
 }
 
 //-------------------------------------------------------------------------------------------------
@@ -387,6 +446,9 @@ Bool OrderQueue::isOrder( GameMessage::Type type )
 		case GameMessage::MSG_GET_REPAIRED:
 		case GameMessage::MSG_GET_HEALED:
 		case GameMessage::MSG_DO_REPAIR:
+		case GameMessage::MSG_RESUME_CONSTRUCTION:
+		case GameMessage::MSG_EVACUATE:
+		case GameMessage::MSG_EXIT:
 		case GameMessage::MSG_DO_WEAPON_AT_OBJECT:
 		case GameMessage::MSG_DO_WEAPON_AT_LOCATION:
 		case GameMessage::MSG_COMBATDROP_AT_OBJECT:
@@ -425,6 +487,9 @@ Bool OrderQueue::isQueueable( GameMessage::Type type )
 		case GameMessage::MSG_GET_REPAIRED:
 		case GameMessage::MSG_GET_HEALED:
 		case GameMessage::MSG_DO_REPAIR:
+		case GameMessage::MSG_RESUME_CONSTRUCTION:
+		case GameMessage::MSG_EVACUATE:
+		case GameMessage::MSG_EXIT:
 		case GameMessage::MSG_DO_WEAPON_AT_OBJECT:
 		case GameMessage::MSG_DO_WEAPON_AT_LOCATION:
 		case GameMessage::MSG_COMBATDROP_AT_OBJECT:
@@ -471,8 +536,11 @@ const OrderChain *OrderQueue::findChain( ObjectID id ) const
 //-------------------------------------------------------------------------------------------------
 Bool OrderQueue::takeMessage( GameMessage *msg, AIGroup *selected, Player *owner )
 {
-	const Int mode = m_nextOrderMode;
-	m_nextOrderMode = ORDER_QUEUE_NONE;
+	// a placement names no unit, so the dispatcher picks its builder first and asks for the mark itself
+	if( msg->getType() == GameMessage::MSG_DOZER_CONSTRUCT || msg->getType() == GameMessage::MSG_DOZER_CONSTRUCT_LINE )
+		return FALSE;
+
+	const Int mode = takeNextOrderMode();
 
 	// buying one is no order to the units, so without shift it leaves their list alone
 	if( msg->getType() == GameMessage::MSG_QUEUE_UPGRADE )
@@ -668,6 +736,26 @@ Bool OrderQueue::queueUpgrade( GameMessage *msg, AIGroup *selected, Player *owne
 }
 
 //-------------------------------------------------------------------------------------------------
+/** Shift on a placement: the plan is already on the ground and paid for, and the builder's list gets
+	* a step to go and put it up, the same order as a right click on an unfinished structure.  A builder
+	* with nothing to do goes at once. */
+//-------------------------------------------------------------------------------------------------
+void OrderQueue::queueConstruction( const Object *site, Object *builder, Player *owner )
+{
+	GameMessage *msg = newInstance( GameMessage )( GameMessage::MSG_RESUME_CONSTRUCTION );
+	msg->friend_setPlayerIndex( owner->getPlayerIndex() );
+	msg->appendObjectIDArgument( site->getID() );
+
+	AIGroup *group = TheAI->createGroup();
+	group->add( builder );
+
+	m_nextOrderMode = ORDER_QUEUE_APPEND;
+	if( !takeMessage( msg, group, owner ) )
+		TheAI->destroyGroup( group );
+	msg->deleteInstance();
+}
+
+//-------------------------------------------------------------------------------------------------
 /** A new chain whose first order goes out now. */
 //-------------------------------------------------------------------------------------------------
 void OrderQueue::startChain( GameMessage *msg, const std::vector<ObjectID>& members, Player *owner )
@@ -854,6 +942,12 @@ Bool OrderQueue::advance( OrderChain& chain, Player *owner )
 			// the list was copied when the chain split, and the upgrade belongs to whichever half has the unit
 			if( next.getType() == GameMessage::MSG_QUEUE_UPGRADE
 					&& !std::binary_search( chain.m_members.begin(), chain.m_members.end(), targetID ) )
+				continue;
+
+			// a site finished since, or one another builder has taken up while this one was busy, is
+			// passed over rather than pulled out of that builder's hands
+			if( next.getType() == GameMessage::MSG_RESUME_CONSTRUCTION
+					&& ( !target->testStatus( OBJECT_STATUS_UNDER_CONSTRUCTION ) || OrderQueue_isBuiltByAnother( target, chain ) ) )
 				continue;
 		}
 

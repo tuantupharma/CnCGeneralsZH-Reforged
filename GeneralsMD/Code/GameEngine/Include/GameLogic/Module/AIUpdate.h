@@ -208,12 +208,12 @@ class AIUpdateModuleData : public UpdateModuleData
 public:
 	LocomotorTemplateMap	m_locomotorTemplates;					///< locomotors for object
 	const TurretAIData*		m_turretData[MAX_TURRETS];
-	UnsignedInt						m_moodAttackCheckRate;				///< how frequently we should recheck for enemies due to moods, when idle
+	DurationFrames						m_moodAttackCheckRate;				///< how frequently we should recheck for enemies due to moods, when idle
   Bool        m_forbidPlayerCommands;     ///< Should isAllowedToRespondToAiCommands() filter out commands from the player, thus making it ai-controllable only?
   Bool        m_turretsLinked;						///< Turrets are linked together and attack together.
 	UnsignedInt						m_autoAcquireEnemiesWhenIdle;
 #ifdef ALLOW_SURRENDER
- 	UnsignedInt						m_surrenderDuration;					///< when we surrender, how long we stay surrendered.
+ 	DurationFrames						m_surrenderDuration;					///< when we surrender, how long we stay surrendered.
 #endif
 
 	
@@ -387,7 +387,8 @@ public:
 	virtual Object* construct( const ThingTemplate *what, 
 														 const Coord3D *pos, Real angle, 
 														 Player *owningPlayer,
-														 Bool isRebuild ) { return NULL; }///< construct a building
+														 Bool isRebuild,
+														 Bool takeJob = TRUE ) { return NULL; }///< construct a building; takeJob FALSE only lays the plan
 
 
 	void ignoreObstacle( const Object *obj );			///< tell the pathfinder to ignore the given object as an obstacle
@@ -650,6 +651,35 @@ public:
 
 	Object *getNextMoodTarget( Bool calledByAI, Bool calledDuringIdle, Bool allowOutOfWeaponRangeTargets = FALSE, Bool requireWithinWeaponRange = FALSE );
 	UnsignedInt getNextMoodCheckTime() const { return m_nextMoodCheckTime; }
+
+	/** The search a mood check asks of findClosestEnemy (LOGIC-PARALLEL.md, P2): worked out once, so
+		the frame's idle checks and attack move scans can be searched ahead together and each unit can
+		tell its own. */
+	struct MoodScan
+	{
+		Real												range;
+		UnsignedInt									flags;
+		const AttackPriorityInfo		*info;
+		Int													arc;				///< 0 none, 1 PartitionFilterForwardArc, 2 PartitionFilterElevatedReach
+		Real												arcRange;		///< the arc filter's own range: side range, or reach on flat ground
+		Bool operator==( const MoodScan &o ) const
+		{ return range == o.range && flags == o.flags && info == o.info && arc == o.arc && arcRange == o.arcRange; }
+	};
+	/** getNextMoodTarget's search after its clock, worked out with no side effect. FALSE when there is
+		no search: *answer is then what getNextMoodTarget returns instead (NULL, or a passive unit's last
+		attacker). */
+	Bool describeMoodScan( Bool calledByAI, Bool allowOutOfWeaponRangeTargets, Bool requireWithinWeaponRange,
+												 MoodScan &scan, Object **answer );
+	/** Whether getNextMoodTarget( TRUE, calledDuringIdle ) would get as far as its search, asking
+		nothing that writes: TRUE for an idle check by the clock, FALSE for an attack move's scan. */
+	Bool wouldSearchForMoodTarget( Bool calledDuringIdle );
+	/** Whether this unit's attack move looks for a target in its update this frame. */
+	Bool attackMoveScansThisFrame( UnsignedInt now );
+	/** findClosestEnemy for scan, with its arc filter; job is NULL on the logic thread. */
+	Object *runMoodScan( const MoodScan &scan, AI::ScanJob *job );
+	/** This frame's place in the mood searches run ahead, or a frame that is not now. */
+	UnsignedInt		m_moodBatchFrame;
+	Int						m_moodBatchIndex;
 
 	// This function will return a combination of MoodMatrixParameter flags.
 	UnsignedInt getMoodMatrixValue( void ) const;
@@ -921,6 +951,31 @@ private:
 	Bool				m_crowdCapValid;						///< FALSE until there is a held cap to ramp up from.
 	Real				m_crowdAim;									///< low-passeddirection the steering point is taken in, radians.
 	Bool				m_crowdAimValid;						///< FALSEuntil the filter has something to start from.
+	/* What crowdSteer's neighbour scan saw, kept for the frames between scans.  The scan runs every
+		 CROWD_SCAN_FRAMES frames, staggered by object id, and on the first crowd frame of every route
+		 and after every order; the rules read this copy in between. */
+	enum { CROWD_SCAN_NEAR_MAX = 16 };
+	struct CrowdScan
+	{
+		Bool			valid;
+		Real			sep;
+		ObjectID	blocker;
+		ObjectID	joiner;
+		Real			joinerSide;
+		Real			joinerR;
+		Bool			giveWay;
+		Real			giveWayLat;
+		Int				rank;
+		Bool			touching;
+		Bool			crossing;
+		Int				nearCount;
+		Real			nearLat[CROWD_SCAN_NEAR_MAX];
+		Real			nearR[CROWD_SCAN_NEAR_MAX];
+		Bool			packAny;
+		Real			packLo;
+		Real			packHi;
+	};
+	CrowdScan		m_crowdScan;
 	/* Being stuck, and getting out of it.  None of this is part of the crowd model: a unit that has
 			stopped without a collision to show for it is not a crowd problem, it is the problem, and
 			until this was pulled out of the crowd model it was only ever asked about units that happened
@@ -1048,6 +1103,13 @@ extern Int AIUpdate_stuckRung( Int noProgressFrames, Int stageDone );
 		several body lengths and a net of almost nothing.  The body-size floor is what keeps a unit
 		that is simply slow, or stopped, out of it: those are the other test's business. */
 extern Bool AIUpdate_isDithering( Real net, Real travelled, Real bodySize );
+
+/** Does crowdSteer ask who is round it this frame, or read what it saw last time?
+
+		`haveScan` is FALSE on the first crowd frame of a route and after any order, and then the answer
+		is always yes: the stagger never delays the first look after a command.  Otherwise once every
+		few frames, offset by object id so a group spreads its scans over the frames. */
+extern Bool AIUpdate_crowdScanDue( Bool haveScan, UnsignedInt frame, UnsignedInt id );
 
 //------------------------------------------------------------------------------------------------------------
 // Inlines

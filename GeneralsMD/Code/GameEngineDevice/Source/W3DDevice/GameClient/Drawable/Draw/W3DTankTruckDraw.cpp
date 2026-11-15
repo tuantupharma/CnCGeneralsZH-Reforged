@@ -49,13 +49,14 @@
 #include "W3DDevice/GameClient/W3DGameClient.h"
 #include "W3DDevice/GameClient/Module/W3DTankTruckDraw.h"
 #include "WW3D2/matinfo.h"
+#include "WW3D2/hlod.h"
 
 //#define SHOW_TANK_DEBRIS
 //-------------------------------------------------------------------------------------------------
 W3DTankTruckDrawModuleData::W3DTankTruckDrawModuleData():
 	m_treadDebrisNameLeft("TrackDebrisDirtLeft"),
 	m_treadDebrisNameRight("TrackDebrisDirtRight"),
-	m_treadAnimationRate(0.0f),
+	m_treadAnimationRate(VelocityPerFrame::fromRaw(0.0f)),
 	m_treadPivotSpeedFraction(0.6f),
 	m_treadDriveSpeedFraction(0.3f)
 {
@@ -85,10 +86,10 @@ void W3DTankTruckDrawModuleData::buildFieldParse(MultiIniFieldParse& p)
 		{ "MidLeftRearTireBone", INI::parseAsciiString, NULL, offsetof(W3DTankTruckDrawModuleData, m_midRearLeftTireBoneName) },
 		{ "MidRightRearTireBone", INI::parseAsciiString, NULL, offsetof(W3DTankTruckDrawModuleData, m_midRearRightTireBoneName) },
 		{ "TireRotationMultiplier", INI::parseReal, NULL, offsetof(W3DTankTruckDrawModuleData, m_rotationSpeedMultiplier) },
-		{ "PowerslideRotationAddition", INI::parseRetailPerFrameReal, NULL, offsetof(W3DTankTruckDrawModuleData, m_powerslideRotationAddition) },
+		{ "PowerslideRotationAddition", SPEED_FIELD( W3DTankTruckDrawModuleData, m_powerslideRotationAddition ) },
 		{ "TreadDebrisLeft", INI::parseAsciiString, NULL, offsetof(W3DTankTruckDrawModuleData, m_treadDebrisNameLeft) },
 		{ "TreadDebrisRight", INI::parseAsciiString, NULL, offsetof(W3DTankTruckDrawModuleData, m_treadDebrisNameRight) },
-		{ "TreadAnimationRate", INI::parseVelocityReal, NULL, offsetof(W3DTankTruckDrawModuleData, m_treadAnimationRate) },
+		{ "TreadAnimationRate", SPEED_FIELD( W3DTankTruckDrawModuleData, m_treadAnimationRate ) },
 		{ "TreadPivotSpeedFraction", INI::parseReal, NULL, offsetof(W3DTankTruckDrawModuleData, m_treadPivotSpeedFraction) },
 		{ "TreadDriveSpeedFraction", INI::parseReal, NULL, offsetof(W3DTankTruckDrawModuleData, m_treadDriveSpeedFraction) },
 		{ 0, 0, 0, 0 }
@@ -112,7 +113,7 @@ m_prevRenderObj(NULL)
 	m_treadDebrisLeft = NULL;
 	m_treadDebrisRight = NULL;
 
-	for (Int i=0; i<MAX_TREADS_PER_TANK; i++)
+	for (Int i=0; i<MAX_TREAD_SLOTS; i++)
 		m_treads[i].m_robj = NULL;
 
 	m_treadCount=0;
@@ -151,7 +152,7 @@ W3DTankTruckDraw::~W3DTankTruckDraw()
 {
 	tossEmitters();
 
-	for (Int i=0; i<MAX_TREADS_PER_TANK; i++)
+	for (Int i=0; i<MAX_TREAD_SLOTS; i++)
 		if (m_treads[i].m_robj)
 			REF_PTR_RELEASE(m_treads[i].m_robj);
 }
@@ -413,8 +414,12 @@ void W3DTankTruckDraw::updateTreadObjects(void)
 
 	//Make sure this object has defined a speed for tread scrolling.
 	if (getW3DTankTruckDrawModuleData() && getW3DTankTruckDrawModuleData()->m_treadAnimationRate && robj)
-	{	
-		for (Int i=0; i < robj->Get_Num_Sub_Objects() && m_treadCount < MAX_TREADS_PER_TANK; i++)
+	{
+		// four belts a level, as W3DTankDraw::updateTreadObjects keeps them
+		Int levels = robj->Class_ID() == RenderObjClass::CLASSID_HLOD ? ((HLodClass *)robj)->Get_LOD_Count() : 1;
+		levels = levels < 1 ? 1 : (levels > MAX_TREAD_LODS ? MAX_TREAD_LODS : levels);
+		const Int slots = MAX_TREADS_PER_TANK * levels;
+		for (Int i=0; i < robj->Get_Num_Sub_Objects() && m_treadCount < slots; i++)
 		{
 			RenderObjClass *subObj=robj->Get_Sub_Object(i);
 			const char *meshName;
@@ -425,7 +430,7 @@ void W3DTankTruckDraw::updateTreadObjects(void)
 			{	//check if sub-object has the correct material to do texture scrolling.
 				MaterialInfoClass *mat=subObj->Get_Material_Info();
 				if (mat)
-				{	for (Int j=0; j<mat->Vertex_Material_Count(); j++)
+				{	for (Int j=0; j<mat->Vertex_Material_Count() && m_treadCount < slots; j++)
 					{
 						VertexMaterialClass *vmaterial=mat->Peek_Vertex_Material(j);
 						LinearOffsetTextureMapperClass *mapper=(LinearOffsetTextureMapperClass *)vmaterial->Peek_Mapper();

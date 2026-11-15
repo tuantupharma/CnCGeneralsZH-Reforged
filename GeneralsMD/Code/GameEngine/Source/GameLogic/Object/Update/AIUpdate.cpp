@@ -38,6 +38,7 @@
 #include "Common/GameState.h"
 #include "Common/CRCDebug.h"
 #include "Common/GlobalData.h"
+#include "Common/JobSystem.h"
 #include "Common/Player.h"
 #include "Common/PlayerList.h"
 #include "Common/RandomValue.h"
@@ -92,9 +93,9 @@ AIUpdateModuleData::AIUpdateModuleData()
 	for (int i = 0; i < MAX_TURRETS; i++)
 		m_turretData[i] = NULL;
 	m_autoAcquireEnemiesWhenIdle = 0;
-	m_moodAttackCheckRate = LOGICFRAMES_PER_SECOND * 2;
+	m_moodAttackCheckRate.setRaw( 2000 );
 #ifdef ALLOW_SURRENDER
-	m_surrenderDuration = LOGICFRAMES_PER_SECOND * 120;
+	m_surrenderDuration.setRaw( 120000 );
 #endif
 
   m_forbidPlayerCommands = FALSE;
@@ -208,9 +209,9 @@ static void AIUpdate_traceMove( const Object *obj, const Coord3D& framePos, Bool
 		{ "Turret",											AIUpdateModuleData::parseTurret,	NULL, offsetof(AIUpdateModuleData, m_turretData[0]) },
 		{ "AltTurret",									AIUpdateModuleData::parseTurret,	NULL, offsetof(AIUpdateModuleData, m_turretData[1]) },
 		{ "AutoAcquireEnemiesWhenIdle", INI::parseBitString32, TheAutoAcquireEnemiesNames, offsetof(AIUpdateModuleData, m_autoAcquireEnemiesWhenIdle) },
-		{ "MoodAttackCheckRate",				INI::parseDurationUnsignedInt,		NULL, offsetof(AIUpdateModuleData, m_moodAttackCheckRate) },
+		{ "MoodAttackCheckRate",				SPEED_FIELD( AIUpdateModuleData, m_moodAttackCheckRate ) },
 #ifdef ALLOW_SURRENDER
-		{ "SurrenderDuration",					INI::parseDurationUnsignedInt,		NULL, offsetof(AIUpdateModuleData, m_surrenderDuration) },
+		{ "SurrenderDuration",					SPEED_FIELD( AIUpdateModuleData, m_surrenderDuration ) },
 #endif
     { "ForbidPlayerCommands",				INI::parseBool,										NULL, offsetof(AIUpdateModuleData, m_forbidPlayerCommands) },
     { "TurretsLinked",							INI::parseBool,										NULL, offsetof( AIUpdateModuleData, m_turretsLinked ) },
@@ -353,6 +354,7 @@ AIUpdateInterface::AIUpdateInterface( Thing *thing, const ModuleData* moduleData
 	m_crowdCapValid = FALSE;
 	m_crowdAim = 0.0f;
 	m_crowdAimValid = FALSE;
+	m_crowdScan.valid = FALSE;
 	m_noProgress = 0;
 	m_headOnFrames = 0;
 	m_headOnSeen = FALSE;
@@ -396,6 +398,8 @@ AIUpdateInterface::AIUpdateInterface( Thing *thing, const ModuleData* moduleData
 	m_turretSyncFlag = TURRET_INVALID;
 	m_attitude = AI_NORMAL;
 	m_nextMoodCheckTime = 0;
+	m_moodBatchFrame = 0xFFFFFFFF;
+	m_moodBatchIndex = -1;
 #ifdef ALLOW_DEMORALIZE
 	m_demoralizedFramesLeft = 0;
 #endif
@@ -658,7 +662,7 @@ void AIUpdateInterface::requestPath( Coord3D *destination, Bool isFinalGoal )
 		// jba intense debug
 		//DEBUG_LOG(("Info - RePathing very quickly %d, %d.\n", m_pathTimestamp, TheGameLogic->getFrame()));
 		if (m_path && m_isBlockedAndStuck) {
-			setIgnoreCollisionTime(2*LOGICFRAMES_PER_SECOND);
+			setIgnoreCollisionTime(2*LOGICFRAMES_PER_GAME_SECOND);
 			m_blockedFrames = 0;
 			m_isBlocked = FALSE;
 			m_isBlockedAndStuck = FALSE;
@@ -1201,7 +1205,7 @@ void AIUpdateInterface::setQueueForPathTime(Int frames)
 void AIUpdateInterface::queueForPathOrRetry()
 {
 	if (!TheAI->pathfinder()->queueForPath(getObject()->getID()))
-		setQueueForPathTime(LOGICFRAMES_PER_SECOND / 2);
+		setQueueForPathTime(LOGICFRAMES_PER_GAME_SECOND / 2);
 }
 
 //-------------------------------------------------------------------------------------------------
@@ -1368,6 +1372,16 @@ UpdateSleepTime AIUpdateInterface::update( void )
 		}
 		else
 			enterNextFreeGarrison();
+		stRet = STATE_CONTINUE;
+	}
+
+	// A group panel reinforcement (Player::sendReinforcementToSquad) that went idle with no other trip
+	// of its own still pending has reached the squad, or as near as it gets: the player re-sends it
+	// once if the squad moved off meanwhile, and otherwise it is an ordinary member from here on.
+	if (getObject()->getReinforcementSquad() >= 0 && getAIStateType() == AI_IDLE && !m_hasExitProductionRallyPoint
+			&& !m_hasTunnelTrip && !m_hasSalvageReturnPosition && !m_isSeekingGarrison)
+	{
+		getObject()->getControllingPlayer()->onReinforcementIdle( getObject() );
 		stRet = STATE_CONTINUE;
 	}
 
@@ -1650,8 +1664,8 @@ Real AIUpdateInterface::calculateMaxBlockedSpeed(Object *other) const
 
 //-------------------------------------------------------------------------------------------------
 static const Real HEAD_ON_DOT = -0.5f;					///< facing more than 120 degrees apart is driving at each other
-static const Int  HEAD_ON_PASS_FRAMES = ConvertRetailFrames(8);			///< held up head-on this long: pass through
-static const Real BUMP_RECOVERY = ConvertRetailPerFrameFactor(1.05f);	///< the bump speed limit grows by this every frame
+#define HEAD_ON_PASS_FRAMES ((Int)(ConvertRetailFrames(8)))			///< held up head-on this long: pass through
+#define BUMP_RECOVERY ((Real)(ConvertRetailPerFrameFactor(1.05f)))	///< the bump speed limit grows by this every frame
 
 Bool AIUpdateInterface::blockedBy(Object *other)
 /* Returns TRUE if we are blocked from moving by the other object.*/
@@ -1730,7 +1744,7 @@ Bool AIUpdateInterface::blockedBy(Object *other)
 	Coord3D theirDir = *other->getUnitDirectionVector2D();
 	// Dot product is our directions projected onto each other.
 	Real dotProduct = ourDir.x*theirDir.x	+ ourDir.y*theirDir.y;
-	if (getNumFramesBlocked()>LOGICFRAMES_PER_SECOND) {
+	if (getNumFramesBlocked()>LOGICFRAMES_PER_GAME_SECOND) {
 		if (dotProduct<=0.0f) return FALSE;  // we are not moving in the same direction.
 	}
 	/* The rule above is EA's way out of a head-on meeting and it never fires: doLocomotor puts
@@ -1820,42 +1834,37 @@ static const Real CROWD_AIR					= 4.0f;		///< air a body wants round it, on top 
 static const Real CROWD_SEP_STEP		= 1.5f;		///< most one retail frame of separation may move a lane
 static const Real CROWD_PASS_CLEAR	= 6.0f;		///< room a passing lane leaves beside the blocker
 static const Real CROWD_PASS_TIGHT	= 1.5f;		///< and the room it settles for rather than queue
-static const Int  CROWD_PASS_RETRY	= ConvertRetailFrames(10);			///< queued this long: ask to pass again, hold or no hold
+#define CROWD_PASS_RETRY ((Int)(ConvertRetailFrames(10)))			///< queued this long: ask to pass again, hold or no hold
 static const Real CROWD_TAPER_DIST	= PATHFIND_CELL_SIZE_F * 8.0f;	///< the band closes over the last of the route
 static const Real CROWD_PLAN_END_SLACK	= PATHFIND_CELL_SIZE_F * 3.0f;	///< how far the move state may move a planned route's end and it still be the same order
-static const Int  CROWD_BRAKE_FRAMES	= ConvertRetailFrames(8);		///< frames of closing time a brake is allowed to read
-/* EA's treads and wheels stop in a frame, so a brake aimed at touching the blocker touches it, and every
-	 touch is a blocked frame and a shove. This much air is left instead. With it, four seeds each of
-	 chokeprobe, bridgecross and towncross (and the slower release below) spent fewer blocked and wedged
-	 unit-frames than the eased vehicle drive did, and still arrived sooner. */
-static const Real CROWD_BRAKE_AIR		= 12.0f;
-static const Int  CROWD_FAN_FRAMES	= ConvertRetailFrames(12);			///< held up this long before spreading out
-static const Real CROWD_FAN_RATE		= ConvertRetailPerFrameRate(0.8f);		///< and then sideways at this much a frame
-static const Real CROWD_LANE_RATE_MIN	= ConvertRetailPerFrameRate(0.4f);	///< the slowest a lane change is taken, per frame
+#define CROWD_BRAKE_FRAMES ((Int)(ConvertRetailFrames(8)))		///< frames of closing time a brake is allowed to read
+#define CROWD_FAN_FRAMES ((Int)(ConvertRetailFrames(12)))			///< held up this long before spreading out
+#define CROWD_FAN_RATE ((Real)(ConvertRetailPerFrameRate(0.8f)))		///< and then sideways at this much a frame
+#define CROWD_LANE_RATE_MIN ((Real)(ConvertRetailPerFrameRate(0.4f)))	///< the slowest a lane change is taken, per frame
 // the filters below are lerp fractions per frame, written for 30 Hz
-static const Real CROWD_SEP_FILTER	= 1.0f - ConvertRetailPerFrameFactor(1.0f - 0.13f);	///< how much of a frame's sideways push is believed (~4/sec)
-static const Real CROWD_RELEASE_FILTER	= 1.0f - ConvertRetailPerFrameFactor(1.0f - 0.15f);	///< how fast the throttle comes back once a brake lifts (~half a second to full)
-static const Real CROWD_VEHICLE_RELEASE_FILTER	= 1.0f - ConvertRetailPerFrameFactor(1.0f - 0.08f);	///< and for a vehicle, whose drive is back to EA's instant one (~a second to full)
-static const Real CROWD_AIM_CRUISE	= 1.0f - ConvertRetailPerFrameFactor(1.0f - 0.23f);	///< how fast the aim follows the route while driving (~7/sec)
-static const Real CROWD_AIM_URGENT	= 1.0f - ConvertRetailPerFrameFactor(1.0f - 0.67f);	///< and while manoeuvring (~20/sec), where lag is worse than twitch
+#define CROWD_SEP_FILTER ((Real)(1.0f - ConvertRetailPerFrameFactor(1.0f - 0.13f)))	///< how much of a frame's sideways push is believed (~4/sec)
+#define CROWD_RELEASE_FILTER ((Real)(1.0f - ConvertRetailPerFrameFactor(1.0f - 0.15f)))	///< how fast the throttle comes back once a brake lifts (~half a second to full)
+#define CROWD_AIM_CRUISE ((Real)(1.0f - ConvertRetailPerFrameFactor(1.0f - 0.23f)))	///< how fast the aim follows the route while driving (~7/sec)
+#define CROWD_AIM_URGENT ((Real)(1.0f - ConvertRetailPerFrameFactor(1.0f - 0.67f)))	///< and while manoeuvring (~20/sec), where lag is worse than twitch
 static const Real CROWD_AIM_DEAD		= 0.035f;	///< two degrees: hold the wheel still rather than chase the noise
 //-------------------------------------------------------------------------------------------------
 /* Being stuck.  These are not crowd constants: every unit trying to drive somewhere is measured
 	 against them, whether or not the crowd model steers it.  The rungs of the ladder are spaced by continued lack of
 	 progress rather than by wall clock, so a unit that starts moving again drops off it at once. */
 //-------------------------------------------------------------------------------------------------
-static const Real STUCK_TURN_EPSILON	= ConvertRetailPerFrameRate(0.004f);	///< a quarter of a degree a retail frame: below this the hull is not turning
-static const Int  STUCK_PRESS_FRAMES	= ConvertRetailFrames(10);		///< a third of a second of getting nowhere: stop being polite
-static const Int  STUCK_REPATH_FRAMES	= ConvertRetailFrames(45);		///< a second and a half: the ladder's first rung, and the gap between rungs
-static const Int  STUCK_BACKOUT_FRAMES	= ConvertRetailFrames(66);	///< how long a backing-out manoeuvre is given before the route is tried again
-static const Int  STUCK_COOL_FRAMES	= ConvertRetailFrames(90);			///< no second drastic thing inside this, or a wedged pair rock forever
-static const Int  STUCK_CYCLE_FRAMES	= ConvertRetailFrames(150);	///< five seconds past the last rung: run the whole ladder again
-static const Int  STUCK_DITHER_FRAMES	= ConvertRetailFrames(90);		///< three seconds is long enough to tell a shuffle from a corner
+#define STUCK_TURN_EPSILON ((Real)(ConvertRetailPerFrameRate(0.004f)))	///< a quarter of a degree a retail frame: below this the hull is not turning
+#define STUCK_PRESS_FRAMES ((Int)(ConvertRetailFrames(10)))		///< a third of a second of getting nowhere: stop being polite
+#define STUCK_REPATH_FRAMES ((Int)(ConvertRetailFrames(45)))		///< a second and a half: the ladder's first rung, and the gap between rungs
+#define STUCK_BACKOUT_FRAMES ((Int)(ConvertRetailFrames(66)))	///< how long a backing-out manoeuvre is given before the route is tried again
+#define STUCK_COOL_FRAMES ((Int)(ConvertRetailFrames(90)))			///< no second drastic thing inside this, or a wedged pair rock forever
+#define STUCK_CYCLE_FRAMES ((Int)(ConvertRetailFrames(150)))	///< five seconds past the last rung: run the whole ladder again
+#define STUCK_DITHER_FRAMES ((Int)(ConvertRetailFrames(90)))		///< three seconds is long enough to tell a shuffle from a corner
 static const Real STUCK_BRIDGE_NEAR	= PATHFIND_CELL_SIZE_F * 20.0f;	///< a unit shaking this close to a deck on its route is at the ramp
 static const Real STUCK_DITHER_RATIO	= 0.3f;	///< gained less than this much of the ground it covered
-static const Int  CROWD_MERGE_FRAMES	= ConvertRetailFrames(45);		///< a second and a half: how far ahead a merge is worth noticing
-static const Int  CROWD_TTC_FRAMES	= ConvertRetailFrames(21);			///< closing this fast on somebody counts as being in our way, wherever it sits
-static const Int  CROWD_REPATH_QUEUE	= ConvertRetailFrames(24);		///< queued behind traffic this long: stop steering round it and ask for a new route
+#define CROWD_MERGE_FRAMES ((Int)(ConvertRetailFrames(45)))		///< a second and a half: how far ahead a merge is worth noticing
+#define CROWD_TTC_FRAMES ((Int)(ConvertRetailFrames(21)))			///< closing this fast on somebody counts as being in our way, wherever it sits
+#define CROWD_REPATH_QUEUE ((Int)(ConvertRetailFrames(24)))		///< queued behind traffic this long: stop steering round it and ask for a new route
+#define CROWD_SCAN_FRAMES ((UnsignedInt)(ConvertRetailFrames(2)))		///< a vehicle asks who is round it once in this many frames (a fifteenth of a second), staggered by id
 
 //-------------------------------------------------------------------------------------------------
 /* Returns TRUE if the physics collide should apply the force.  Normally not.
@@ -2292,7 +2301,7 @@ Bool AIUpdateInterface::computePath( PathfindServicesInterface *pathServices, Co
 			destroyPath();
 			// Stop and wait one second.
 
-			setQueueForPathTime(LOGICFRAMES_PER_SECOND);
+			setQueueForPathTime(LOGICFRAMES_PER_GAME_SECOND);
 			Coord3D goalPos;
 			Object *obj = getObject();
 			goalPos = *obj->getPosition();
@@ -2361,7 +2370,7 @@ Bool AIUpdateInterface::computeAttackPath( PathfindServicesInterface *pathServic
 		//CRCDEBUG_LOG(("Info - RePathing very quickly %d, %d.\n", m_pathTimestamp, TheGameLogic->getFrame()));
 		if (m_path && m_isBlockedAndStuck) 
 		{
-			setIgnoreCollisionTime(2*LOGICFRAMES_PER_SECOND);
+			setIgnoreCollisionTime(2*LOGICFRAMES_PER_GAME_SECOND);
 			m_blockedFrames = 0;
 			m_isBlocked = FALSE;
 			m_isBlockedAndStuck = FALSE;
@@ -2626,6 +2635,7 @@ void AIUpdateInterface::crowdReleaseCorridor( void )
 	m_crowdCap = 0.0f;
 	m_crowdCapValid = FALSE;
 	m_crowdAimValid = FALSE;
+	m_crowdScan.valid = FALSE;			// a new route looks at its neighbours on its first frame
 	/* The backing-out manoeuvre survives the route.  Being wedged is the one thing a new route does
 		 not cure - the new one starts in the same hole - and a unit that repaths every second while
 		 stuck would throw away the only rule that gets it out, once a second, forever. */
@@ -2941,6 +2951,13 @@ void AIUpdateInterface::updateProgress( void )
 	}
 }
 
+Bool AIUpdate_crowdScanDue( Bool haveScan, UnsignedInt frame, UnsignedInt id )
+{
+	if (!haveScan)
+		return TRUE;		// a new route or a new order: look now, whatever the frame
+	return ((frame + id) % CROWD_SCAN_FRAMES) == 0;
+}
+
 Bool AIUpdate_isDithering( Real net, Real travelled, Real bodySize )
 {
 	if (travelled < bodySize * 2.0f)
@@ -3038,8 +3055,8 @@ void AIUpdateInterface::stuckRescue( void )
 			ai->aiMoveAwayFromUnit( self, CMD_FROM_AI );
 		}
 
-		setIgnoreCollisionTime( LOGICFRAMES_PER_SECOND );
-		m_rescueCool = now + LOGICFRAMES_PER_SECOND;
+		setIgnoreCollisionTime( LOGICFRAMES_PER_GAME_SECOND );
+		m_rescueCool = now + LOGICFRAMES_PER_GAME_SECOND;
 		return;
 	}
 
@@ -3065,7 +3082,7 @@ void AIUpdateInterface::stuckRescue( void )
 		// and the queue behind has to open up, or we are reversing into it
 		crowdAskBehindToBackOff( tan );
 		Pathfinder::bumpEscape();
-		setIgnoreCollisionTime( LOGICFRAMES_PER_SECOND );
+		setIgnoreCollisionTime( LOGICFRAMES_PER_GAME_SECOND );
 		m_rescueUntil = now + STUCK_BACKOUT_FRAMES;
 		m_noProgress = 0;
 	}
@@ -3126,7 +3143,7 @@ Bool AIUpdateInterface::rescueSteer( Coord3D& goalPos )
 void AIUpdateInterface::crowdRepath( void )
 {
 	Pathfinder::bumpCrowdRepath();
-	m_blockedFrames = 2 * LOGICFRAMES_PER_SECOND + 1;
+	m_blockedFrames = 2 * LOGICFRAMES_PER_GAME_SECOND + 1;
 	m_repathAsked = TRUE;
 	m_isBlockedAndStuck = FALSE;
 	m_crowdQueued = 0;
@@ -3276,12 +3293,22 @@ void AIUpdateInterface::crowdSteer( Coord3D& goalPos, Real& speed )
 	const Real scanRange = PATHFIND_CELL_SIZE_F * 4.0f + myR;
 	const Real lookAhead = PATHFIND_CELL_SIZE_F * (Real)CROWD_LOOKAHEAD_CELLS + myR;
 
+	/* Who is round us is asked every CROWD_SCAN_FRAMES frames, not every frame, offset by id so a
+		 group does not all ask on the same one.  The scan was half of what a driving vehicle cost in an
+		 840-unit right click.  Everything the rules below do with the answer still runs every frame, so
+		 every filter and rate keeps its timing, and the one neighbour that can stop us, the blocker, is
+		 re-read live each frame: only which unit it is may be a few frames old.  A new route or a new
+		 order always looks on its first frame, so no order waits for the stagger, and a unit that is
+		 getting nowhere looks every frame, because a jam is where a stale answer costs. */
+	const Bool scanNow = foot || pressing
+		|| AIUpdate_crowdScanDue( m_crowdScan.valid, now, (UnsignedInt)self->getID() );
+
 	PartitionFilterRelationship		fRel( self, PartitionFilterRelationship::ALLOW_ALLIES );
 	PartitionFilterAlive					fAlive;
 	PartitionFilterSameMapStatus	fMap( self );
 	PartitionFilter *filters[] = { &fRel, &fAlive, &fMap, NULL };
 	// a foot soldier reads nobody: he has no lane to hold and nothing on the road is his traffic
-	SimpleObjectIterator *iter = foot ? NULL
+	SimpleObjectIterator *iter = (foot || !scanNow) ? NULL
 		: ThePartitionManager->iterateObjectsInRange( self, scanRange, FROM_CENTER_2D, filters );
 	MemoryPoolObjectHolder hold( iter );
 
@@ -3306,7 +3333,7 @@ void AIUpdateInterface::crowdSteer( Coord3D& goalPos, Real& speed )
 		 whatever is standing beside that unit, and in a pack six wide every such slot is taken: the
 		 unit picks one, gets shoved back out of it by the collision push, and queues in the middle of
 		 its own group instead of going round the outside of it. */
-	enum { CROWD_NEAR_MAX = 16 };
+	enum { CROWD_NEAR_MAX = CROWD_SCAN_NEAR_MAX };
 	Real nearLat[CROWD_NEAR_MAX];		// each neighbour's line across the road
 	Real nearR[CROWD_NEAR_MAX];
 	Int nearCount = 0;
@@ -3478,23 +3505,100 @@ void AIUpdateInterface::crowdSteer( Coord3D& goalPos, Real& speed )
 			if (blocker == NULL || fwd < blockerFwd)
 			{
 				blocker = o;
-				blockerFwd = fwd;
-				blockerGap = gap;
-				blockerSpeed = 0.0f;
-				blockerMoving = hisMoving;
-				if (hisPhys != NULL)
-				{
-					const Coord3D *v = hisPhys->getVelocity();
-					blockerSpeed = v->x * here.tan.x + v->y * here.tan.y;		// his speed our way, not his speed
-					if (blockerSpeed < 0.0f)
-						blockerSpeed = 0.0f;
-				}
+				blockerFwd = fwd;		// the rest of what we know about him is read below, every frame
 			}
 		}
 
 		// our place in the queue, which is how far out we fan when it stops moving
 		if (gap < comfort * 2.0f && crowdOutranksMe( o ))
 			++rank;
+	}
+
+	if (scanNow)
+	{
+		m_crowdScan.valid = TRUE;
+		m_crowdScan.sep = sep;
+		m_crowdScan.blocker = (blocker != NULL) ? blocker->getID() : INVALID_ID;
+		m_crowdScan.joiner = (joiner != NULL) ? joiner->getID() : INVALID_ID;
+		m_crowdScan.joinerSide = joinerSide;
+		m_crowdScan.joinerR = joinerR;
+		m_crowdScan.giveWay = giveWay;
+		m_crowdScan.giveWayLat = giveWayLat;
+		m_crowdScan.rank = rank;
+		m_crowdScan.touching = touching;
+		m_crowdScan.crossing = crossing;
+		m_crowdScan.nearCount = nearCount;
+		for (Int n = 0; n < nearCount; n++)
+		{
+			m_crowdScan.nearLat[n] = nearLat[n];
+			m_crowdScan.nearR[n] = nearR[n];
+		}
+		m_crowdScan.packAny = packAny;
+		m_crowdScan.packLo = packLo;
+		m_crowdScan.packHi = packHi;
+	}
+	else
+	{
+		sep = m_crowdScan.sep;
+		joinerSide = m_crowdScan.joinerSide;
+		joinerR = m_crowdScan.joinerR;
+		giveWay = m_crowdScan.giveWay;
+		giveWayLat = m_crowdScan.giveWayLat;
+		rank = m_crowdScan.rank;
+		touching = m_crowdScan.touching;
+		crossing = m_crowdScan.crossing;
+		nearCount = m_crowdScan.nearCount;
+		for (Int n = 0; n < nearCount; n++)
+		{
+			nearLat[n] = m_crowdScan.nearLat[n];
+			nearR[n] = m_crowdScan.nearR[n];
+		}
+		packAny = m_crowdScan.packAny;
+		packLo = m_crowdScan.packLo;
+		packHi = m_crowdScan.packHi;
+
+		// one that has died since the scan is nobody's traffic
+		if (m_crowdScan.blocker != INVALID_ID)
+		{
+			blocker = TheGameLogic->findObjectByID( m_crowdScan.blocker );
+			if (blocker != NULL && blocker->isEffectivelyDead())
+				blocker = NULL;
+		}
+		if (m_crowdScan.joiner != INVALID_ID)
+		{
+			joiner = TheGameLogic->findObjectByID( m_crowdScan.joiner );
+			if (joiner != NULL && joiner->isEffectivelyDead())
+				joiner = NULL;
+		}
+	}
+
+	// the blocker as he is this frame, which is what the brake and the pass are priced against; one
+	// that has left our lane since the scan is not in the way any more
+	if (blocker != NULL)
+	{
+		const Coord3D *hp = blocker->getPosition();
+		const Real dx = hp->x - myPos->x;
+		const Real dy = hp->y - myPos->y;
+		const Real hisR = blocker->getGeometryInfo().getBoundingCircleRadius();
+		blockerFwd = dx * here.tan.x + dy * here.tan.y;
+		const Real side = -dx * here.tan.y + dy * here.tan.x;
+		blockerGap = (Real)sqrt( dx * dx + dy * dy ) - myR - hisR;
+		if (!(blockerFwd > 0.0f && blockerFwd < lookAhead + hisR && fabs( side ) < myR + hisR + 1.0f))
+			blocker = NULL;
+	}
+	if (blocker != NULL)
+	{
+		AIUpdateInterface *ai = blocker->getAI();
+		PhysicsBehavior *hisPhys = blocker->getPhysics();
+		blockerMoving = ai != NULL && ai->isMoving() && hisPhys != NULL && hisPhys->getVelocityMagnitude() > ConvertRetailPerFrameRate(0.05f);
+		blockerSpeed = 0.0f;
+		if (hisPhys != NULL)
+		{
+			const Coord3D *v = hisPhys->getVelocity();
+			blockerSpeed = v->x * here.tan.x + v->y * here.tan.y;		// his speed our way, not his speed
+			if (blockerSpeed < 0.0f)
+				blockerSpeed = 0.0f;
+		}
 	}
 
 	//--- the rules, in order -----------------------------------------------------------------------
@@ -3685,9 +3789,19 @@ void AIUpdateInterface::crowdSteer( Coord3D& goalPos, Real& speed )
 					 whole march: a unit ten units behind traffic moving at its own speed is not catching
 					 anybody up, and pricing that gap costs 60% of the column's speed for nothing.  Closing
 					 speed and the time it leaves is the only thing worth reading. */
+				/* Aimed at touching him, not at a gap short of him.  Twelve units of air behind the
+					 blocker, with a vehicle's throttle then coming back over a second instead of half
+					 (the release filter below), was tried once EA's treads and wheels were back, because
+					 they stop in a frame and the tank behind nosed into the tail in front.  It did cut
+					 the touching: blocked unit-frames over four towncross seeds 13218 with it, 20573
+					 without.  But every queue that had to start again behind a stopped tank paid for it,
+					 and a bridge is nothing but such a queue: at the same vehicle speed the last of twenty
+					 Crusaders over the Kandahar bridge on Golden Oasis came in 7.3 s later on seed 1 (36.6
+					 against 29.3 s), the last of the towncross column 9 s later, and the Forgotten Forest
+					 trailer column's last Crusader 17 s later. */
 				if (blockerMoving && !pressing)
 				{
-					const Real want = Crowd_brakeSpeed( speed, blockerSpeed, blockerGap - CROWD_BRAKE_AIR, CROWD_BRAKE_FRAMES );
+					const Real want = Crowd_brakeSpeed( speed, blockerSpeed, blockerGap, CROWD_BRAKE_FRAMES );
 					if (want < cap)
 						cap = want;
 				}
@@ -3888,13 +4002,13 @@ void AIUpdateInterface::crowdSteer( Coord3D& goalPos, Real& speed )
 	}
 	else
 	{
-		m_crowdCap = Crowd_releaseCap( m_crowdCap, cap, foot ? CROWD_RELEASE_FILTER : CROWD_VEHICLE_RELEASE_FILTER );
+		m_crowdCap = Crowd_releaseCap( m_crowdCap, cap, CROWD_RELEASE_FILTER );
 	}
 
 	if (m_crowdCap < speed)
 		speed = m_crowdCap;
 
-	if (TheGlobalData->m_showLanes && (now % LOGICFRAMES_PER_SECOND) == 0)
+	if (TheGlobalData->m_showLanes && (now % LOGICFRAMES_PER_SECOND) == 0)	// a debug drawing, paced in wall time
 	{
 		const char *mode = pressing ? "press" : (giveWay ? "yield" : (merged ? "merge"
 											 : (queued ? "brake" : (blocker != NULL ? "pass" : "free"))));
@@ -4340,8 +4454,8 @@ UpdateSleepTime AIUpdateInterface::doLocomotor( void )
 							{
 								Real dist = sqrtf(dSqr);
 								if (dist<1) dist = 1;
-								pos.x += 2*PATHFIND_CELL_SIZE_F*dx/(dist*LOGICFRAMES_PER_SECOND);
-								pos.y += 2*PATHFIND_CELL_SIZE_F*dy/(dist*LOGICFRAMES_PER_SECOND);
+								pos.x += 2*PATHFIND_CELL_SIZE_F*dx/(dist*LOGICFRAMES_PER_GAME_SECOND);
+								pos.y += 2*PATHFIND_CELL_SIZE_F*dy/(dist*LOGICFRAMES_PER_GAME_SECOND);
 								if (onGround)
 									pos.z = TheTerrainLogic->getGroundHeight( pos.x, pos.y );
 								getObject()->setPosition(&pos);
@@ -4732,6 +4846,9 @@ void AIUpdateInterface::aiDoCommand(const AICommandParms* parms)
 	if (!isAllowedToRespondToAiCommands(parms))
 		return;
 
+	// the crowd scan is staggered, never the first look after an order: see crowdSteer
+	m_crowdScan.valid = FALSE;
+
 	// Any order at all replaces the trip to the producer's rally point - except the exit path itself,
 	// which is the leg that precedes it.
 	if (parms->m_cmd != AICMD_FOLLOW_EXITPRODUCTION_PATH)
@@ -4750,6 +4867,10 @@ void AIUpdateInterface::aiDoCommand(const AICommandParms* parms)
 	// So does an auto garrison, which walks on player's enters of its own and sets itself again after each.
 	if (parms->m_cmdSource != CMD_FROM_AI)
 		m_isSeekingGarrison = FALSE;
+
+	// And a group panel reinforcement's walk to its squad: the player (or a script) has taken it over.
+	if (parms->m_cmdSource != CMD_FROM_AI)
+		getObject()->setReinforcement( -1, NULL, FALSE );
 
 #ifdef ALLOW_SURRENDER
 	// surrendered items have very limited options, and only via AI cmds
@@ -5035,7 +5156,7 @@ void AIUpdateInterface::privateMoveToPosition( const Coord3D *pos, CommandSource
 		m_blockedFrames = 0;
 		m_isBlocked = FALSE;
 		m_isBlockedAndStuck = FALSE;
-		getStateMachine()->setTemporaryState(AI_MOVE_TO, LOGICFRAMES_PER_SECOND * 20);
+		getStateMachine()->setTemporaryState(AI_MOVE_TO, LOGICFRAMES_PER_GAME_SECOND * 20);
 	} else {
 		// Normal user or script command, just do it. [8/19/2003]
 		getStateMachine()->clear();
@@ -5358,13 +5479,13 @@ void AIUpdateInterface::privateMoveAwayFromUnit( Object *unit, CommandSourceType
 	if (m_stateMachine->getTemporaryState() == AI_MOVE_OUT_OF_THE_WAY) {
 		if (m_moveOutOfWay1 == id) {
 			if (m_isBlocked) {
-				setIgnoreCollisionTime(LOGICFRAMES_PER_SECOND*2); // cheat for 2 seconds.
+				setIgnoreCollisionTime(LOGICFRAMES_PER_GAME_SECOND*2); // cheat for 2 seconds.
 			}
 			return;
 		}
 		if (m_moveOutOfWay2 == id) {
 			if (m_isBlocked) {
-				setIgnoreCollisionTime(LOGICFRAMES_PER_SECOND*2); // cheat for 2 seconds.
+				setIgnoreCollisionTime(LOGICFRAMES_PER_GAME_SECOND*2); // cheat for 2 seconds.
 			}
 			return;
 		}
@@ -5392,7 +5513,7 @@ void AIUpdateInterface::privateMoveAwayFromUnit( Object *unit, CommandSourceType
 		destroyPath();
 		m_path = newPath;
 		wakeUpNow();
-		m_stateMachine->setTemporaryState(AI_MOVE_OUT_OF_THE_WAY, 10*LOGICFRAMES_PER_SECOND);
+		m_stateMachine->setTemporaryState(AI_MOVE_OUT_OF_THE_WAY, 10*LOGICFRAMES_PER_GAME_SECOND);
 		if (m_path) 
 		{
 	 		if( !getObject()->isKindOf(KINDOF_NO_COLLIDE))// If I don't collide with things, I don't need to tell them to get out of the way
@@ -6147,7 +6268,7 @@ void AIUpdateInterface::doQuickExit( std::vector<Coord3D>* path )
 	// set path info
 	getStateMachine()->setGoalPath( path );
 
-	getStateMachine()->setTemporaryState( AI_FOLLOW_EXITPRODUCTION_PATH, 10*LOGICFRAMES_PER_SECOND);
+	getStateMachine()->setTemporaryState( AI_FOLLOW_EXITPRODUCTION_PATH, 10*LOGICFRAMES_PER_GAME_SECOND);
 	if (locked) {
 		getStateMachine()->lock("Relocking in doQuickExit.");
 	}
@@ -6963,6 +7084,9 @@ public:
 #endif
 };
 
+Bool AIUpdate_takeMoodSearch( AIUpdateInterface *ai, const AIUpdateInterface::MoodScan &scan, Bool attackMove, UnsignedInt now,
+															Object **victim );
+
 Object* AIUpdateInterface::getNextMoodTarget( Bool calledByAI, Bool calledDuringIdle, Bool allowOutOfWeaponRangeTargets, Bool requireWithinWeaponRange )
 {
 	Object *obj = getObject();
@@ -7048,6 +7172,88 @@ Object* AIUpdateInterface::getNextMoodTarget( Bool calledByAI, Bool calledDuring
 		}
 	}
 
+	MoodScan scan;
+	Object *answer = NULL;
+	if (!describeMoodScan(calledByAI, allowOutOfWeaponRangeTargets, requireWithinWeaponRange, scan, &answer))
+		return answer;
+
+	// an idle check by the clock or an attack move scan may have been run ahead with the rest of the
+	// frame's (LOGIC-PARALLEL.md, P2)
+	Object *newVictim = NULL;
+	if (!(calledByAI && calledDuringIdle != allowOutOfWeaponRangeTargets && !requireWithinWeaponRange
+				&& AIUpdate_takeMoodSearch(this, scan, allowOutOfWeaponRangeTargets, now, &newVictim)))
+		newVictim = runMoodScan(scan, NULL);
+
+	if (newVictim)
+	{
+		CRCDEBUG_LOG(("AIUpdateInterface::getNextMoodTarget() - %d is attacking %d\n", obj->getID(), newVictim->getID()));
+	}
+
+	return newVictim;
+}
+
+//-------------------------------------------------------------------------------------------------
+Object *AIUpdateInterface::runMoodScan( const MoodScan &scan, AI::ScanJob *job )
+{
+	const Object *obj = getObject();
+	PartitionFilterForwardArc filterArc( obj, scan.arcRange );
+	PartitionFilterElevatedReach filterHeight( obj, scan.arcRange );
+	PartitionFilter *arc = NULL;
+	if( scan.arc == 1 )
+		arc = &filterArc;
+	else if( scan.arc == 2 )
+		arc = &filterHeight;
+	return TheAI->findClosestEnemy( obj, scan.range, scan.flags, scan.info, arc, job );
+}
+
+//-------------------------------------------------------------------------------------------------
+Bool AIUpdateInterface::wouldSearchForMoodTarget( Bool calledDuringIdle )
+{
+	Object *obj = getObject();
+	if (obj->isEffectivelyDead() || obj->testStatus(OBJECT_STATUS_IS_USING_ABILITY))
+		return FALSE;
+
+	const AIUpdateModuleData* d = getAIUpdateModuleData();
+	if (calledDuringIdle && (d->m_autoAcquireEnemiesWhenIdle & AAS_Idle) == 0)
+		return FALSE;
+	if (isAttacking() && BitTest(d->m_autoAcquireEnemiesWhenIdle, AAS_Idle_Not_While_Attacking))
+		return FALSE;
+	if (calledDuringIdle && obj->getStatusBits().test( OBJECT_STATUS_STEALTHED ) && !canAutoAcquireWhileStealthed())
+	{
+		const Object *container = obj->getContainedBy();
+		if (!(container && container->getContain()->isPassengerAllowedToFire()))
+			return FALSE;
+	}
+
+	// the team's common target answers instead of a search; asked under a peek, so nothing is written
+	if (obj->getTeam()->getPrototype()->getTemplateInfo()->m_attackCommonTarget && getAttitude() >= AI_NORMAL)
+	{
+		Object *teamVictim = obj->getTeam()->getTeamTargetObject();
+		if (teamVictim)
+		{
+			Weapon::StatusPeek peek;
+			CanAttackResult result = obj->getAbleToAttackSpecificObject( ATTACK_NEW_TARGET, teamVictim, CMD_FROM_AI );
+			if (result == ATTACKRESULT_POSSIBLE || result == ATTACKRESULT_POSSIBLE_AFTER_MOVING)
+				return FALSE;
+		}
+	}
+	return TRUE;
+}
+
+//-------------------------------------------------------------------------------------------------
+Bool AIUpdateInterface::attackMoveScansThisFrame( UnsignedInt now )
+{
+	return getStateMachine()->attackMoveScansThisFrame( now );
+}
+
+//-------------------------------------------------------------------------------------------------
+Bool AIUpdateInterface::describeMoodScan( Bool calledByAI, Bool allowOutOfWeaponRangeTargets, Bool requireWithinWeaponRange,
+																					MoodScan &scan, Object **answer )
+{
+	Object *obj = getObject();
+	const AIUpdateModuleData* d = getAIUpdateModuleData();
+	*answer = NULL;
+
 	// Use Guard Outer, which typically corresponds to the total range
 	Real rangeToFindWithin = TheAI->getAdjustedVisionRangeForObject(obj, AI_VISIONFACTOR_OWNERTYPE | AI_VISIONFACTOR_MOOD);
 
@@ -7075,7 +7281,7 @@ Object* AIUpdateInterface::getNextMoodTarget( Bool calledByAI, Bool calledDuring
 		rangeToFindWithin = max(rangeToFindWithin, obj->getLargestWeaponRange());
 
 	if (rangeToFindWithin <= 0.0f)
-		return NULL;
+		return FALSE;
 
 	//If we are contained by an object, add it's bounding radius so that large buildings can auto acquire everything in
 	//outer ranges. Calculating this from the center is bad... although this code makes it possible to acquire a target
@@ -7091,13 +7297,14 @@ Object* AIUpdateInterface::getNextMoodTarget( Bool calledByAI, Bool calledDuring
 	{
 		BodyModuleInterface *bmi = obj->getBodyModule();
 		if (!bmi)
-			return NULL;
+			return FALSE;
 
 		//Kris: August 26, 2003
 		//Do not allow units that healed me to get acquired! They are our friends!!!
 		if( bmi->getLastDamageInfo()->in.m_damageType != DAMAGE_HEALING )
 		{
-			return TheGameLogic->findObjectByID(bmi->getLastDamageInfo()->in.m_sourceID);
+			*answer = TheGameLogic->findObjectByID(bmi->getLastDamageInfo()->in.m_sourceID);
+			return FALSE;
 		}
 	}
 	UnsignedInt flags = AI::CAN_ATTACK;
@@ -7173,47 +7380,253 @@ Object* AIUpdateInterface::getNextMoodTarget( Bool calledByAI, Bool calledDuring
 	//
 	// ... and an aircraft only makes that long look forward - see PartitionFilterForwardArc.
 	//
-	PartitionFilterForwardArc filterArc( obj, obj->getLargestWeaponRange() );
-	PartitionFilterElevatedReach filterHeight( obj, rangeToFindWithin );
-	PartitionFilter *arc = NULL;
+	scan.arc = 0;
+	scan.arcRange = 0.0f;
 	if( allowOutOfWeaponRangeTargets && obj->isKindOf( KINDOF_AIRCRAFT ) )
-		arc = &filterArc;
+	{
+		scan.arc = 1;
+		scan.arcRange = obj->getLargestWeaponRange();
+	}
 	else if( !obj->isKindOf( KINDOF_AIRCRAFT ) )
 	{
-		arc = &filterHeight;
+		scan.arc = 2;
+		scan.arcRange = rangeToFindWithin;
 		rangeToFindWithin += Weapon_elevationRangeBonus( rangeToFindWithin, FLT_MAX );
 	}
 
-	Object *newVictim = TheAI->findClosestEnemy(obj, rangeToFindWithin, flags, getAttackInfo(), arc);
+	scan.range = rangeToFindWithin;
+	scan.flags = flags;
+	scan.info = getAttackInfo();
+	return TRUE;
+}
 
-/*
-DEBUG_LOG(("GNMT frame %d: %s %08lx (con %s %08lx) uses range %f, flags %08lx, %s finds %s %08lx\n",
-	now,
-	obj->getTemplate()->getName().str(),
-	obj,
-	container ? container->getTemplate()->getName().str() : "",
-	container,
-	rangeToFindWithin,
-	flags,
-	getAttackInfo() != NULL && getAttackInfo() != TheScriptEngine->getDefaultAttackInfo() ? "ATTACKINFO," : "",
-	newVictim ? newVictim->getTemplate()->getName().str() : "",
-	newVictim
-));
-*/
+//-------------------------------------------------------------------------------------------------
+/* LOGIC-PARALLEL.md, P2: the frame's mood searches run ahead together, idle checks by the clock and
+	 attack move scans.
 
-	if (newVictim)
+	 The first unit of a frame whose mood check gets as far as its search gathers every other unit that
+	 will search this frame, an idle unit whose check by the clock is due or an attack move whose scan
+	 is, and their searches run on the logic thread's job pool against the world as it stands at that
+	 moment. Each search keeps its answer and the fog questions it peeked. When a unit's own update
+	 comes round, in the order the sleepy heap gives, it takes its answer only if its search is still
+	 the same one, the target is still alive and every fog question asked again for real, in the job's
+	 order, gives the job's answer; otherwise it searches itself as before. The answers see the world a
+	 little earlier in the frame than a search of its own would, so the game moves differently from
+	 before, the same at any number of workers. The clocks and their random offset stay where they
+	 were, on the logic thread, in heap order.
+
+	 An attack move is searched ahead as the scan that may close with what it finds. One that turns out
+	 to want only what it can reach from where it stands asks a different search and leaves its answer
+	 unused; so does one whose fight ended in this frame's update, which was busy when the batch ran. */
+extern void AI_prewarmTargetTables( const Object *o );	// AI.cpp
+
+namespace
+{
+	struct MoodSearch
 	{
-		CRCDEBUG_LOG(("AIUpdateInterface::getNextMoodTarget() - %d is attacking %d\n", obj->getID(), newVictim->getID()));
-/*
-srj debug hack. ignore.
-Int ot = getTmpValue();
-if (ot!=0&&now>ot&&now-ot<=4)
-ot=ot;
-setTmpValue(now);
-*/
+		AIUpdateInterface						*ai;
+		AIUpdateInterface::MoodScan	scan;
+		Bool												attackMove;
+		Object											*victim;
+		Bool												usable;
+		ShroudPeekRecord						peeks;
+		Int													gathers;
+		Int													looked;
+		Int													scans;
+	};
+
+	enum
+	{
+		MOOD_SEARCH_SLOTS = 32,				///< scratch for JobSystem::threadSlot 0 to 31
+		MOOD_SEARCH_CAPACITY = 16384,	///< candidates one search may gather before it gives up to the logic thread
+		MOOD_SEARCH_MINIMUM = 4				///< fewer due searches than this search on their own, as before
+	};
+
+	struct MoodSearchScratch
+	{
+		std::vector<Object *>	objects;
+		std::vector<Real>			distSqr;
+		SimpleObjectIterator	*iterator = NULL;
+	};
+
+	std::vector<MoodSearch>	s_moodSearches;
+	UnsignedInt							s_moodSearchFrame = 0xFFFFFFFF;
+	MoodSearchScratch				s_moodSearchScratch[ MOOD_SEARCH_SLOTS ];
+
+	// since the process started, for HEADLESS JOBS: searches run ahead and how many their units took,
+	// all of them and the attack moves'
+	Int											s_moodSearchesRun = 0;
+	Int											s_moodSearchesTaken = 0;
+	Int											s_attackMoveSearchesRun = 0;
+	Int											s_attackMoveSearchesTaken = 0;
+
+	void moodSearchJob( Int index, void * )
+	{
+		MoodSearch &s = s_moodSearches[ index ];
+		MoodSearchScratch &scratch = s_moodSearchScratch[ JobSystem::threadSlot() ];
+		PartitionManager::JobQueryGuard guard;
+		Thing::CachePeek cachePeek;
+
+		s.peeks.count = 0;
+		s.peeks.overflowed = FALSE;
+		s.peeks.playerIndex = 0;
+		AI::ScanJob job;
+		job.objects = &scratch.objects[ 0 ];
+		job.distSqr = &scratch.distSqr[ 0 ];
+		job.capacity = MOOD_SEARCH_CAPACITY;
+		job.peeks = &s.peeks;
+		job.iterator = scratch.iterator;
+		job.aborted = FALSE;
+		job.gathers = 0;
+		job.objectsLookedAt = 0;
+		job.scans = 0;
+
+		s.victim = s.ai->runMoodScan( s.scan, &job );
+		s.usable = !job.aborted && !guard.refused() && !s.peeks.overflowed;
+		s.gathers = job.gathers;
+		s.looked = job.objectsLookedAt;
+		s.scans = job.scans;
 	}
 
-	return newVictim;
+	void runMoodSearches( AIUpdateInterface *trigger, const AIUpdateInterface::MoodScan &triggerScan, Bool triggerAttackMove,
+												UnsignedInt now )
+	{
+		s_moodSearchFrame = now;
+		s_moodSearches.clear();
+
+		MoodSearch first;
+		first.ai = trigger;
+		first.scan = triggerScan;
+		first.attackMove = triggerAttackMove;
+		s_moodSearches.push_back( first );
+		for( Object *o = TheGameLogic->getFirstObject(); o; o = o->getNextObject() )
+		{
+			AIUpdateInterface *ai = o->getAI();
+			if( ai == NULL )
+				continue;
+			// an aircraft's forward arc reads its facing, a lazy cache filled here rather than in a job
+			if( ai == trigger )
+			{
+				if( triggerScan.arc == 1 )
+					o->getUnitDirectionVector2D();
+				continue;
+			}
+			// an attack move scans on its own clock (AIAttackMoveToState::update), an idle unit on the mood clock
+			const Bool attackMove = ai->attackMoveScansThisFrame( now );
+			if( !attackMove && ( ai->getNextMoodCheckTime() > now || !ai->isIdle() ) )
+				continue;
+			if( !ai->wouldSearchForMoodTarget( !attackMove ) )
+				continue;
+			MoodSearch s;
+			Object *answer = NULL;
+			if( !ai->describeMoodScan( TRUE, attackMove, FALSE, s.scan, &answer ) )
+				continue;
+			if( s.scan.arc == 1 )
+				o->getUnitDirectionVector2D();
+			s.ai = ai;
+			s.attackMove = attackMove;
+			s_moodSearches.push_back( s );
+		}
+		if( (Int)s_moodSearches.size() < MOOD_SEARCH_MINIMUM )
+		{
+			s_moodSearches.clear();
+			return;
+		}
+		for( Int i = 0; i < (Int)s_moodSearches.size(); ++i )
+		{
+			s_moodSearches[ i ].ai->m_moodBatchFrame = now;
+			s_moodSearches[ i ].ai->m_moodBatchIndex = i;
+		}
+
+		/* The lazy caches a search reads are filled here, on the logic thread, so the jobs only read
+			 them: every Object's armour for its armour flags now, and the AI's worth and armour tables and
+			 name keys for its template (AI_prewarmTargetTables); an aircraft's facing is filled in the walk
+			 above. A height above the ground is worked out in the job and not stored (Thing::CachePeek). */
+		for( Object *o = TheGameLogic->getFirstObject(); o; o = o->getNextObject() )
+		{
+			DamageInfoInput probe;
+			probe.m_damageType = DAMAGE_EXPLOSION;
+			probe.m_amount = 0.0f;
+			o->estimateDamage( probe );
+			AI_prewarmTargetTables( o );
+		}
+		ThePartitionManager->prepareJobGathers();
+		const Int slots = min( JobSystem::workerCount() + 1, (Int)MOOD_SEARCH_SLOTS );
+		for( Int s = 0; s < slots; ++s )
+		{
+			if( (Int)s_moodSearchScratch[ s ].objects.size() < (Int)MOOD_SEARCH_CAPACITY )
+			{
+				s_moodSearchScratch[ s ].objects.resize( MOOD_SEARCH_CAPACITY );
+				s_moodSearchScratch[ s ].distSqr.resize( MOOD_SEARCH_CAPACITY );
+			}
+			if( s_moodSearchScratch[ s ].iterator == NULL )
+				s_moodSearchScratch[ s ].iterator = newInstance( SimpleObjectIterator );
+		}
+
+		JobSystem::parallel_for( (Int)s_moodSearches.size(), 1, moodSearchJob, NULL );
+		s_moodSearchesRun += (Int)s_moodSearches.size();
+
+		Int gathers = 0, looked = 0, scans = 0;
+		for( Int i = 0; i < (Int)s_moodSearches.size(); ++i )
+		{
+			gathers += s_moodSearches[ i ].gathers;
+			looked += s_moodSearches[ i ].looked;
+			scans += s_moodSearches[ i ].scans;
+			if( s_moodSearches[ i ].attackMove )
+				++s_attackMoveSearchesRun;
+		}
+		PartitionManager::noteJobGathers( gathers, looked );
+		AI::noteJobEnemyScans( scans );
+	}
+}
+
+/** AI::reset, before every match: a frame number of the last match is not this match's frame. */
+void AIUpdate_resetMoodSearches( void )
+{
+	s_moodSearchFrame = 0xFFFFFFFF;
+	s_moodSearches.clear();
+	for( Int s = 0; s < MOOD_SEARCH_SLOTS; ++s )
+	{
+		if( s_moodSearchScratch[ s ].iterator )
+		{
+			s_moodSearchScratch[ s ].iterator->deleteInstance();
+			s_moodSearchScratch[ s ].iterator = NULL;
+		}
+	}
+}
+
+/** getNextMoodTarget's idle check by the clock or attack move scan: TRUE with *victim when this
+	* unit's search was run ahead and still stands, FALSE to search as before. */
+Bool AIUpdate_takeMoodSearch( AIUpdateInterface *ai, const AIUpdateInterface::MoodScan &scan, Bool attackMove, UnsignedInt now,
+															Object **victim )
+{
+	// a -scenario run plays the same: its TARGET PICK lines come from the jobs then, in search order
+	if( s_moodSearchFrame != now )
+		runMoodSearches( ai, scan, attackMove, now );
+	if( ai->m_moodBatchFrame != now )
+		return FALSE;
+	ai->m_moodBatchFrame = 0xFFFFFFFF;		// one answer, one take
+	const MoodSearch &s = s_moodSearches[ ai->m_moodBatchIndex ];
+	if( s.ai != ai || !s.usable || !( s.scan == scan ) )
+		return FALSE;
+	if( s.victim != NULL && ( s.victim->isEffectivelyDead() || s.victim->isDestroyed() ) )
+		return FALSE;
+	if( !replayShroudPeeks( s.peeks ) )
+		return FALSE;
+	*victim = s.victim;
+	++s_moodSearchesTaken;
+	if( s.attackMove )
+		++s_attackMoveSearchesTaken;
+	return TRUE;
+}
+
+/** For the HEADLESS JOBS line (GameEngine.cpp). */
+void AIUpdate_moodSearchCounts( Int &run, Int &taken, Int &attackMoveRun, Int &attackMoveTaken )
+{
+	run = s_moodSearchesRun;
+	taken = s_moodSearchesTaken;
+	attackMoveRun = s_attackMoveSearchesRun;
+	attackMoveTaken = s_attackMoveSearchesTaken;
 }
 
 // ------------------------------------------------------------------------------------------------

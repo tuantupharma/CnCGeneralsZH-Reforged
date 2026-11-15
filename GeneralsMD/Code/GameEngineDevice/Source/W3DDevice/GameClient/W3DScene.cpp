@@ -67,6 +67,7 @@
 #include "W3DDevice/GameClient/W3DShroud.h"
 #include "WW3D2/camera.h"
 #include "WW3D2/dx8renderer.h"
+#include "WW3D2/hlod.h"
 #include "WW3D2/sortingrenderer.h"
 #include "WW3D2/dx8wrapper.h"
 #include "WW3D2/light.h"
@@ -506,6 +507,54 @@ static Bool posedPartsInView(RenderObjClass *robj, CameraClass *camera)
 	return W3DModelDraw::getPosedBoundingSphere(robj, posed) && !camera->Cull_Sphere(posed);
 }
 
+//=============================================================================
+// chooseLODByScreenSize
+//=============================================================================
+/** A model with more than one level of detail draws the coarsest level whose MaxScreenSize still
+  * holds the share of the screen its bounding sphere covers.  W3D keeps the levels coarsest first,
+  * the full model last with no limit.  WW3D's own way, Prepare_LOD and the predictive optimizer's
+  * polygon budget, only ever steps a model up, so it is not used.
+  *
+  * Only the draw follows the camera.  Bones are the HTree's, which every level shares; bounds and
+  * sub-object lists take in every level and Cast_Ray the top one, so nothing the logic, a pick or
+  * a bone lookup reads changes with the level drawn.  A single-level model, every retail one, is
+  * left alone.
+  *
+  * A model standing on a limit flipped as the camera only turned, so a level is left only past a
+  * margin: a coarser one is taken once the area is LOD_SCREEN_SIZE_MARGIN under its limit, and the
+  * level drawn is kept until the area is that much over the level's own, so a coarse level can
+  * draw 20% of area past the limit its art gives.  20% of the area is about 10% of the distance.  The level drawn, HLodClass::CurLod, is the only state. */
+//=============================================================================
+static const Real LOD_SCREEN_SIZE_MARGIN = 0.2f;
+
+static Int coarsestLODHolding(HLodClass *hlod, Int count, Real area)
+{
+	Int lod = 0;
+	while (lod < count - 1 && hlod->Get_Max_Screen_Size(lod) < area)
+		++lod;
+	return lod;
+}
+
+static void chooseLODByScreenSize(RenderObjClass *robj, CameraClass &camera)
+{
+	if (robj->Class_ID() != RenderObjClass::CLASSID_HLOD)
+		return;
+	HLodClass *hlod = (HLodClass *)robj;
+	const Int count = hlod->Get_LOD_Count();
+	if (count < 2)
+		return;
+	const Real area = hlod->Get_Screen_Size(camera);
+	const Int drawn = hlod->Get_LOD_Level();
+	// the coarsest level with the margin to spare, and the coarsest one still holding the area
+	// stretched by the margin; the second is never finer than the first
+	const Int withRoom = coarsestLODHolding(hlod, count, area / (1.0f - LOD_SCREEN_SIZE_MARGIN));
+	const Int stretched = coarsestLODHolding(hlod, count, area / (1.0f + LOD_SCREEN_SIZE_MARGIN));
+	if (withRoom < drawn)
+		hlod->Set_LOD_Level(withRoom);
+	else if (stretched > drawn)
+		hlod->Set_LOD_Level(stretched);
+}
+
 /** Visibility_Check's walk is a linked list of objects scattered over the heap, most of them off the
 	* screen and done with in a few tests, so the walk is mostly waiting for each one to arrive.  This
 	* asks for the one two ahead: its vtable pointer and bits at the start, its cached bounding sphere
@@ -690,13 +739,9 @@ void RTS3DScene::Visibility_Check(CameraClass * camera)
 			if (robj->Is_Visible())
 				m_visibleObjects.push_back(robj);
 
-			///@todo: We're not using LOD yet so I disabled this code. MW
-			// Also, should check how multiple passes (reflections) get along
-			// with the LOD manager - we're rendering double the load it thinks we are.
-			// Prepare visible objects for LOD:
-			//	if (robj->Is_Really_Visible()) {
-			//			robj->Prepare_LOD(*camera);
-			//		}
+			// the main pass only: a reflection draws the level this camera chose
+			if (robj->Is_Really_Visible())
+				chooseLODByScreenSize(robj, *camera);
 		}
 	}
 
@@ -1611,6 +1656,7 @@ assigned in left-right binary flipped fashion so as not to occupy lower bits unl
 necessary.  This is used because lower bits are free for use by stencil shadow
 rendering*/
 #define NUMBER_PLAYER_COLOR_BITS 4	//need 4 bits to encode 8 players because indices start at 1 (not 0).
+#define MAX_OCCLUDED_COLOR_INDEX ((1 << NUMBER_PLAYER_COLOR_BITS) - 1)	//the most visible player colors those bits hold
 Int playerIndexToColorIndex(Int playerIndex)
 {
 	Int tmp=playerIndex;
@@ -1739,7 +1785,8 @@ void RTS3DScene::flushOccludedObjectsIntoStencil(RenderInfoClass & rinfo)
 {
 	RenderObjClass *robj;
 	Drawable *draw;
-	RenderObjClass *playerObjects[MAX_PLAYER_COUNT][MAX_VISIBLE_OCCLUDED_PLAYER_OBJECTS];
+	// static: at MAX_PLAYER_COUNT 48 this is 192 KB, too much for the stack of a draw call
+	static RenderObjClass *playerObjects[MAX_PLAYER_COUNT][MAX_VISIBLE_OCCLUDED_PLAYER_OBJECTS];
 	RenderObjClass **lastPlayerObject[MAX_PLAYER_COUNT];
 	Int playerColorIndex[MAX_PLAYER_COUNT];
 	Int visiblePlayerColors[MAX_PLAYER_COUNT];	///<color assigned to each of the visible players
@@ -1803,6 +1850,11 @@ void RTS3DScene::flushOccludedObjectsIntoStencil(RenderInfoClass & rinfo)
 			if ((numObjects=lastPlayerObject[i]-&playerObjects[i][0]) != 0)
 			{	
 				//this player has some objects so draw them using his color index.
+				// The stencil holds 4 bits of color index, 1 to 15.  From the 16th player on, each shares
+				// the 15th silhouette color.  The old code wrapped the 16th to 0 (stencilRef 0x80), which
+				// tinted buildings.
+				if (playerColorIndex[i]==-1 && usedPlayerColorIndex > MAX_OCCLUDED_COLOR_INDEX)
+					playerColorIndex[i]=playerIndexToColorIndex(MAX_OCCLUDED_COLOR_INDEX);
 				if (playerColorIndex[i]==-1)	//color index not assigned yet?
 				{	//assign a new color index to this player
 					playerColorIndex[i]=playerIndexToColorIndex(usedPlayerColorIndex++);

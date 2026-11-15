@@ -479,7 +479,7 @@ static void doGameStart( void )
 	msg->appendIntegerArgument(GAME_SINGLE_PLAYER);
 	msg->appendIntegerArgument(TheCampaignManager->getGameDifficulty());
 	msg->appendIntegerArgument(TheCampaignManager->getRankPoints());
-	msg->appendIntegerArgument(GameEngine_matchFramesPerSecond(TheGlobalData->m_turboMode));
+	GameEngine_appendNewGameRates( msg, TheGlobalData->m_missionGameSpeedPercent );
 	InitRandom(0);
 
 	isShuttingDown = TRUE;
@@ -673,6 +673,14 @@ void MainMenuInit( WindowLayout *layout, void *userData )
 	buttonMultiPlayer = TheWindowManager->winGetWindowFromId( parentMainMenu, buttonMultiPlayerID );
 	buttonSkirmish = TheWindowManager->winGetWindowFromId( parentMainMenu, skirmishID );
 	buttonOnline = TheWindowManager->winGetWindowFromId( parentMainMenu, onlineID );
+	// Started without the launcher's Online path there is no service to dial, and the button would only
+	// open a "could not connect" box: grey it and say why.
+	if( buttonOnline )
+	{
+		const Bool canGoOnline = CanGoOnline();
+		buttonOnline->winEnable( canGoOnline );
+		buttonOnline->winSetTooltip( canGoOnline ? UnicodeString::TheEmptyString : TheGameText->fetch( "TOOLTIP:OnlineNeedsLauncher" ) );
+	}
 	buttonNetwork = TheWindowManager->winGetWindowFromId( parentMainMenu, networkID );
 	buttonOptions = TheWindowManager->winGetWindowFromId( parentMainMenu, optionsID );
 	buttonExit = TheWindowManager->winGetWindowFromId( parentMainMenu, exitID );

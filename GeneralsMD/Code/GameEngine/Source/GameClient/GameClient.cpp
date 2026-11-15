@@ -87,6 +87,7 @@
 #include "GameClient/Snow.h"
 #include "GameClient/TerrainVisual.h"
 #include "GameLogic/TerrainLogic.h"
+#include "GameClient/TankSkin.h"
 #include "GameClient/View.h"
 #include "GameClient/VideoPlayer.h"
 #include "GameClient/WindowXlat.h"
@@ -917,6 +918,12 @@ void GameClient::update( void )
 							object->getShroudedStatus(*playerIndex);
 					}
 					ObjectShroudStatus ss=object->getShroudedStatus(localPlayerIndex);
+					// EA's grace for the dead below never ran here: nothing recorded when the player last saw
+					// a drawable clear, so a shot-down aircraft or a wreck that carried on into the fog was
+					// hidden or blew up unseen there. Recorded for the dead only, so the living leave sight
+					// at once as they do now.
+					if (ss < OBJECTSHROUD_FOGGED && object->isEffectivelyDead())
+						draw->setShroudClearFrame(TheGameLogic->getFrame());
 					if (ss >= OBJECTSHROUD_FOGGED && draw->getShroudClearFrame()!=0) {
 						UnsignedInt limit = 2*LOGICFRAMES_PER_SECOND;
 						if (object->isEffectivelyDead()) {
@@ -966,6 +973,7 @@ void GameClient::update( void )
 					|| object->isDisabledByType( DISABLED_HACKED ) );
 			const Player *player = object->getControllingPlayer();
 			forDraw.playerIndex = player->getPlayerIndex();
+			forDraw.skinPlayerIndex = TankSkin_seenPlayerIndex( object );
 			forDraw.playerColor = clientPlayerColor( player );
 			forDraw.safeOcclusionFrame = object->getSafeOcclusionFrame();
 			forDraw.layer = object->getLayer();
@@ -1024,7 +1032,7 @@ void GameClient::update( void )
 			Int64 drawStart, drawEnd;
 			drawStart = Clock_Ticks();
 #endif
-			// LOGIC-THREAD.md phase 3, step 3b: at 1 and 2 the message stream and the pacer run here, so a
+			// LOGIC-THREAD.md phase 3, step 3b: the message stream and the pacer run here, so a
 			// due tick can go to the logic thread when the draw's sync point is done
 			LogicThread::prepareOverlap();
 			/* -directorrecord's panes: every pane past the first is drawn first, for the recording only

@@ -116,6 +116,7 @@ enum
 	AIKNOB_MASS_UNIT		= 4,
 	AIKNOB_BASE_WATCH		= 8,
 	AIKNOB_STRIKE_DODGE	= 16,
+	AIKNOB_DEFENSE_QUEUE	= 32,	///< the scripts' base defences go down on the frame they are asked for, as before they queued
 };
 
 //-------------------------------------------------------------------------------------------------
@@ -213,7 +214,7 @@ public:
 	Bool m_useShadowDecals;
 	Bool m_shadowsForProjectiles;	// "ShadowsForProjectiles": missiles and bombs that have no shadow of their own get a decal one
 	Bool m_startAtMaxZoom;					// "OpenAtMaxZoom" in Options.ini: a game opens as far out as the wheel goes, not 300 over the ground
-	Bool m_turboMode;								// "TurboMode" in Options.ini: a campaign or challenge mission runs at twice normal speed; a lobby has its own box
+	Int m_missionGameSpeedPercent;	// "MissionGameSpeed" in Options.ini: the game speed a campaign or challenge mission starts at, a PLAYER_GAME_SPEED_PERCENTS value; wall pacing only
 	Bool m_shadowsForProps;				// "ShadowsForProps": fences, rubbish, shrubs - scenery the art gave no shadow at all
 	Bool m_shadowsForParticles;		// "ShadowsForParticles": big alpha-blended particle clouds drop a soft blob on the ground
 	Bool m_volumetricSmokeShadows;	// "VolumetricSmokeShadows": smoke and dust shade the world and themselves through the sun's map (Direct3D 11)
@@ -231,6 +232,8 @@ public:
 	Int m_shadowQuality;				// "ShadowQuality": the sun's depth map at 1024, 2048 or 4096 texels a side (Direct3D 11)
 	Int m_graphicsQuality;			// "GraphicsQuality": where the options menu's Performance / Quality slider stands; Custom takes the particle ring from the preset at or below it
 	Bool m_classicGraphics;				// "ClassicGraphics": the game's own art, tile, shadows and picture; read at startup
+	Bool m_detailedModels;				// "DetailedModels": the rebuilt models' archives mount under the Reforged look; read at startup by Win32BIGFileSystem, not from here
+	Bool m_hdTextures;						// "HDTextures": the upscaled texture and ground archives mount under the Reforged look; read at startup by Win32BIGFileSystem, not from here
 	Int m_lightingStyle;					// "LightingStyle": LightingStyleType; the map's lights are rebalanced as each map loads
 	Bool m_shadowMap;							// "-shadowmap": draw the casters into the sun's depth buffer as well
 	Bool m_shadowMapReport;				// "-shadowmapreport": log what ended up in that buffer, once a second
@@ -292,15 +295,17 @@ public:
 	Real m_unitReallyDamagedThresh;
 	Real m_groundStiffness;
 	Real m_structureStiffness;
-	Real m_gravity;	// acceleration due to gravity, in dist/frame^2
+	AccelerationPerFrame m_gravity;	// acceleration due to gravity, in dist/frame^2
 	Real m_stealthFriendlyOpacity;
-	UnsignedInt m_defaultOcclusionDelay;	///<time to delay building occlusion after object is created.
+	DurationFrames m_defaultOcclusionDelay;	///<time to delay building occlusion after object is created.
 
 	Bool m_preloadEverything;			///< Preload everything, everywhere (for debugging only)
 	Bool m_preloadReport;					///< dump a log of all W3D assets that are being preloaded.
 
 	Real m_partitionCellSize;
 
+	// read from retail GameData.ini and used by nothing: the rounds and seats are drawn under the
+	// health bar (Drawable::loadPips). Kept so that INI still parses.
 	Coord3D m_ammoPipWorldOffset;
 	Coord3D m_containerPipWorldOffset;
 	Coord2D m_ammoPipScreenOffset;
@@ -308,7 +313,7 @@ public:
 	Real m_ammoPipScaleFactor;
 	Real m_containerPipScaleFactor;
 
-	UnsignedInt m_historicDamageLimit;
+	DurationFrames m_historicDamageLimit;
 
 	//Settings for terrain tracks left by vehicles with treads or wheels
 	Int m_maxTerrainTracks; ///<maximum number of objects allowed to generate tracks.
@@ -478,6 +483,7 @@ public:
 	Int m_textureFilterMode;			///< 0 bilinear, 1 trilinear, 2 anisotropic
 	Int m_anisotropyLevel;				///< samples anisotropic filtering may take; 0 = whatever the card offers
 	Bool m_showNetBox;					///< the player's own switch for the top right info strip (InGameUI::drawHudOverlay)
+	Int m_minimapSize;					///< percent of its own size the radar is drawn at, growing up from the bar's corner (ControlBar::fitRadarToMap); 100 = as the bar has it
 	Bool m_showEmptyBuildingPips;		///< the row of empty slots over a building nobody is in
 	Bool m_workersReturnToSupply;		///< a worker that finishes a build job goes back to the dock it left
 	Bool m_archiveReplays;					///< keep a timestamped copy of every replay, instead of only the last one
@@ -500,7 +506,7 @@ public:
 	Int m_incomeSharing;						///< -incomesharing <n>: the lobby's income sharing, an IncomeSharing, for an -autoskirmish run
 	Int m_techRespawn;							///< -techrespawn <n>: the lobby's tech building respawn, in minutes, for an -autoskirmish run
 	Int m_supplyPileLimit;					///< -supplypilelimit <n>: the lobby's supply pile limit, in players a pile, for an -autoskirmish run
-	Bool m_turboMatch;							///< -turbomode: the lobby's turbo mode, for an -autoskirmish or -netgame run
+	Int m_autoSkirmishGameSpeedPercent;	///< -gamespeed <percent>: the skirmish lobby's game speed for an -autoskirmish run, PLAYER_GAME_SPEED_PERCENT_DEFAULT unless asked
 	Int m_superweapons;							///< -superweapons <n>: the lobby's superweapon rule, a SUPERWEAPONS_ mode, for an -autoskirmish run
 	Int m_startingCash;							///< -startingcash <n>: the lobby's starting cash for an -autoskirmish run (0 = DefaultStartingCash)
 	Int m_maxGameFrames;						///< -maxframes <n>: quit after n logic frames however the match is going (0 = no limit)
@@ -520,6 +526,7 @@ public:
 	Coord2D m_cameraLook;						///< where -camera pointed it
 	Int m_traceMoveID;							///< -tracemove [id]: log one movement line a frame for this object (0 = off, -1 = the first unit that gets blocked)
 	Real m_slowFrameMS;							///< -slowframe <ms>: a logic frame over this long logs its own breakdown (default 20)
+	Bool m_logicProfile;						///< -slowframe given: time every update module and script, log the module table every 600 frames
 	Int m_drawDelayMS;							///< -drawdelay <ms>: sleep this long in every client pass, a slow graphics card on demand (0 = off)
 	Int m_drawDelayJitterMS;				///< -drawdelay <ms> <jitter>: up to this much more, different every pass
 	Bool m_showLanes;							///< -showlanes: draw every moving unit's route, the lane it was handed and the offset it kept
@@ -656,7 +663,7 @@ public:
 
 	Real m_sellPercentage;						///< when objects are sold, you get this much of the cost it would take to build it back
 	Real m_baseRegenHealthPercentPerSecond;	///< auto healing for bases
-	UnsignedInt m_baseRegenDelay;			///< delay in frames we must be damage free before we can auto heal
+	DurationFrames m_baseRegenDelay;			///< delay in frames we must be damage free before we can auto heal
 
 #ifdef ALLOW_SURRENDER
 	Real m_prisonBountyMultiplier;		///< the cost of the unit is multiplied by this and given to the player when prisoners are returned to the a prison with KINDOF_COLLECTS_PRISON_BOUNTY
@@ -694,7 +701,7 @@ public:
 	Int m_powerBarYellowRange;						///< Red if consumption exceeds production, yellow if consumption this close but under, green if further under
 	Real m_displayGamma;									///<display gamma that's adjusted with "brightness" control on options screen.
 
-	UnsignedInt m_unlookPersistDuration;	///< How long after unlook until the sighting info executes the undo
+	DurationFrames m_unlookPersistDuration;	///< How long after unlook until the sighting info executes the undo
 
 	Bool m_shouldUpdateTGAToDDS;					///< Should we attempt to update old TGAs to DDS stuff on loadup?
   

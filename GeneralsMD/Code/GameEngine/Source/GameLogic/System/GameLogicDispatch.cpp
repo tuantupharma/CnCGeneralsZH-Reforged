@@ -103,6 +103,10 @@ static void considerBuilder( Object *candidate, BuilderPick *pick )
 		return;
 	if( !TheBuildAssistant->isPossibleToMakeUnit( candidate, pick->place ) )
 		return;
+	// the button the player pressed: a mission's script-only build or one an upgrade still locks is
+	// not on this builder's bar, so a forged or stale order cannot raise it
+	if( !TheBuildAssistant->offersPlayerBuildButton( candidate, pick->place ) )
+		return;
 
 	Real dx = candidate->getPosition()->x - pick->loc.x;
 	Real dy = candidate->getPosition()->y - pick->loc.y;
@@ -539,6 +543,102 @@ static void makeObjectHeroic( Object *obj, void *userData )
 }
 
 //-------------------------------------------------------------------------------------------------
+/** How long before its execution frame an order may have been clicked: the run-ahead, which a
+	* playable link keeps well under a second. */
+static const Int BLIND_ORDER_CLICK_WINDOW_FRAMES = LOGICFRAMES_PER_SECOND;
+
+/** Could the issuer have seen the target when the order was clicked?  The order executes a run-ahead
+	* after the click, and in that time the target can have walked out of sight.  So any cell the issuer
+	* has in sight within the distance the target covers in BLIND_ORDER_CLICK_WINDOW_FRAMES, plus a
+	* cell, counts as seen. */
+static Bool BlindOrder_targetWasInReach( const Object *target, Int playerIndex )
+{
+	Real speed = 0.0f;
+	const AIUpdateInterface *ai = target->getAI();
+	if( ai && ai->getCurLocomotor() )
+		speed = ai->getCurLocomotor()->getMaxSpeedForCondition( BODY_PRISTINE );		// distance a frame
+
+	const Real cellSize = ThePartitionManager->getCellSize();
+	const Real reach = cellSize + speed * (Real)BLIND_ORDER_CLICK_WINDOW_FRAMES;
+	const Int cells = (Int)ceilf( reach / cellSize );
+	Int cx, cy;
+	ThePartitionManager->worldToCell( target->getPosition()->x, target->getPosition()->y, &cx, &cy );
+	for( Int dy = -cells; dy <= cells; ++dy )
+	{
+		for( Int dx = -cells; dx <= cells; ++dx )
+		{
+			if( dx * dx + dy * dy > cells * cells )
+				continue;
+			if( ThePartitionManager->getShroudStatusForPlayer( playerIndex, cx + dx, cy + dy ) == CELLSHROUD_CLEAR )
+				return TRUE;
+		}
+	}
+	return FALSE;
+}
+
+//-------------------------------------------------------------------------------------------------
+/** The cheat witness's half of an order: one that names an enemy object the issuer could not have
+	* seen when clicking it.  The client draws an enemy only while it is in sight or, for a structure,
+	* remembered from the last time it was, so an honest click can only name one of those; a map hack
+	* draws the rest and its clicks name them too.
+	*
+	* Fogged ground is not enough.  A network match opens fogged for everyone, every cell already
+	* "seen", so the shroud alone (never seen) is never there to test: the first build of this read 0
+	* on an order at a tank parked beside the enemy's command centre, across a map nobody had scouted.
+	* What it asks is Object::isUnknownTo, the logic's own "neither in sight nor remembered" (ally
+	* sight and reveals included, a passenger never unknown), and then whether the target can have
+	* been in sight a run-ahead earlier.  Never getShroudedStatus, whose "ever seen" each machine's
+	* drawing notes differently.  Detection only: it decides nothing and is no part of the CRC.
+	* ponytail: a target with no sight anywhere near it, so the hack it catches shows armies and bases
+	* across the map, not a unit a screen past the edge of sight. */
+//-------------------------------------------------------------------------------------------------
+void GameLogic::witnessBlindOrder( const GameMessage *msg, const Player *issuer )
+{
+	Int targetArg;
+	switch( msg->getType() )
+	{
+		case GameMessage::MSG_DO_ATTACK_OBJECT:
+		case GameMessage::MSG_DO_FORCE_ATTACK_OBJECT:
+		case GameMessage::MSG_DO_GUARD_OBJECT:
+		case GameMessage::MSG_COMBATDROP_AT_OBJECT:		targetArg = 0; break;
+		case GameMessage::MSG_DO_WEAPON_AT_OBJECT:
+		case GameMessage::MSG_DO_SPECIAL_POWER_AT_OBJECT:
+		case GameMessage::MSG_ENTER:									targetArg = 1; break;
+		default:																			return;
+	}
+	if( msg->getArgumentCount() <= targetArg || msg->getArgumentDataType( targetArg ) != ARGUMENTDATATYPE_OBJECTID )
+		return;
+
+	const Object *target = findObjectByID( msg->getArgument( targetArg )->objectID );
+	// with no cells at all an object reads as unknown, which is no evidence of anything
+	if( target == NULL || target->friend_getPartitionData() == NULL
+			|| target->friend_getPartitionData()->friend_getCoiInUseCount() == 0 )
+		return;
+
+	const Int index = issuer->getPlayerIndex();
+	if( index < 0 || index >= MAX_PLAYER_COUNT || issuer->getRelationship( target->getTeam() ) != ENEMIES )
+		return;
+
+	// A tech or civilian building taken in the fog still shows its neutral face, there from the first
+	// frame, and an honest click on it names what is now an enemy's.
+	if( target->isKindOf( KINDOF_CAPTURABLE ) || target->isKindOf( KINDOF_TECH_BUILDING )
+			|| ( target->getContain() && target->getContain()->isGarrisonable() ) )
+		return;
+
+	if( target->isUnknownTo( index ) && !BlindOrder_targetWasInReach( target, index ) )
+	{
+		++m_blindOrders[ index ];
+		DEBUG_LOG(( "CHEATWITNESS: frame %d, player %d ordered %s at object %d, out of its sight\n", m_frame, index,
+			GameMessage::getCommandTypeAsAsciiString( msg->getType() ).str(), (Int)target->getID() ));
+	}
+}
+
+Int GameLogic::getBlindOrderCount( Int playerIndex ) const
+{
+	return ( playerIndex >= 0 && playerIndex < MAX_PLAYER_COUNT ) ? m_blindOrders[ playerIndex ] : 0;
+}
+
+//-------------------------------------------------------------------------------------------------
 /** This message handles dispatches object command messages to the
   * appropriate objects.
 	* @todo Rename this to "CommandProcessor", or similiar. */
@@ -631,6 +731,10 @@ void GameLogic::logicMessageDispatcher( GameMessage *msg, AIGroup *orderedGroup 
 	// the units it went to.  An order already coming round from the queue is not looked at again.
 	// See OrderQueue.h.
 	//
+	// counted once, when the player gives the order, never when the queue hands it on
+	if( !OrderQueue_isDispatching() )
+		witnessBlindOrder( msg, thisPlayer );
+
 	if( orderedGroup == NULL && msgType != GameMessage::MSG_QUEUE_NEXT_ORDER
 			&& thisPlayer->getOrderQueue()->takeMessage( msg, currentlySelectedGroup, thisPlayer ) )
 		return;		// the queue destroyed the group
@@ -669,7 +773,8 @@ void GameLogic::logicMessageDispatcher( GameMessage *msg, AIGroup *orderedGroup 
 			if ( msg->getArgumentCount() >= 3 )
 				rankPoints = msg->getArgument( 2 )->integer;
 			
-			if ( msg->getArgumentCount() >= 4 )
+			// 0 leaves the pace alone (a replay that recorded none)
+			if ( msg->getArgumentCount() >= 4 && msg->getArgument( 3 )->integer != 0 )
 			{
 				Int maxFPS = msg->getArgument( 3 )->integer;
 				if (maxFPS < 1 || maxFPS > 1000)
@@ -687,6 +792,15 @@ void GameLogic::logicMessageDispatcher( GameMessage *msg, AIGroup *orderedGroup 
 				 run once more on the freshly seeded stream - a draw a copy with -noshellmap, or a replay
 				 started from the command line, never made.  The recorder writes this same number. */
 			InitRandom( GetGameLogicRandomSeed() );
+
+			/* The game time a tick advances, for the whole match: before the map loads, since the map's
+				 objects read it from their first frame.  A start without the argument (the shell map, -file)
+				 plays the native speed, as does any percent that is not one of the player's. */
+			Int gameSpeedPercent = NATIVE_GAME_SPEED_PERCENT;
+			if ( msg->getArgumentCount() >= 5 && GameSpeed_isAllowed( msg->getArgument( 4 )->integer ) )
+				gameSpeedPercent = msg->getArgument( 4 )->integer;
+			GameSpeed_set( gameSpeedPercent );
+			DEBUG_LOG(("MSG_NEW_GAME: mode %d at game speed %d, %d ticks a game second\n", gameMode, gameSpeedPercent, (Int)LOGICFRAMES_PER_GAME_SECOND));
 
 			// prepare for new game
 			prepareNewGame( gameMode, diff, rankPoints );
@@ -2017,6 +2131,40 @@ void GameLogic::logicMessageDispatcher( GameMessage *msg, AIGroup *orderedGroup 
 		}  // end GameMessage::MSG_QUEUE_UNIT_CREATE
 
 		//-------------------------------------------------------------------------------------------------
+		// Group panel (fork): (Int template ID, Int squad 0-9).  No factory travels with it: the logic
+		// picks one among the sender's that can queue the unit now (Player::findFactoryForGroupUnit),
+		// and the unit joins that hotkey squad when it comes out.  A squad with nobody in it takes
+		// nothing.  Squad -1 is the command bar's unit tabs: no squad, the unit comes out to the
+		// factory's rally point as any other, and the factory with the shortest queue takes it.
+		// The arguments came over the network, so their shape is checked.
+		case GameMessage::MSG_QUEUE_UNIT_FOR_GROUP:
+		{
+			if( thisPlayer == NULL || msg->getArgumentCount() < 2
+					|| msg->getArgumentDataType( 0 ) != ARGUMENTDATATYPE_INTEGER
+					|| msg->getArgumentDataType( 1 ) != ARGUMENTDATATYPE_INTEGER )
+				break;
+
+			const ThingTemplate *whatToCreate = TheThingFactory->findByTemplateID( msg->getArgument( 0 )->integer );
+			const Int squad = msg->getArgument( 1 )->integer;
+			if( whatToCreate == NULL || whatToCreate->isKindOf( KINDOF_STRUCTURE )
+					|| ( squad != -1 && !isValidHotkeySquadIndex( squad ) ) )
+				break;
+
+			Coord3D centre;
+			if( squad != -1 && !thisPlayer->getHotkeySquadCentroid( squad, &centre ) )
+				break;
+
+			Object *factory = thisPlayer->findFactoryForGroupUnit( whatToCreate, squad != -1 ? &centre : NULL );
+			if( factory == NULL )
+				break;
+
+			ProductionUpdateInterface *pu = factory->getProductionUpdateInterface();
+			pu->queueCreateUnit( whatToCreate, pu->requestUniqueUnitID(), squad );
+			break;
+
+		}  // end GameMessage::MSG_QUEUE_UNIT_FOR_GROUP
+
+		//-------------------------------------------------------------------------------------------------
 		case GameMessage::MSG_CANCEL_UNIT_CREATE:
 		{
 			Object *producer = NULL;
@@ -2088,6 +2236,10 @@ void GameLogic::logicMessageDispatcher( GameMessage *msg, AIGroup *orderedGroup 
 		case GameMessage::MSG_DOZER_CONSTRUCT:
 		case GameMessage::MSG_DOZER_CONSTRUCT_LINE:
 		{
+			// shift on the placement: the builder goes when its list gets there (read before any break,
+			// so a refused placement does not leave the mark for the next message)
+			const Bool queued = thisPlayer->getOrderQueue()->takeNextOrderMode() != ORDER_QUEUE_NONE;
+
 			const ThingTemplate *place;
 			Coord3D loc;
 			Real angle;
@@ -2144,17 +2296,43 @@ void GameLogic::logicMessageDispatcher( GameMessage *msg, AIGroup *orderedGroup 
 			// third of a second apart and refusing an order for that would be a new bug.  The line
 			// build checks every tile after the first for itself (buildTiledLocations).
 			//
+			// The trainer's build anywhere asks only that it lands on the map and inside nothing else
+			const Bool anywhere = thisPlayer->hasCheat( CHEAT_BUILD_ANYWHERE );
 			if( TheBuildAssistant->isLocationLegalToBuild( &loc, place, angle,
-																										BuildAssistant::TERRAIN_RESTRICTIONS |
+																										( anywhere ? 0 : BuildAssistant::TERRAIN_RESTRICTIONS ) |
 																										BuildAssistant::NO_OBJECT_OVERLAP,
 																										constructorObject, NULL ) != LBC_OK )
 				break;
 
-			if( msg->getType() == GameMessage::MSG_DOZER_CONSTRUCT )
+			//
+			// and puts it up finished on the spot, paid for, the builder left where it stands: the
+			// computer player's instant structure (AIPlayer::buildStructureNow), in the side the
+			// builder's button names
+			//
+			if( anywhere && msg->getType() == GameMessage::MSG_DOZER_CONSTRUCT )
+			{
+				const ThingTemplate *what = TheBuildAssistant->findBuildButtonTemplate( constructorObject, place );
+				Object *site = TheBuildAssistant->buildObjectNow( NULL, what, &loc, angle, thisPlayer );
+				if( site )
+				{
+					thisPlayer->getMoney()->withdraw( what->calcCostToBuild( thisPlayer ) );
+					site->clearStatus( MAKE_OBJECT_STATUS_MASK2( OBJECT_STATUS_UNDER_CONSTRUCTION, OBJECT_STATUS_RECONSTRUCTING ) );
+					site->updateUpgradeModules();
+				}
+			}
+			else if( msg->getType() == GameMessage::MSG_DOZER_CONSTRUCT )
 			{
 
-				TheBuildAssistant->buildObjectNow( constructorObject, place, &loc, angle, 
-																					 constructorObject->getControllingPlayer() );
+				//
+				// With shift the plan still goes down and is paid for now, so the spot is held, but the
+				// builder is not taken off what it is doing: its order queue gets a step to go and put
+				// this one up, after whatever is on its list.  Several placed in a row are built one after
+				// the other in the order they were placed, instead of the newest pulling it away.
+				//
+				Object *site = TheBuildAssistant->buildObjectNow( constructorObject, place, &loc, angle,
+																													constructorObject->getControllingPlayer(), !queued );
+				if( queued && site != NULL && site->testStatus( OBJECT_STATUS_UNDER_CONSTRUCTION ) )
+					thisPlayer->getOrderQueue()->queueConstruction( site, constructorObject, thisPlayer );
 
 			}  // end if
 			else
@@ -2485,7 +2663,7 @@ void GameLogic::logicMessageDispatcher( GameMessage *msg, AIGroup *orderedGroup 
 				smoke->setFiniteSystemLifetime( SIGNAL_HALF_FRAMES );
 				smoke->setLifetimeRange( SIGNAL_HALF_FRAMES, SIGNAL_HALF_FRAMES );
 				// the template's second alpha key is its fade to nothing, timed for a five second puff
-				smoke->m_alphaKey[ 1 ].frame = SIGNAL_HALF_FRAMES;
+				smoke->m_alphaKey[ 1 ].frame.setRaw( ConvertFramesToRetail( SIGNAL_HALF_FRAMES ) );	// the template keeps retail frames
 				smoke->m_alphaKey[ 0 ].var.setRange( SIGNAL_SMOKE_ALPHA_MIN, SIGNAL_SMOKE_ALPHA_MAX );
 				smoke->setSizeMultiplier( SIGNAL_SMOKE_SIZE_SCALE );
 				smoke->setBurstCountMultiplier( SIGNAL_SMOKE_DENSITY_SCALE );
@@ -2494,7 +2672,8 @@ void GameLogic::logicMessageDispatcher( GameMessage *msg, AIGroup *orderedGroup 
 				TheInGameUI->addSignalMark( (SignalKind)kind, pos, clientPlayerColor( thisPlayer ), smoke->getSystemID() );
 			}
 
-			TheRadar->createEvent( &pos, look.radarEvent, SIGNAL_SECONDS );
+			// the signal's own mark on the radar: its types are borrowed, and a "defend" is no finished building
+			TheRadar->createEvent( &pos, look.radarEvent, SIGNAL_SECONDS, RADAR_MARK_SIGNAL );
 
 			UnicodeString announcement;
 			announcement.format( TheGameText->fetch( look.announcementLabel ), thisPlayer->getPlayerDisplayName().str() );
@@ -2553,7 +2732,15 @@ void GameLogic::logicMessageDispatcher( GameMessage *msg, AIGroup *orderedGroup 
 				case CHEAT_GOD_MODE:
 				case CHEAT_INSTANT_BUILD:
 				case CHEAT_ONE_HIT_KILL:
+				case CHEAT_BUILD_ANYWHERE:
 					thisPlayer->toggleCheat( kind );
+					break;
+
+				// a point in hand on the way in, so the general's button lights; purchases then spend none
+				case CHEAT_UNLIMITED_POINTS:
+					thisPlayer->toggleCheat( kind );
+					if( thisPlayer->hasCheat( kind ) && thisPlayer->getSciencePurchasePoints() < 1 )
+						thisPlayer->addSciencePurchasePoints( 1 );
 					break;
 
 				/* The logic half of takeControlOfPlayer, a message so the recording has it: the AIPlayer

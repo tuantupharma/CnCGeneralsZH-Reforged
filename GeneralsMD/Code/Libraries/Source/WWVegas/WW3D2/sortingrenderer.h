@@ -33,6 +33,7 @@ class SphereClass;
 class SortingRendererClass
 {
 	static bool _EnableTriangleDraw;
+	static bool _InsertEmissive;
 
 	static void Flush_Sorting_Pool();
 	static void Insert_To_Sorting_Pool(SortingNodeStruct* state);
@@ -56,13 +57,15 @@ public:
 	/// the Direct3D 11 backend adds after the shade (Direct3D11_Set_Smoke_Glow).  fire: a fire or
 	/// explosion system's quads, each particle's age and seed in v2 (Direct3D11_Set_Fire_Look).
 	/// emissive: quads that take no shadow and no smoke shade (Direct3D11_Set_Emissive).
+	/// hard_edge: quads whose soft particle fade is a plain depth test (SOFT_PARTICLE_SAMPLING).
 	static void Insert_Quads(
 		unsigned short quad_count,
 		unsigned short min_vertex_index,
 		unsigned short vertex_count,
 		bool glow = false,
 		bool fire = false,
-		bool emissive = false);
+		bool emissive = false,
+		bool hard_edge = false);
 
 	static void Insert_VolumeParticle(
 		const SphereClass& bounding_sphere,
@@ -123,6 +126,10 @@ public:
 	static unsigned _Group_Runs(const unsigned short* states, const SortTiles* tiles, unsigned count,
 		unsigned* order);
 
+	/// Triangles inserted while this is on take no shadow and no smoke shade, as emissive quads do
+	/// (Direct3D11_Set_Emissive); the node keeps it.  Turn it on only around the draws that want it
+	/// and off again: the building outlines (W3DWaypointBuffer::renderQueuedLines).
+	static void _Set_Insert_Emissive(bool emissive) { _InsertEmissive=emissive; }
 	static void _Enable_Triangle_Draw(bool enable) { _EnableTriangleDraw=enable; }
 	static bool _Is_Triangle_Draw_Enabled() { return _EnableTriangleDraw; }
 };
