@@ -1107,6 +1107,8 @@ void GameEngine::init( int argc, char *argv[] )
 
 		initSubsystem(TheWritableGlobalData, "TheWritableGlobalData", MSGNEW("GameEngineSubsystem") GlobalData(), &xferCRC, "Data\\INI\\Default\\GameData.ini", "Data\\INI\\GameData.ini");
 
+		ini.load( AsciiString( "Data\\INI\\Skirmish.ini" ), INI_LOAD_OVERWRITE, NULL );
+
 
 	#ifdef DUMP_PERF_STATS///////////////////////////////////////////////////////////////////////////
 	GetPrecisionTimer(&endTime64);//////////////////////////////////////////////////////////////////

@@ -579,6 +579,7 @@ static const INI::RealRange PARTITION_CELL_SIZE_RANGE = { 20.0f, 400.0f };
 	{ "BaseStatsDir",								INI::parseAsciiString,NULL,			offsetof( GlobalData, m_baseStatsDir ) },
 	{ "LocalMOTDPath",							INI::parseAsciiString,NULL,			offsetof( GlobalData, m_MOTDPath ) },
 	{ "ExtraLogging",								INI::parseBool,				NULL,			offsetof( GlobalData, m_extraLogging ) },
+	{ "AIUseGeneralSkill", INI::parseBool, NULL, offsetof( GlobalData, m_aiUseGeneralSkill ) },
 #endif
 
 	{ NULL,					NULL,						NULL,						0 }  // keep this last
@@ -759,6 +760,7 @@ GlobalData::GlobalData()
 	m_techRespawn = 0;							// a destroyed tech building stays destroyed unless -techrespawn asks
 	m_supplyPileLimit = 0;					// a supply pile takes any number of players unless -supplypilelimit asks
 	m_autoSkirmishGameSpeedPercent = PLAYER_GAME_SPEED_PERCENT_DEFAULT;	// the native tick unless -gamespeed asks
+	m_aiUseGeneralSkill = FALSE;	// AIUseGeneralSkill: off by default -> AI không dùng skill tướng
 	m_superweapons = 0;							// SUPERWEAPONS_ALLOW unless -superweapons asks
 	m_startingCash = 0;							// the INI's DefaultStartingCash unless -startingcash asks
 	m_autoSkirmishObserver = FALSE;

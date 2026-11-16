@@ -1,0 +1,5 @@
+; Zero Hour Reforged skirmish settings
+; AIUseGeneralSkill = yes/1  -> AI được dùng skill tướng (siêu vũ khí, special power, tia laser)
+; AIUseGeneralSkill = no/0   -> AI không dùng skill tướng (mặc định, đấu mặt bằng)
+[General]
+AIUseGeneralSkill = no

@@ -6313,8 +6313,8 @@ void AIPlayer::doTeamBuilding( void )
  */
 void AIPlayer::doUpgradesAndSkills( void )
 {
-	// Tắt mua skill của tướng (AI không sài skill tướng).
-	return;
+	if( !TheGlobalData->m_aiUseGeneralSkill )
+		return;	// AIUseGeneralSkill = no: AI không mua skill/talent của tướng
 
 	if (TheGameLogic->getFrame() < 2) {
 		// can't do updates on the first few frames
@@ -9125,6 +9125,9 @@ static const UnsignedInt SCRIPTLESS_SUPERWEAPON_SECONDS[ AISKILL_COUNT ] = { 180
 
 void AIPlayer::doSuperweapons( void )
 {
+	if( !TheGlobalData->m_aiUseGeneralSkill )
+		return;	// AIUseGeneralSkill = no: AI không xây/bắn siêu vũ khí từ trên trời
+
 	const Int phase = computeUpdatePhase( m_player->getPlayerIndex(), SUPERWEAPON_CHECK_RATE );
 	if( (TheGameLogic->getFrame() + phase) % SUPERWEAPON_CHECK_RATE != 0 )
 		return;
@@ -9478,6 +9481,9 @@ static void collectObjects( Object *obj, void *userData )
 
 void AIPlayer::doReadySpecialPowers( void )
 {
+	if( !TheGlobalData->m_aiUseGeneralSkill )
+		return;	// AIUseGeneralSkill = no: AI không bắn special power / tia laser tự động
+
 	const Int phase = computeUpdatePhase( m_player->getPlayerIndex(), SPECIAL_POWER_CHECK_RATE );
 	if( (TheGameLogic->getFrame() + phase) % SPECIAL_POWER_CHECK_RATE != 0 )
 		return;
